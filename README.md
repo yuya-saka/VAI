@@ -30,9 +30,9 @@
 - **Output:** 4領域別の確率マップおよび境界線ヒートマップ。
 
 ### 4. **Fracture Detection and Risk Evaluation（骨折検出とリスク評価）**(計画段階)
- - **Input:** 領域別マスク + 骨折検出結果。
- - **Process:** 横突孔領域内の皮質断裂（Cortical Discontinuity）を検知。
- - **Output:** VAIリスクの提示、およびCTA推奨アラートの出力。
+- **Input:** 領域別マスク + 骨折検出結果。
+- **Process:** 横突孔領域内の皮質断裂（Cortical Discontinuity）を検知。
+- **Output:** VAIリスクの提示、およびCTA推奨アラートの出力。
 
 ## 各プロジェクトの概要
 

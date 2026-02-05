@@ -64,6 +64,7 @@ logs/
 dataset/
 segmentations/
 annotation_data/
+tests/
 
 # Temporary directory for Claude Code
 .tmp/
