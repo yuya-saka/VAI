@@ -15,24 +15,24 @@
 入力データからリスク判定に至るまで、解剖学的整合性を数学的に保証しつつ、以下の4ステップを計画中。
 
 1. **Preprocessing（前処理）**
-    - **Input:** 3D CT画像データ
-    - **Process:** TotalSegmentatorを用いて頸椎（C1-C7）を抽出し、個別椎体の3Dマスクを生成。
-    - **Output:** 椎体別3Dボリュームおよびマスク。
+- **Input:** 3D CT画像データ
+- **Process:** TotalSegmentatorを用いて頸椎（C1-C7）を抽出し、個別椎体の3Dマスクを生成。
+- **Output:** 椎体別3Dボリュームおよびマスク。
 
 2. **Axis Correction（座標軸補正とスライス画像生成）**
-    - **Input:** 椎体別3Dボリューム。
-    - **Process:** **脊柱管（Spinal Canal）および左右の横突孔（Transverse Foramen）を幾何学的ランドマーク**として検出し、手動Re-slicingを実行。生理的前弯による傾きを排し、解剖学的軸に垂直な断面を再構成する。
-    - **Output:** 軸補正済み2Dスライス群。
+- **Input:** 椎体別3Dボリューム。
+- **Process:** **脊柱管（Spinal Canal）および左右の横突孔（Transverse Foramen）を幾何学的ランドマーク**として検出し、手動Re-slicingを実行。生理的前弯による傾きを排し、解剖学的軸に垂直な断面を再構成する。
+- **Output:** 軸補正済み2Dスライス群。
 
 3. **Region Segmentation（領域分割）**
-    - **Input:** 軸補正済み2Dスライス + 椎体マスク。
-    - **Process:** 独自開発の「ヒートマップ回帰モデル」を適用。
-    - **Output:** 4領域別の確率マップおよび境界線ヒートマップ。
+- **Input:** 軸補正済み2Dスライス + 椎体マスク。
+- **Process:** 独自開発の「ヒートマップ回帰モデル」を適用。
+- **Output:** 4領域別の確率マップおよび境界線ヒートマップ。
 
 4. **Fracture Detection and Risk Evaluation（骨折検出とリスク評価）**(計画段階)
-    - **Input:** 領域別マスク + 骨折検出結果。
-    - **Process:** 横突孔領域内の皮質断裂（Cortical Discontinuity）を検知。
-    - **Output:** VAIリスクの提示、およびCTA推奨アラートの出力。
+ - **Input:** 領域別マスク + 骨折検出結果。
+ - **Process:** 横突孔領域内の皮質断裂（Cortical Discontinuity）を検知。
+ - **Output:** VAIリスクの提示、およびCTA推奨アラートの出力。
 
 ## 各プロジェクトの概要
 
