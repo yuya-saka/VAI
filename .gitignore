@@ -69,6 +69,7 @@ tests/
 # Temporary directory for Claude Code
 .tmp/
 .envrc
+.ruff_cache/
 
 # 無視するもの
 *.python-version
