@@ -14,7 +14,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import yaml
-from line_detection_moments import predict_lines_and_eval_test
+from . import line_losses, line_metrics
+from .line_detection import predict_lines_and_eval_test
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 
@@ -376,6 +377,14 @@ class PngLineDataset(Dataset):
             hms.append(self._heatmap_from_polyline(it["lines"][k]))
         hms = np.stack(hms, 0).astype(np.float32)  # (4,H,W)
 
+        # NEW: Extract GT line params (φ, ρ)
+        gt_line_params = []
+        for k in ["line_1", "line_2", "line_3", "line_4"]:
+            polyline = it["lines"][k]
+            phi, rho = line_losses.extract_gt_line_params(polyline, self.image_size)
+            gt_line_params.append([phi, rho])
+        gt_line_params = np.array(gt_line_params, dtype=np.float32)  # (4, 2)
+
         # オンライン拡張（訓練時のみ）
         if self.transform is not None:
             out = self.transform(
@@ -418,6 +427,7 @@ class PngLineDataset(Dataset):
         return {
             "image": torch.from_numpy(x),
             "heatmaps": torch.from_numpy(hms),
+            "line_params_gt": torch.from_numpy(gt_line_params),  # NEW: (4, 2)
             "sample": it["sample"],
             "vertebra": it["vertebra"],
             "slice_idx": it["slice_idx"],
@@ -525,7 +535,7 @@ def bg_spill(pred, gt, gt_bg=0.05, pred_thr=0.1):
 
 
 @torch.no_grad()
-def evaluate(model, loader, device):
+def evaluate(model, loader, device, image_size=224):
     model.eval()
     mse_sum = 0.0
     n = 0
@@ -536,6 +546,10 @@ def evaluate(model, loader, device):
     spills = []
     succ10 = []
 
+    # NEW: Line metrics
+    angle_errors = []
+    rho_errors = []
+
     # 椎体ごとの統計用辞書を追加
     vertebrae = ["C1", "C2", "C3", "C4", "C5", "C6", "C7"]
     per_vertebra = {v: {"peak_dists": [], "dices": [], "succ10": []} for v in vertebrae}
@@ -543,6 +557,7 @@ def evaluate(model, loader, device):
     for batch in loader:
         x = batch["image"].to(device).float()
         gt = batch["heatmaps"].to(device).float()
+        gt_params = batch.get("line_params_gt")  # NEW: Get GT line params
 
         pred = torch.sigmoid(model(x))
 
@@ -574,6 +589,27 @@ def evaluate(model, loader, device):
                     per_vertebra[v_name]["dices"].append(dice_val)
                     per_vertebra[v_name]["succ10"].append(1.0 if pd <= 10.0 else 0.0)
 
+        # NEW: Compute line metrics
+        if gt_params is not None:
+            gt_params = gt_params.to(device).float()
+            pred_params, confidence = line_losses.extract_pred_line_params_batch(
+                pred, image_size
+            )
+
+            gt_valid = ~torch.isnan(gt_params).any(dim=-1)
+            pred_valid = ~torch.isnan(pred_params).any(dim=-1)
+            valid_mask = gt_valid & pred_valid
+
+            angle_err = line_metrics.compute_angle_error(
+                pred_params, gt_params, valid_mask
+            )
+            rho_err = line_metrics.compute_rho_error(
+                pred_params, gt_params, image_size, valid_mask
+            )
+
+            angle_errors.append(angle_err)
+            rho_errors.append(rho_err)
+
     # 椎体ごとの統計を計算
     per_vert_stats = {}
     for v, vals in per_vertebra.items():
@@ -585,7 +621,7 @@ def evaluate(model, loader, device):
                 "n_samples": len(vals["peak_dists"]) // 4,  # 4チャンネル分
             }
 
-    return {
+    metrics = {
         "val_loss_mse": mse_sum / max(1, n),
         "peak_dist_mean": float(np.nanmean(peak_dists)),
         "softarg_dist_mean": float(np.nanmean(soft_dists)),
@@ -594,6 +630,13 @@ def evaluate(model, loader, device):
         "peak_success@10px": float(np.nanmean(succ10)),
         "per_vertebra": per_vert_stats,  # 追加
     }
+
+    # NEW: Add line metrics if available
+    if angle_errors:
+        metrics["angle_error_deg"] = float(np.nanmean(angle_errors))
+        metrics["rho_error_px"] = float(np.nanmean(rho_errors))
+
+    return metrics
 
 
 # -------------------------
@@ -792,10 +835,20 @@ def run_training_loop(
     """
     tr_cfg = cfg.get("training", {})
     eval_cfg = cfg.get("evaluation", {})
+    loss_cfg = cfg.get("loss", {})  # NEW
 
     epochs = int(tr_cfg.get("epochs", 20))
     es_pat = int(tr_cfg.get("early_stopping_patience", 20))
     grad_clip = float(tr_cfg.get("grad_clip", 1.0))
+    image_size = int(cfg.get("data", {}).get("image_size", 224))  # NEW
+
+    # NEW: Line loss configuration
+    use_angle_loss = loss_cfg.get("use_angle_loss", False)
+    use_rho_loss = loss_cfg.get("use_rho_loss", False)
+    lambda_theta = float(loss_cfg.get("lambda_theta", 0.1))
+    lambda_rho = float(loss_cfg.get("lambda_rho", 0.05))
+    warmup_epochs = int(loss_cfg.get("warmup_epochs", 10))
+    warmup_mode = loss_cfg.get("warmup_mode", "linear")
 
     best_val = float("inf")
     no_improve = 0
@@ -811,12 +864,36 @@ def run_training_loop(
         loss_sum = 0.0
         steps = 0
 
+        # NEW: Compute warmup weight
+        warmup_weight = line_losses.get_warmup_weight(ep, warmup_epochs, warmup_mode)
+
         for batch in train_loader:
             x = batch["image"].to(device).float()
             gt = batch["heatmaps"].to(device).float()
+            gt_params = batch.get("line_params_gt")  # NEW
 
             pred = torch.sigmoid(model(x))
-            loss = F.mse_loss(pred, gt, reduction="mean")
+
+            # MSE loss
+            loss_mse = F.mse_loss(pred, gt, reduction="mean")
+
+            # NEW: Line losses
+            if (use_angle_loss or use_rho_loss) and gt_params is not None:
+                gt_params = gt_params.to(device).float()
+                line_loss_dict = line_losses.compute_line_loss(
+                    pred,
+                    gt_params,
+                    image_size,
+                    lambda_theta,
+                    lambda_rho,
+                    use_angle_loss,
+                    use_rho_loss,
+                )
+                # Combined loss
+                loss = loss_mse + warmup_weight * line_loss_dict["total"]
+            else:
+                # MSE only
+                loss = loss_mse
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -830,16 +907,16 @@ def run_training_loop(
 
         # 評価
         if ep % mfreq == 0:
-            val_metrics = evaluate(model, val_loader, device)
+            val_metrics = evaluate(model, val_loader, device, image_size)
         else:
             # val_mseは最低限earlystop/schedulerに必要なので毎エポック計算
-            val_metrics = evaluate(model, val_loader, device)
+            val_metrics = evaluate(model, val_loader, device, image_size)
 
         # validation lossに基づいてスケジューラを更新
         scheduler.step(val_metrics["val_loss_mse"])
 
         cur_lr = opt.param_groups[0]["lr"]
-        print(
+        log_str = (
             f"[EPOCH {ep:03d}/{epochs}] lr={cur_lr:.2e} "
             f"train_mse={train_loss:.6f}  "
             f"val_mse={val_metrics['val_loss_mse']:.6f}  "
@@ -847,8 +924,17 @@ def run_training_loop(
             f"dice={val_metrics['dice_top2pct_mean']:.3f}  "
             f"spill={val_metrics['bg_spill_mean']:.3f}  "
             f"succ10={val_metrics['peak_success@10px']:.3f}  "
-            f"time={time.time() - t0:.1f}s"
         )
+
+        # NEW: Add line metrics if available
+        if "angle_error_deg" in val_metrics:
+            log_str += (
+                f"angle={val_metrics['angle_error_deg']:.2f}°  "
+                f"rho={val_metrics['rho_error_px']:.2f}px  "
+            )
+
+        log_str += f"time={time.time() - t0:.1f}s"
+        print(log_str)
 
         # val_mseによる早期停止
         if val_metrics["val_loss_mse"] < best_val - 1e-8:
@@ -942,11 +1028,12 @@ def train_one_fold(cfg):
         out_dir=out_dir,
     )
 
-    print("[LINE TEST] centroid_dist_px_mean =", line_summary["centroid_dist_px_mean"])
-    print("[LINE TEST] angle_diff_deg_mean   =", line_summary["angle_diff_deg_mean"])
+    print("[LINE TEST] angle_error_deg_mean =", line_summary["angle_error_deg_mean"])
+    print("[LINE TEST] rho_error_px_mean    =", line_summary["rho_error_px_mean"])
+    print("[LINE TEST] perp_dist_px_mean    =", line_summary["perpendicular_dist_px_mean"])
     for k, v in line_summary["per_channel"].items():
         print(
-            f"[LINE TEST] {k}: cd={v['centroid_dist_px_mean']:.3f}px  ad={v['angle_diff_deg_mean']:.3f}deg  n={v['n']}"
+            f"[LINE TEST] {k}: angle={v['angle_error_deg_mean']:.3f}deg  rho={v['rho_error_px_mean']:.3f}px  perp={v['perpendicular_dist_px_mean']:.3f}px  n={v['n']}"
         )
     print("[LINE TEST] saved to:", line_summary["out_dir"])
 
@@ -1014,8 +1101,9 @@ def train_one_fold(cfg):
         "test_dice_top2pct_mean": test_metrics["dice_top2pct_mean"],
         "test_bg_spill_mean": test_metrics["bg_spill_mean"],
         "test_peak_success@10px": test_metrics["peak_success@10px"],
-        "line_centroid_dist_px_mean": line_summary["centroid_dist_px_mean"],
-        "line_angle_diff_deg_mean": line_summary["angle_diff_deg_mean"],
+        "line_angle_error_deg_mean": line_summary["angle_error_deg_mean"],
+        "line_rho_error_px_mean": line_summary["rho_error_px_mean"],
+        "line_perpendicular_dist_px_mean": line_summary["perpendicular_dist_px_mean"],
         "per_vertebra": test_metrics.get("per_vertebra", {}),  # 追加
     }
 

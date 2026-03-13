@@ -25,6 +25,7 @@
 |---------|---------|-------|
 | Provider fallback wrapper | Rate-limit resilience across Claude/Gemini | Centralized error parsing, retry, and provider switch |
 | Canonical conversation store | Preserve context across provider switches | Single source of truth (history + system prompt + tool logs) |
+| Heatmap-moment line geometry loss | Add geometric supervision for line detection | Normal-form (phi, rho) from GT endpoints and heatmap moments; sign alignment; staged warmup |
 
 ### Libraries & Roles
 
@@ -89,3 +90,4 @@
 | 2026-02-18 | Recorded decision to align angle evaluation methods and added TODOs/open questions for line-angle analysis |
 | 2026-03-04 | Planned refactor of training/evaluation pipeline and comment language normalization |
 | 2026-03-04 | Added concrete refactor TODOs for train_heat2.py decomposition and eval utilities |
+| 2026-03-10 | Added plan pattern for heatmap-moment line geometry loss (phi, rho) with sign alignment and warmup |

@@ -10,7 +10,8 @@ from datetime import datetime
 from pathlib import Path
 
 # train_heat.pyから必要な関数をインポート
-from train_heat import (
+# UPDATED: Moved to line-only/train_heat.py
+from line_only.train_heat import (
     load_config,
     set_seed,
     train_one_fold,
