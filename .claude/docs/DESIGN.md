@@ -50,6 +50,8 @@
 | Align angle evaluation by using the same estimator on GT and predictions; default to heatmap-moment angle for both and keep polyline PCA as an oracle metric | Avoids systematic bias from representation mismatch and separates estimator error from model error | Compare raw polyline PCA vs predicted heatmap moments | 2026-02-18 |
 | Refactor training/evaluation into smaller, single-purpose functions (data split/load, model/opt setup, train loop, eval metrics, visualization) | Improve readability, testability, and reduce regression risk during future changes | Keep monolithic functions; split only by file | 2026-03-04 |
 | Minimal line-eval reporting: angle_error_deg + rho_error_px as core, keep perpendicular_dist_px for interpretability, and one heatmap peak metric (e.g., peak_dist) for debugging | Keeps task metrics primary while preserving a light diagnostic signal for heatmap quality | Drop all heatmap metrics; report only angle/rho | 2026-03-16 |
+| Set Gaussian heatmap sigma based on output resolution and annotation uncertainty; start with sigma ≈ 2–3 px on the output map (scale by stride), and ensure L^2/12 ≫ sigma^2 for stable moment-based angle; consider anisotropic sigma (smaller perpendicular) if angle is unstable | Balances training stability vs geometric precision for moment-based line estimation | Fixed sigma without scaling; isotropic-only kernels | 2026-03-16 |
+| Default to no hard thresholding for moment-based line estimation; if background noise dominates, prefer soft weighting or percentile-based gating to suppress low-confidence regions while preserving Gaussian tails | Hard thresholding can bias centroid/covariance and increase angle jitter when signal is blurred or low-SNR | Always-threshold; binary mask moments | 2026-03-16 |
 
 ## TODO
 
@@ -93,4 +95,4 @@
 | 2026-03-04 | Planned refactor of training/evaluation pipeline and comment language normalization |
 | 2026-03-04 | Added concrete refactor TODOs for train_heat2.py decomposition and eval utilities |
 | 2026-03-10 | Added plan pattern for heatmap-moment line geometry loss (phi, rho) with sign alignment and warmup |
-| 2026-03-16 | Recorded minimal line-eval metric recommendation (angle/rho core + perpendicular distance + one heatmap diagnostic) |
+| 2026-03-16 | Recorded minimal line-eval metric recommendation (angle/rho core + perpendicular distance + one heatmap diagnostic); added sigma selection guidance for heatmap regression |

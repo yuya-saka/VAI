@@ -36,9 +36,9 @@ def parse_args():
     return parser.parse_args()
 
 
-def save_summary(all_results: dict, cfg: dict, output_path: Path):
-    """Save summary of all fold results and compute averages"""
-    # Compute averages for key metrics
+def save_summary(all_results: dict, output_path: Path):
+    """全Fold結果のサマリーを保存し、平均値を計算"""
+    # 主要メトリクスの平均値を計算
     metric_keys = [
         "test_mse",
         "test_peak_dist_mean",
@@ -130,7 +130,7 @@ def main():
         summary_path = ckpt_dir / "all_vertebrae_summary.json"
     else:
         summary_path = ckpt_dir / "all_folds_summary.json"
-    summary = save_summary(all_results, cfg, summary_path)
+    summary = save_summary(all_results, summary_path)
 
     # Display final results
     print(f"\n{'=' * 70}")

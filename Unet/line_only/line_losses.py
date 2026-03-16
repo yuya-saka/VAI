@@ -1,4 +1,4 @@
-"""Line losses and parameter extraction for geometric line constraints."""
+"""直線の幾何学的制約のための損失関数とパラメータ抽出"""
 
 import math
 
@@ -8,58 +8,58 @@ import torch.nn.functional as F
 
 
 # -------------------------
-# GT Line Parameter Extraction
+# GT 直線パラメータ抽出
 # -------------------------
 def extract_gt_line_params(polyline_points, image_size=224):
     """
-    Extract (φ, ρ) from GT polyline annotation.
+    GT折れ線アノテーションから (φ, ρ) を抽出
 
-    Args:
-        polyline_points: List of [x, y] points defining the line (at least 2)
-        image_size: Image dimension (assumes square)
+    引数:
+        polyline_points: 直線を定義する [x, y] 点のリスト（最低2点）
+        image_size: 画像の次元（正方形を仮定）
 
-    Returns:
-        (phi_rad, rho_normalized) or (nan, nan) if invalid
+    戻り値:
+        (phi_rad, rho_normalized) または無効な場合は (nan, nan)
 
-    Coordinate system:
-        - Origin: Image center (image_size/2, image_size/2)
-        - x-axis: Column direction (left to right)
-        - y-axis: Row direction (top to bottom)
-        - φ: Angle of normal vector [0, π)
-        - ρ: Signed distance from origin, normalized by diagonal D
+    座標系:
+        - 原点: 画像中心 (image_size/2, image_size/2)
+        - x軸: 列方向（左から右）
+        - y軸: 行方向（上から下）
+        - φ: 法線ベクトルの角度 [0, π)
+        - ρ: 原点からの符号付き距離、対角線Dで正規化
     """
     if polyline_points is None or len(polyline_points) < 2:
         return float("nan"), float("nan")
 
-    # Get endpoints
+    # 端点を取得
     p1 = np.array(polyline_points[0], dtype=np.float64)
     p2 = np.array(polyline_points[-1], dtype=np.float64)
 
-    # Convert to center coordinates
+    # 中心座標系に変換
     center = image_size / 2.0
     p1_c = p1 - center
     p2_c = p2 - center
 
-    # Line direction vector
+    # 直線の方向ベクトル
     direction = p2_c - p1_c
     norm_dir = np.linalg.norm(direction)
     if norm_dir < 1e-6:
         return float("nan"), float("nan")
     direction = direction / norm_dir
 
-    # Normal vector (90° CCW rotation)
+    # 法線ベクトル（90度反時計回りに回転）
     normal = np.array([-direction[1], direction[0]], dtype=np.float64)
 
-    # Ensure φ in [0, π)
+    # φ を [0, π) に制限
     if normal[1] < 0 or (normal[1] == 0 and normal[0] < 0):
         normal = -normal
 
-    # Extract φ and ρ
+    # φ と ρ を抽出
     phi = np.arctan2(normal[1], normal[0])
     midpoint = (p1_c + p2_c) / 2.0
     rho = np.dot(normal, midpoint)
 
-    # Normalize ρ
+    # ρ を正規化
     D = np.sqrt(image_size**2 + image_size**2)
     rho_norm = rho / D
 
@@ -67,32 +67,32 @@ def extract_gt_line_params(polyline_points, image_size=224):
 
 
 # -------------------------
-# Pred Line Parameter Extraction (Codex-Optimized)
+# 予測直線パラメータ抽出（Codex最適化版）
 # -------------------------
 def extract_pred_line_params_batch(heatmaps, image_size=224, min_mass=1e-6):
     """
-    Extract (φ, ρ) from predicted heatmaps using moments method.
+    モーメント法を用いて予測ヒートマップから (φ, ρ) を抽出
 
-    Key improvements from Codex review:
-    - Use MAXIMUM eigenvalue eigenvector for line direction
-    - Float64 precision for covariance
-    - Regularization for stability
-    - Confidence-based masking
+    Codexレビューによる主要改善点:
+    - 直線方向には最大固有値の固有ベクトルを使用
+    - 共分散行列にはFloat64精度
+    - 安定性のための正則化
+    - 信頼度ベースのマスキング
 
-    Args:
-        heatmaps: (B, 4, H, W) predicted heatmaps (after sigmoid)
-        image_size: Image dimension
-        min_mass: Minimum heatmap mass threshold
+    引数:
+        heatmaps: (B, 4, H, W) 予測ヒートマップ（sigmoid後）
+        image_size: 画像の次元
+        min_mass: ヒートマップ質量の最小閾値
 
-    Returns:
-        pred_params: (B, 4, 2) tensor of (phi_rad, rho_normalized)
-        confidence: (B, 4) tensor of eigenvalue ratio
-        Invalid lines marked with NaN
+    戻り値:
+        pred_params: (B, 4, 2) (phi_rad, rho_normalized) のテンソル
+        confidence: (B, 4) 固有値比のテンソル
+        無効な直線はNaNでマーク
     """
     B, C, H, W = heatmaps.shape
     device = heatmaps.device
 
-    # Coordinate grids (center origin)
+    # 座標グリッド（中心原点）
     y_grid = torch.arange(H, device=device, dtype=torch.float32) - H / 2.0
     x_grid = torch.arange(W, device=device, dtype=torch.float32) - W / 2.0
     Y, X = torch.meshgrid(y_grid, x_grid, indexing="ij")
@@ -106,17 +106,17 @@ def extract_pred_line_params_batch(heatmaps, image_size=224, min_mass=1e-6):
             hm = heatmaps[b, c]
             M00 = hm.sum()
 
-            # Guard: Skip if low mass
+            # ガード: 質量が小さい場合はスキップ
             if M00 < min_mass:
                 output[b, c] = float("nan")
                 confidence[b, c] = 0.0
                 continue
 
-            # Weighted centroid
+            # 重み付き重心
             cx = (hm * X).sum() / M00
             cy = (hm * Y).sum() / M00
 
-            # Covariance (FLOAT64 for stability)
+            # 共分散（安定性のためFLOAT64）
             dx = (X - cx).double()
             dy = (Y - cy).double()
             hm_d = hm.double()
@@ -125,35 +125,35 @@ def extract_pred_line_params_batch(heatmaps, image_size=224, min_mass=1e-6):
             mu02 = (hm_d * dy * dy).sum() / M00
             mu11 = (hm_d * dx * dy).sum() / M00
 
-            # Regularization
+            # 正則化
             eps_reg = 1e-6
             mu20 = mu20 + eps_reg
             mu02 = mu02 + eps_reg
 
-            # Eigenvalues
+            # 固有値
             trace = mu20 + mu02
             det = mu20 * mu02 - mu11 * mu11
             discriminant = torch.clamp(trace * trace - 4 * det, min=0.0)
             sqrt_disc = torch.sqrt(discriminant)
 
-            lambda1 = (trace + sqrt_disc) / 2  # Larger (line direction)
-            lambda2 = (trace - sqrt_disc) / 2  # Smaller
+            lambda1 = (trace + sqrt_disc) / 2  # 大きい方（直線方向）
+            lambda2 = (trace - sqrt_disc) / 2  # 小さい方
 
-            # Confidence: eigenvalue ratio
+            # 信頼度: 固有値比
             if lambda1 > 1e-8:
                 conf = 1.0 - lambda2 / lambda1
-                confidence[b, c] = conf  # Keep as tensor for gradient flow
+                confidence[b, c] = conf  # 勾配フローのためテンソルのまま
             else:
                 output[b, c] = float("nan")
                 confidence[b, c] = 0.0
                 continue
 
-            # Line direction: eigenvector of MAXIMUM eigenvalue
+            # 直線方向: 最大固有値の固有ベクトル
             if abs(mu11) > 1e-8:
                 dir_x = mu11
                 dir_y = lambda1 - mu20
             else:
-                # Axis-aligned (use tensor for consistency)
+                # 軸に平行（一貫性のためテンソルを使用）
                 if mu20 > mu02:
                     dir_x = torch.tensor(1.0, dtype=mu20.dtype, device=device)
                     dir_y = torch.tensor(0.0, dtype=mu20.dtype, device=device)
@@ -161,20 +161,20 @@ def extract_pred_line_params_batch(heatmaps, image_size=224, min_mass=1e-6):
                     dir_x = torch.tensor(0.0, dtype=mu20.dtype, device=device)
                     dir_y = torch.tensor(1.0, dtype=mu20.dtype, device=device)
 
-            # Normalize direction
+            # 方向ベクトルを正規化
             dir_norm = torch.sqrt(dir_x * dir_x + dir_y * dir_y)
             dir_x = dir_x / (dir_norm + 1e-10)
             dir_y = dir_y / (dir_norm + 1e-10)
 
-            # Normal: 90° CCW rotation
+            # 法線: 90度反時計回りに回転
             nx = -dir_y
             ny = dir_x
 
-            # Ensure φ in [0, π)
+            # φ を [0, π) に制限
             if ny < 0 or (ny == 0 and nx < 0):
                 nx, ny = -nx, -ny
 
-            # Compute φ and ρ
+            # φ と ρ を計算
             phi = torch.atan2(ny, nx)
             rho = nx * cx + ny * cy
             rho_norm = rho / D
@@ -186,39 +186,39 @@ def extract_pred_line_params_batch(heatmaps, image_size=224, min_mass=1e-6):
 
 
 # -------------------------
-# Loss Functions (Codex-Optimized)
+# 損失関数（Codex最適化版）
 # -------------------------
 def angle_loss(pred_params, gt_params, confidence, valid_mask):
     """
-    Angle loss: 1 - |n_pred · n_gt|
+    角度損失: 1 - |n_pred · n_gt|
 
-    More efficient than 1 - |cos(φ_pred - φ_gt)| and avoids atan2 gradients.
+    1 - |cos(φ_pred - φ_gt)| より効率的で、atan2の勾配を回避
 
-    Args:
-        pred_params: (B, 4, 2) predicted (phi, rho)
+    引数:
+        pred_params: (B, 4, 2) 予測された (phi, rho)
         gt_params: (B, 4, 2) GT (phi, rho)
-        confidence: (B, 4) confidence weights
-        valid_mask: (B, 4) boolean mask
+        confidence: (B, 4) 信頼度の重み
+        valid_mask: (B, 4) ブール値マスク
 
-    Returns:
-        Scalar loss
+    戻り値:
+        スカラー損失
     """
     pred_phi = pred_params[..., 0]
     gt_phi = gt_params[..., 0]
 
-    # Compute normal vectors
+    # 法線ベクトルを計算
     pred_nx = torch.cos(pred_phi)
     pred_ny = torch.sin(pred_phi)
     gt_nx = torch.cos(gt_phi)
     gt_ny = torch.sin(gt_phi)
 
-    # Inner product
+    # 内積
     dot = pred_nx * gt_nx + pred_ny * gt_ny
 
-    # Loss: 1 - |dot|
+    # 損失: 1 - |dot|
     loss = 1.0 - torch.abs(dot)
 
-    # Weight by confidence and validity
+    # 信頼度と有効性で重み付け
     weights = confidence * valid_mask.float()
     weighted_loss = loss * weights
 
@@ -227,28 +227,28 @@ def angle_loss(pred_params, gt_params, confidence, valid_mask):
 
 def rho_loss(pred_params, gt_params, confidence, valid_mask):
     """
-    Rho loss: min(|ρ_p - ρ_g|, |ρ_p + ρ_g|)
+    Rho損失: min(|ρ_p - ρ_g|, |ρ_p + ρ_g|)
 
-    Sign-invariant to handle (φ, ρ) ≡ (φ+π, -ρ) ambiguity.
-    Uses smooth min for differentiability.
+    (φ, ρ) ≡ (φ+π, -ρ) の曖昧性を扱うための符号不変
+    微分可能性のためにsmooth minを使用
 
-    Args:
-        pred_params: (B, 4, 2) predicted (phi, rho)
+    引数:
+        pred_params: (B, 4, 2) 予測された (phi, rho)
         gt_params: (B, 4, 2) GT (phi, rho)
-        confidence: (B, 4) confidence weights
-        valid_mask: (B, 4) boolean mask
+        confidence: (B, 4) 信頼度の重み
+        valid_mask: (B, 4) ブール値マスク
 
-    Returns:
-        Scalar loss
+    戻り値:
+        スカラー損失
     """
     pred_rho = pred_params[..., 1]
     gt_rho = gt_params[..., 1]
 
-    # Two possible errors
+    # 2つの可能性のある誤差
     err1 = torch.abs(pred_rho - gt_rho)
     err2 = torch.abs(pred_rho + gt_rho)
 
-    # Smooth minimum (differentiable)
+    # smooth最小値（微分可能）
     alpha = 10.0
     exp1 = torch.exp(-alpha * err1)
     exp2 = torch.exp(-alpha * err2)
@@ -257,7 +257,7 @@ def rho_loss(pred_params, gt_params, confidence, valid_mask):
     # SmoothL1
     loss = F.smooth_l1_loss(loss, torch.zeros_like(loss), reduction="none")
 
-    # Weight by confidence and validity
+    # 信頼度と有効性で重み付け
     weights = confidence * valid_mask.float()
     weighted_loss = loss * weights
 
@@ -275,27 +275,27 @@ def compute_line_loss(
     min_confidence=0.3,
 ):
     """
-    Combined line loss with confidence-based masking.
+    信頼度ベースのマスキングを用いた統合直線損失
 
-    Args:
-        pred_heatmaps: (B, 4, H, W) predicted heatmaps after sigmoid
+    引数:
+        pred_heatmaps: (B, 4, H, W) sigmoid後の予測ヒートマップ
         gt_line_params: (B, 4, 2) GT (phi, rho)
-        image_size: Image size
-        lambda_theta: Weight for angle loss
-        lambda_rho: Weight for rho loss
-        use_angle: Enable angle loss
-        use_rho: Enable rho loss
-        min_confidence: Minimum eigenvalue ratio for loss computation
+        image_size: 画像サイズ
+        lambda_theta: 角度損失の重み
+        lambda_rho: rho損失の重み
+        use_angle: 角度損失を有効化
+        use_rho: rho損失を有効化
+        min_confidence: 損失計算のための最小固有値比
 
-    Returns:
-        Dictionary with keys:
-            'total': combined line loss
-            'angle': angle loss component (or 0)
-            'rho': rho loss component (or 0)
+    戻り値:
+        以下のキーを持つ辞書:
+            'total': 統合直線損失
+            'angle': 角度損失成分（または0）
+            'rho': rho損失成分（または0）
     """
     pred_params, confidence = extract_pred_line_params_batch(pred_heatmaps, image_size)
 
-    # Valid mask
+    # 有効マスク
     gt_valid = ~torch.isnan(gt_line_params).any(dim=-1)
     pred_valid = ~torch.isnan(pred_params).any(dim=-1)
     conf_valid = confidence > min_confidence
@@ -323,19 +323,19 @@ def compute_line_loss(
 
 
 # -------------------------
-# Warmup Schedule
+# Warmupスケジュール
 # -------------------------
 def get_warmup_weight(current_epoch, warmup_epochs, warmup_mode="linear"):
     """
-    Compute warmup weight w(t) for line losses.
+    直線損失のためのwarmup重み w(t) を計算
 
-    Args:
-        current_epoch: Current epoch (1-indexed)
-        warmup_epochs: Number of epochs to warmup
-        warmup_mode: 'linear', 'cosine', or 'step'
+    引数:
+        current_epoch: 現在のエポック（1から始まる）
+        warmup_epochs: warmupするエポック数
+        warmup_mode: 'linear', 'cosine', または 'step'
 
-    Returns:
-        Weight in [0, 1]
+    戻り値:
+        [0, 1] の重み
     """
     if current_epoch > warmup_epochs or warmup_epochs == 0:
         return 1.0
