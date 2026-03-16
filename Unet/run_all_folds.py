@@ -37,16 +37,14 @@ def parse_args():
 
 
 def save_summary(all_results: dict, cfg: dict, output_path: Path):
-    """全foldの結果をJSONに保存し、平均値を計算"""
-    # 平均値計算
+    """Save summary of all fold results and compute averages"""
+    # Compute averages for key metrics
     metric_keys = [
         "test_mse",
         "test_peak_dist_mean",
-        "test_dice_top2pct_mean",
-        "test_bg_spill_mean",
-        "test_peak_success@10px",
-        "line_centroid_dist_px_mean",
-        "line_angle_diff_deg_mean",
+        "line_perpendicular_dist_px_mean",
+        "line_angle_error_deg_mean",
+        "line_rho_error_px_mean",
     ]
 
     avg = {}
@@ -125,8 +123,8 @@ def main():
         results = train_one_fold(cfg)
         all_results[f"fold{fold}"] = results
 
-    # 結果サマリを保存（スクリプトのディレクトリを基準に）
-    script_dir = Path(__file__).resolve().parent
+    # 結果サマリを保存（Unetディレクトリを基準に）
+    script_dir = Path(__file__).resolve().parent  # Unet/ directory (run_all_folds.py is already in Unet/)
     ckpt_dir = script_dir / cfg.get("training", {}).get("checkpoint_dir", "checkpoints")
     if args.all_vertebrae:
         summary_path = ckpt_dir / "all_vertebrae_summary.json"
@@ -134,12 +132,27 @@ def main():
         summary_path = ckpt_dir / "all_folds_summary.json"
     summary = save_summary(all_results, cfg, summary_path)
 
-    # 最終結果を表示
-    print(f"\n{'=' * 60}")
+    # Display final results
+    print(f"\n{'=' * 70}")
     print("[FINAL SUMMARY] 5-Fold Cross-Validation Results")
-    print(f"{'=' * 60}")
-    for k, v in summary["average"].items():
-        print(f"  {k}: {v:.4f}")
+    print(f"{'=' * 70}")
+    avg = summary["average"]
+
+    print("\n[Primary Metrics - Line Geometry]")
+    if "line_perpendicular_dist_px_mean" in avg:
+        print(f"  Perpendicular Distance: {avg['line_perpendicular_dist_px_mean']:.2f} px  ⭐")
+    if "line_angle_error_deg_mean" in avg:
+        print(f"  Angle Error:           {avg['line_angle_error_deg_mean']:.2f} deg ⭐")
+    if "line_rho_error_px_mean" in avg:
+        print(f"  Rho Error:             {avg['line_rho_error_px_mean']:.2f} px  ⭐")
+
+    print("\n[Auxiliary Metrics - Heatmap Quality]")
+    if "test_mse" in avg:
+        print(f"  MSE Loss:              {avg['test_mse']:.6f}")
+    if "test_peak_dist_mean" in avg:
+        print(f"  Peak Distance:         {avg['test_peak_dist_mean']:.2f} px")
+
+    print(f"{'=' * 70}")
 
 
 if __name__ == "__main__":

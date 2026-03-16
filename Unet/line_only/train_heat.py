@@ -495,43 +495,11 @@ class TinyUNet(nn.Module):
 # -------------------------
 # 評価指標
 # -------------------------
-def softargmax_yx(hm, beta=10.0):
-    H, W = hm.shape
-    a = hm.reshape(-1).astype(np.float64)
-    a = a * beta
-    a = a - a.max()
-    w = np.exp(a)
-    w = w / (w.sum() + 1e-12)
-    ys = np.repeat(np.arange(H), W)
-    xs = np.tile(np.arange(W), H)
-    y = (w * ys).sum()
-    x = (w * xs).sum()
-    return float(x), float(y)
-
-
 def peak_dist(pred, gt):
+    """Distance between heatmap peaks (for debugging heatmap quality)"""
     gy, gx = np.unravel_index(np.argmax(gt), gt.shape)
     py, px = np.unravel_index(np.argmax(pred), pred.shape)
     return math.sqrt((px - gx) ** 2 + (py - gy) ** 2)
-
-
-def dice_top_p(pred, gt, p=0.02):
-    pred = pred.astype(np.float32)
-    gt = gt.astype(np.float32)
-    thr_p = np.quantile(pred, 1 - p)
-    thr_g = np.quantile(gt, 1 - p)
-    mp = pred >= thr_p
-    mg = gt >= thr_g
-    inter = np.logical_and(mp, mg).sum()
-    denom = mp.sum() + mg.sum()
-    return (2.0 * inter) / (denom + 1e-6)
-
-
-def bg_spill(pred, gt, gt_bg=0.05, pred_thr=0.1):
-    bg = gt <= gt_bg
-    if bg.sum() == 0:
-        return np.nan
-    return float((pred[bg] >= pred_thr).sum()) / float(bg.sum() + 1e-6)
 
 
 @torch.no_grad()
@@ -541,18 +509,14 @@ def evaluate(model, loader, device, image_size=224):
     n = 0
 
     peak_dists = []
-    soft_dists = []
-    dices = []
-    spills = []
-    succ10 = []
 
-    # NEW: Line metrics
+    # Line metrics
     angle_errors = []
     rho_errors = []
 
-    # 椎体ごとの統計用辞書を追加
+    # Per-vertebra statistics
     vertebrae = ["C1", "C2", "C3", "C4", "C5", "C6", "C7"]
-    per_vertebra = {v: {"peak_dists": [], "dices": [], "succ10": []} for v in vertebrae}
+    per_vertebra = {v: {"peak_dists": []} for v in vertebrae}
 
     for batch in loader:
         x = batch["image"].to(device).float()
@@ -574,20 +538,9 @@ def evaluate(model, loader, device, image_size=224):
                 pd = peak_dist(pr[i, c], g[i, c])
                 peak_dists.append(pd)
 
-                px, py = softargmax_yx(pr[i, c], beta=10.0)
-                gx, gy = softargmax_yx(g[i, c], beta=10.0)
-                soft_dists.append(math.sqrt((px - gx) ** 2 + (py - gy) ** 2))
-
-                dice_val = dice_top_p(pr[i, c], g[i, c], p=0.02)
-                dices.append(dice_val)
-                spills.append(bg_spill(pr[i, c], g[i, c], gt_bg=0.05, pred_thr=0.1))
-                succ10.append(1.0 if pd <= 10.0 else 0.0)
-
-                # 椎体ごとの統計に追加
+                # Per-vertebra statistics
                 if v_name in per_vertebra:
                     per_vertebra[v_name]["peak_dists"].append(pd)
-                    per_vertebra[v_name]["dices"].append(dice_val)
-                    per_vertebra[v_name]["succ10"].append(1.0 if pd <= 10.0 else 0.0)
 
         # NEW: Compute line metrics
         if gt_params is not None:
@@ -610,28 +563,22 @@ def evaluate(model, loader, device, image_size=224):
             angle_errors.append(angle_err)
             rho_errors.append(rho_err)
 
-    # 椎体ごとの統計を計算
+    # Per-vertebra statistics
     per_vert_stats = {}
     for v, vals in per_vertebra.items():
         if len(vals["peak_dists"]) > 0:
             per_vert_stats[v] = {
                 "peak_dist_mean": float(np.nanmean(vals["peak_dists"])),
-                "dice_top2pct_mean": float(np.nanmean(vals["dices"])),
-                "peak_success@10px": float(np.nanmean(vals["succ10"])),
-                "n_samples": len(vals["peak_dists"]) // 4,  # 4チャンネル分
+                "n_samples": len(vals["peak_dists"]) // 4,  # 4 channels
             }
 
     metrics = {
         "val_loss_mse": mse_sum / max(1, n),
         "peak_dist_mean": float(np.nanmean(peak_dists)),
-        "softarg_dist_mean": float(np.nanmean(soft_dists)),
-        "dice_top2pct_mean": float(np.nanmean(dices)),
-        "bg_spill_mean": float(np.nanmean(spills)),
-        "peak_success@10px": float(np.nanmean(succ10)),
-        "per_vertebra": per_vert_stats,  # 追加
+        "per_vertebra": per_vert_stats,
     }
 
-    # NEW: Add line metrics if available
+    # Add line metrics if available
     if angle_errors:
         metrics["angle_error_deg"] = float(np.nanmean(angle_errors))
         metrics["rho_error_px"] = float(np.nanmean(rho_errors))
@@ -921,12 +868,9 @@ def run_training_loop(
             f"train_mse={train_loss:.6f}  "
             f"val_mse={val_metrics['val_loss_mse']:.6f}  "
             f"peak={val_metrics['peak_dist_mean']:.2f}px  "
-            f"dice={val_metrics['dice_top2pct_mean']:.3f}  "
-            f"spill={val_metrics['bg_spill_mean']:.3f}  "
-            f"succ10={val_metrics['peak_success@10px']:.3f}  "
         )
 
-        # NEW: Add line metrics if available
+        # Add line metrics if available
         if "angle_error_deg" in val_metrics:
             log_str += (
                 f"angle={val_metrics['angle_error_deg']:.2f}°  "
@@ -990,8 +934,8 @@ def train_one_fold(cfg):
     # モデル、最適化器、スケジューラー作成
     model, opt, scheduler = create_model_optimizer_scheduler(cfg, device)
 
-    # チェックポイントディレクトリ作成（スクリプトのディレクトリを基準に）
-    script_dir = Path(__file__).resolve().parent
+    # チェックポイントディレクトリ作成（Unetディレクトリを基準に）
+    script_dir = Path(__file__).resolve().parent.parent  # Unet/ directory
     ckpt_dir = script_dir / tr_cfg.get("checkpoint_dir", "checkpoints")
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     best_path = ckpt_dir / f"best_fold{test_fold}.pt"
@@ -1007,9 +951,8 @@ def train_one_fold(cfg):
     test_metrics = evaluate(model, test_loader, device)
     print(
         f"[TEST] fold={test_fold}  "
-        f"mse={test_metrics['val_loss_mse']:.6f}  peak={test_metrics['peak_dist_mean']:.2f}px  "
-        f"dice={test_metrics['dice_top2pct_mean']:.3f} spill={test_metrics['bg_spill_mean']:.3f} "
-        f"succ10={test_metrics['peak_success@10px']:.3f}"
+        f"mse={test_metrics['val_loss_mse']:.6f}  "
+        f"peak={test_metrics['peak_dist_mean']:.2f}px"
     )
 
     # テストデータに対する直線検出（別モジュール）（スクリプトのディレクトリを基準に）
@@ -1028,14 +971,21 @@ def train_one_fold(cfg):
         out_dir=out_dir,
     )
 
-    print("[LINE TEST] angle_error_deg_mean =", line_summary["angle_error_deg_mean"])
-    print("[LINE TEST] rho_error_px_mean    =", line_summary["rho_error_px_mean"])
-    print("[LINE TEST] perp_dist_px_mean    =", line_summary["perpendicular_dist_px_mean"])
+    print("\n" + "=" * 60)
+    print("[LINE GEOMETRY EVALUATION]")
+    print("=" * 60)
+    print(f"  Perpendicular Distance: {line_summary['perpendicular_dist_px_mean']:.2f} px  ⭐")
+    print(f"  Angle Error:           {line_summary['angle_error_deg_mean']:.2f} deg ⭐")
+    print(f"  Rho Error:             {line_summary['rho_error_px_mean']:.2f} px  ⭐")
+    print("\n[Per-Channel Breakdown]")
     for k, v in line_summary["per_channel"].items():
         print(
-            f"[LINE TEST] {k}: angle={v['angle_error_deg_mean']:.3f}deg  rho={v['rho_error_px_mean']:.3f}px  perp={v['perpendicular_dist_px_mean']:.3f}px  n={v['n']}"
+            f"  {k}: perp={v['perpendicular_dist_px_mean']:.2f}px  "
+            f"angle={v['angle_error_deg_mean']:.2f}deg  "
+            f"rho={v['rho_error_px_mean']:.2f}px  (n={v['n']})"
         )
-    print("[LINE TEST] saved to:", line_summary["out_dir"])
+    print(f"\n[Output] {line_summary['out_dir']}")
+    print("=" * 60)
 
     # サンプル画像を保存
     @torch.no_grad()
@@ -1094,17 +1044,14 @@ def train_one_fold(cfg):
     )
     print(f"[INFO] saved to {vis_root}/")
 
-    # 結果を返す（run_all_folds.pyで使用）
+    # Return results for run_all_folds.py
     return {
         "test_mse": test_metrics["val_loss_mse"],
         "test_peak_dist_mean": test_metrics["peak_dist_mean"],
-        "test_dice_top2pct_mean": test_metrics["dice_top2pct_mean"],
-        "test_bg_spill_mean": test_metrics["bg_spill_mean"],
-        "test_peak_success@10px": test_metrics["peak_success@10px"],
+        "line_perpendicular_dist_px_mean": line_summary["perpendicular_dist_px_mean"],
         "line_angle_error_deg_mean": line_summary["angle_error_deg_mean"],
         "line_rho_error_px_mean": line_summary["rho_error_px_mean"],
-        "line_perpendicular_dist_px_mean": line_summary["perpendicular_dist_px_mean"],
-        "per_vertebra": test_metrics.get("per_vertebra", {}),  # 追加
+        "per_vertebra": test_metrics.get("per_vertebra", {}),
     }
 
 

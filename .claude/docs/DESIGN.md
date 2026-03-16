@@ -49,6 +49,7 @@
 | Persist canonical conversation state for cross-provider reuse | Enables Gemini to continue with full context | Ad-hoc copy/paste | 2026-01-31 |
 | Align angle evaluation by using the same estimator on GT and predictions; default to heatmap-moment angle for both and keep polyline PCA as an oracle metric | Avoids systematic bias from representation mismatch and separates estimator error from model error | Compare raw polyline PCA vs predicted heatmap moments | 2026-02-18 |
 | Refactor training/evaluation into smaller, single-purpose functions (data split/load, model/opt setup, train loop, eval metrics, visualization) | Improve readability, testability, and reduce regression risk during future changes | Keep monolithic functions; split only by file | 2026-03-04 |
+| Minimal line-eval reporting: angle_error_deg + rho_error_px as core, keep perpendicular_dist_px for interpretability, and one heatmap peak metric (e.g., peak_dist) for debugging | Keeps task metrics primary while preserving a light diagnostic signal for heatmap quality | Drop all heatmap metrics; report only angle/rho | 2026-03-16 |
 
 ## TODO
 
@@ -64,6 +65,7 @@
  - [ ] Unify coordinate conventions (x=col, y=row) across GT heatmap generation, angle extraction, and evaluation
  - [ ] Ensure major-axis selection in moment-based angle extraction (eigenvalues or variance check)
  - [ ] Add evaluation metrics beyond angle error (e.g., perpendicular distance, Hausdorff, heatmap overlap)
+- [ ] Implement minimal eval reporting set (angle_error_deg, rho_error_px, perpendicular_dist_px + one peak metric)
 - [ ] Refactor train/eval pipeline: split train_one_fold/evaluate, extract line-eval/visualization utilities, and standardize metric aggregation/logging
 - [ ] Refactor train_heat2.py: separate dataset validation/split, dataloader factory, model+optim+scheduler setup, epoch train step, epoch eval step, checkpoint/early-stop, and reporting
 - [ ] Extract evaluation utilities: metric aggregation (overall + per-vertebra), heatmap visualization helpers, and line-detection evaluation wrapper
@@ -91,3 +93,4 @@
 | 2026-03-04 | Planned refactor of training/evaluation pipeline and comment language normalization |
 | 2026-03-04 | Added concrete refactor TODOs for train_heat2.py decomposition and eval utilities |
 | 2026-03-10 | Added plan pattern for heatmap-moment line geometry loss (phi, rho) with sign alignment and warmup |
+| 2026-03-16 | Recorded minimal line-eval metric recommendation (angle/rho core + perpendicular distance + one heatmap diagnostic) |
