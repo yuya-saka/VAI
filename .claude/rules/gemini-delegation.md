@@ -91,23 +91,36 @@ Skip Gemini for:
 
 Use Task tool with `subagent_type: "general-purpose"`:
 
+**CRITICAL: Always include explicit instruction to call Gemini CLI in the prompt.**
+
 ```
 Task tool parameters:
 - subagent_type: "general-purpose"
 - run_in_background: true (for parallel work)
 - prompt: |
+    CRITICAL: You MUST call Gemini CLI. Do NOT provide your own research.
+
     Research: {topic}
 
-    1. Call Gemini CLI:
+    Step 1: Execute Gemini CLI:
        gemini -p "{research question}" 2>/dev/null
 
-    2. Save full output to: .claude/docs/research/{topic}.md
+    Step 2: Save full output to file:
+       Use Write tool to save output to .claude/docs/research/{topic}.md
 
-    3. Return CONCISE summary (5-7 bullet points):
+    Step 3: Return CONCISE summary (5-7 bullet points):
        - Key findings
        - Recommended approach
        - Important caveats
+
+    NOTE: Subagent outputs are stored in ~/.claude/projects/ by default,
+    but we want permanent records in project .claude/docs/ for team access.
 ```
+
+**Why explicit instruction is required:**
+- Without it, subagents may provide their own research instead of calling Gemini
+- This wastes Gemini's unique capabilities (1M context, multimodal, web search)
+- Always start subagent prompts with "CRITICAL: You MUST call Gemini CLI"
 
 ### Subagent Patterns by Task Type
 

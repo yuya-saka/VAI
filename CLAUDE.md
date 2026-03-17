@@ -62,6 +62,8 @@ Bash("codex exec ... '1文で答えて'")
 
 ## Workflow
 
+### 標準的な開発フロー
+
 ```
 /startproject <機能名>
 ```
@@ -73,6 +75,24 @@ Bash("codex exec ... '1文で答えて'")
 5. **別セッションで実装後レビュー**（推奨）
 
 → 詳細: `/startproject`, `/plan`, `/tdd` skills
+
+### Codex相談ワークフロー（重要）
+
+**問題や設計判断が必要な時:**
+
+1. **Claude → Subagent → Codex**
+   - Claude がサブエージェント経由で Codex に相談
+   - Subagent が `.claude/docs/codex/YYYYMMDD-HHMM-{topic}.md` に保存
+
+2. **Claude が Codex 出力を読む**
+   - `Read` ツールで保存されたファイルを読む
+   - 完全な分析を確認（サマリーだけでなく）
+
+3. **Claude が推奨事項を実装**
+   - `Edit`/`Write` ツールでコード変更
+   - ユーザーに日本語で報告
+
+**重要:** Codex の出力は必ず `.claude/docs/codex/` に保存され、Claude が読んで反映します。
 
 ---
 
@@ -92,8 +112,11 @@ Bash("codex exec ... '1文で答えて'")
 |----------|---------|
 | `.claude/rules/` | コーディング・セキュリティ・言語ルール |
 | `.claude/docs/DESIGN.md` | 設計決定の記録 |
+| `.claude/docs/codex/` | **Codex分析結果（実装に反映）** |
 | `.claude/docs/research/` | Gemini調査結果 |
 | `.claude/logs/cli-tools.jsonl` | Codex/Gemini入出力ログ |
+
+**重要:** `.claude/docs/codex/` のファイルは Claude が読んで実装に反映させます。
 
 ---
 
