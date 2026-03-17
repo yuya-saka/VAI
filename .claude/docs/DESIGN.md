@@ -52,6 +52,8 @@
 | Minimal line-eval reporting: angle_error_deg + rho_error_px as core, keep perpendicular_dist_px for interpretability, and one heatmap peak metric (e.g., peak_dist) for debugging | Keeps task metrics primary while preserving a light diagnostic signal for heatmap quality | Drop all heatmap metrics; report only angle/rho | 2026-03-16 |
 | Set Gaussian heatmap sigma based on output resolution and annotation uncertainty; start with sigma ≈ 2–3 px on the output map (scale by stride), and ensure L^2/12 ≫ sigma^2 for stable moment-based angle; consider anisotropic sigma (smaller perpendicular) if angle is unstable | Balances training stability vs geometric precision for moment-based line estimation | Fixed sigma without scaling; isotropic-only kernels | 2026-03-16 |
 | Default to no hard thresholding for moment-based line estimation; if background noise dominates, prefer soft weighting or percentile-based gating to suppress low-confidence regions while preserving Gaussian tails | Hard thresholding can bias centroid/covariance and increase angle jitter when signal is blurred or low-SNR | Always-threshold; binary mask moments | 2026-03-16 |
+| Use staged training for heatmap+geometry: short heatmap-only pretrain, then enable angle loss, then add rho loss | Early geometry signals are noisy when heatmaps are weak; angle is more stable than rho and can shape representation before full constraints | Linear warmup from epoch 1; two-stage heatmap-only then all geometry | 2026-03-16 |
+| Detach prediction-derived confidence in line losses and avoid confidence-gradient gating during training to prevent trivial zero-heatmap minima | Self-weighting by confidence lets the model reduce loss by shrinking/flattening heatmaps; detaching preserves the weighting signal without incentivizing collapse | Remove confidence weighting; use GT-only masks; add explicit mass regularizer | 2026-03-17 |
 
 ## TODO
 
@@ -96,3 +98,5 @@
 | 2026-03-04 | Added concrete refactor TODOs for train_heat2.py decomposition and eval utilities |
 | 2026-03-10 | Added plan pattern for heatmap-moment line geometry loss (phi, rho) with sign alignment and warmup |
 | 2026-03-16 | Recorded minimal line-eval metric recommendation (angle/rho core + perpendicular distance + one heatmap diagnostic); added sigma selection guidance for heatmap regression |
+| 2026-03-16 | Added staged training decision for heatmap regression with angle-then-rho geometry constraints |
+| 2026-03-17 | Added decision to detach prediction-derived confidence in line losses to avoid trivial collapse |

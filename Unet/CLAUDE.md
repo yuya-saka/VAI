@@ -62,7 +62,7 @@
 ### 最近の変更
 
 - `train_heat.py` を削除 → `line_only/train_heat.py` に移行
-- `run_all_folds.py` をリファクタリング
+- `run_all_folds.py` を `train.py` にリネーム
 - matplotlib の日本語対応仕様決定
 
 ### TODO (詳細は DESIGN.md 参照)
@@ -81,7 +81,7 @@
 uv run python Unet/line_only/train_heat.py
 
 # 全 fold 実行
-uv run python Unet/run_all_folds.py
+uv run python Unet/train.py
 
 # テスト
 uv run pytest Unet/line_only/test_line_losses.py -v

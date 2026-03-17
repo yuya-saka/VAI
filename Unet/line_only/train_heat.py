@@ -946,8 +946,11 @@ def train_one_fold(cfg):
     )
 
     # ベストモデルを読み込んでテスト
-    ckpt = torch.load(best_path, map_location=device)
-    model.load_state_dict(ckpt["model"])
+    if best_path.exists():
+        ckpt = torch.load(best_path, map_location=device)
+        model.load_state_dict(ckpt["model"])
+    else:
+        print(f"[WARNING] No best checkpoint saved (no improvement during training). Using current model state.")
     test_metrics = evaluate(model, test_loader, device)
     print(
         f"[TEST] fold={test_fold}  "
@@ -1044,7 +1047,7 @@ def train_one_fold(cfg):
     )
     print(f"[INFO] saved to {vis_root}/")
 
-    # Return results for run_all_folds.py
+    # Return results for train.py
     return {
         "test_mse": test_metrics["val_loss_mse"],
         "test_peak_dist_mean": test_metrics["peak_dist_mean"],

@@ -220,9 +220,16 @@ def angle_loss(pred_params, gt_params, confidence, valid_mask):
 
     # 信頼度と有効性で重み付け
     weights = confidence * valid_mask.float()
-    weighted_loss = loss * weights
 
-    return weighted_loss.sum() / (weights.sum() + 1e-8)
+    # 全サンプル無効時のガード（NaN/無限大防止）
+    if not valid_mask.any():
+        return torch.tensor(0.0, device=pred_params.device, requires_grad=True)
+
+    weighted_loss = loss * weights
+    normalized_loss = weighted_loss.sum() / (weights.sum() + 1e-8)
+
+    # MSEスケール（~0.01）に合わせるためのスケール係数
+    return normalized_loss * 0.01
 
 
 def rho_loss(pred_params, gt_params, confidence, valid_mask):
@@ -259,9 +266,16 @@ def rho_loss(pred_params, gt_params, confidence, valid_mask):
 
     # 信頼度と有効性で重み付け
     weights = confidence * valid_mask.float()
-    weighted_loss = loss * weights
 
-    return weighted_loss.sum() / (weights.sum() + 1e-8)
+    # 全サンプル無効時のガード（NaN/無限大防止）
+    if not valid_mask.any():
+        return torch.tensor(0.0, device=pred_params.device, requires_grad=True)
+
+    weighted_loss = loss * weights
+    normalized_loss = weighted_loss.sum() / (weights.sum() + 1e-8)
+
+    # MSEスケール（~0.01）に合わせるためのスケール係数
+    return normalized_loss * 0.01
 
 
 def compute_line_loss(
