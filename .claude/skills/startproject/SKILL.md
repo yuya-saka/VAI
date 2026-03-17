@@ -92,7 +92,7 @@ Task tool parameters:
     Draft plan: {plan from Phase 2}
 
     1. Call Codex CLI:
-       codex exec --model gpt-5.2-codex --sandbox read-only --full-auto "
+       codex exec --model gpt-5.3-codex --sandbox read-only --full-auto "
        Review this implementation plan:
        {plan}
 
@@ -175,7 +175,7 @@ Task tool parameters:
 
     1. Run: git diff main...HEAD
     2. Call Codex CLI:
-       codex exec --model gpt-5.2-codex --sandbox read-only --full-auto "
+       codex exec --model gpt-5.3-codex --sandbox read-only --full-auto "
        Review this implementation:
        {diff output}
 

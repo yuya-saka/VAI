@@ -99,7 +99,7 @@ def main() -> None:
     if is_codex:
         tool = "codex"
         prompt = extract_codex_prompt(command)
-        model = extract_model(command) or "gpt-5.2-codex"
+        model = extract_model(command) or "gpt-5.3-codex"
     else:
         tool = "gemini"
         prompt = extract_gemini_prompt(command)
