@@ -93,7 +93,8 @@ def extract_pred_line_params_batch(heatmaps, image_size=224, min_mass=1e-6):
     device = heatmaps.device
 
     # 座標グリッド（中心原点）
-    y_grid = torch.arange(H, device=device, dtype=torch.float32) - H / 2.0
+    # Y軸を上向きに設定（数学座標系: row 0=上→+H/2, row H-1=下→-H/2）
+    y_grid = -(torch.arange(H, device=device, dtype=torch.float32) - H / 2.0)
     x_grid = torch.arange(W, device=device, dtype=torch.float32) - W / 2.0
     Y, X = torch.meshgrid(y_grid, x_grid, indexing="ij")
 
