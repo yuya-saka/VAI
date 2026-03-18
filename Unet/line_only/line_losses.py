@@ -203,14 +203,20 @@ def angle_loss(pred_params, gt_params, confidence, valid_mask):
     戻り値:
         スカラー損失
     """
-    pred_phi = pred_params[..., 0]
-    gt_phi = gt_params[..., 0]
+    # 全サンプル無効時のガード（NaN/無限大防止）
+    if not valid_mask.any():
+        return torch.tensor(0.0, device=pred_params.device, requires_grad=True)
 
-    # 法線ベクトルを計算
-    pred_nx = torch.cos(pred_phi)
-    pred_ny = torch.sin(pred_phi)
-    gt_nx = torch.cos(gt_phi)
-    gt_ny = torch.sin(gt_phi)
+    # 有効なエントリのみを抽出（NaN処理の前に実行）
+    valid_pred_phi = pred_params[..., 0][valid_mask]
+    valid_gt_phi = gt_params[..., 0][valid_mask]
+    valid_conf = confidence[valid_mask].detach()  # 勾配フロー防止
+
+    # 法線ベクトルを計算（有効なエントリのみ）
+    pred_nx = torch.cos(valid_pred_phi)
+    pred_ny = torch.sin(valid_pred_phi)
+    gt_nx = torch.cos(valid_gt_phi)
+    gt_ny = torch.sin(valid_gt_phi)
 
     # 内積
     dot = pred_nx * gt_nx + pred_ny * gt_ny
@@ -218,18 +224,11 @@ def angle_loss(pred_params, gt_params, confidence, valid_mask):
     # 損失: 1 - |dot|
     loss = 1.0 - torch.abs(dot)
 
-    # 信頼度と有効性で重み付け
-    weights = confidence * valid_mask.float()
-
-    # 全サンプル無効時のガード（NaN/無限大防止）
-    if not valid_mask.any():
-        return torch.tensor(0.0, device=pred_params.device, requires_grad=True)
-
-    weighted_loss = loss * weights
-    normalized_loss = weighted_loss.sum() / (weights.sum() + 1e-8)
+    # 信頼度で重み付け
+    weighted_loss = (loss * valid_conf).sum() / (valid_conf.sum() + 1e-8)
 
     # MSEスケール（~0.01）に合わせるためのスケール係数
-    return normalized_loss * 0.01
+    return weighted_loss * 0.01
 
 
 def rho_loss(pred_params, gt_params, confidence, valid_mask):
@@ -248,12 +247,18 @@ def rho_loss(pred_params, gt_params, confidence, valid_mask):
     戻り値:
         スカラー損失
     """
-    pred_rho = pred_params[..., 1]
-    gt_rho = gt_params[..., 1]
+    # 全サンプル無効時のガード（NaN/無限大防止）
+    if not valid_mask.any():
+        return torch.tensor(0.0, device=pred_params.device, requires_grad=True)
 
-    # 2つの可能性のある誤差
-    err1 = torch.abs(pred_rho - gt_rho)
-    err2 = torch.abs(pred_rho + gt_rho)
+    # 有効なエントリのみを抽出（NaN処理の前に実行）
+    valid_pred_rho = pred_params[..., 1][valid_mask]
+    valid_gt_rho = gt_params[..., 1][valid_mask]
+    valid_conf = confidence[valid_mask].detach()  # 勾配フロー防止
+
+    # 2つの可能性のある誤差（有効なエントリのみ）
+    err1 = torch.abs(valid_pred_rho - valid_gt_rho)
+    err2 = torch.abs(valid_pred_rho + valid_gt_rho)
 
     # smooth最小値（微分可能）
     alpha = 10.0
@@ -261,21 +266,11 @@ def rho_loss(pred_params, gt_params, confidence, valid_mask):
     exp2 = torch.exp(-alpha * err2)
     loss = (err1 * exp1 + err2 * exp2) / (exp1 + exp2 + 1e-8)
 
-    # SmoothL1
-    loss = F.smooth_l1_loss(loss, torch.zeros_like(loss), reduction="none")
-
-    # 信頼度と有効性で重み付け
-    weights = confidence * valid_mask.float()
-
-    # 全サンプル無効時のガード（NaN/無限大防止）
-    if not valid_mask.any():
-        return torch.tensor(0.0, device=pred_params.device, requires_grad=True)
-
-    weighted_loss = loss * weights
-    normalized_loss = weighted_loss.sum() / (weights.sum() + 1e-8)
+    # 信頼度で重み付け
+    weighted_loss = (loss * valid_conf).sum() / (valid_conf.sum() + 1e-8)
 
     # MSEスケール（~0.01）に合わせるためのスケール係数
-    return normalized_loss * 0.01
+    return weighted_loss * 0.01
 
 
 def compute_line_loss(

@@ -836,8 +836,9 @@ def run_training_loop(
                     use_angle_loss,
                     use_rho_loss,
                 )
-                # Combined loss
-                loss = loss_mse + warmup_weight * line_loss_dict["total"]
+                # Combined loss with inverse weighting for MSE
+                # MSE gradually decreases while line loss gradually increases
+                loss = (1 - 0.5 * warmup_weight) * loss_mse + warmup_weight * line_loss_dict["total"]
             else:
                 # MSE only
                 loss = loss_mse
