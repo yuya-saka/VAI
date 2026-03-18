@@ -16,29 +16,36 @@ def extract_gt_line_params(polyline_points, image_size=224):
 
     引数:
         polyline_points: 直線を定義する [x, y] 点のリスト（最低2点）
+                        入力は画像座標系 (x=col, y=row, Y下向き)
         image_size: 画像の次元（正方形を仮定）
 
     戻り値:
         (phi_rad, rho_normalized) または無効な場合は (nan, nan)
+        出力は数学座標系 (Y上向き)
 
-    座標系:
+    座標系変換:
+        入力 (image coords): x=col, y=row (Y下向き)
+        → 出力 (math coords): x=col-center, y=-(row-center) (Y上向き)
+
+    出力座標系 (math coords):
         - 原点: 画像中心 (image_size/2, image_size/2)
         - x軸: 列方向（左から右）
-        - y軸: 行方向（上から下）
+        - y軸: 上向き (数学座標系)
         - φ: 法線ベクトルの角度 [0, π)
         - ρ: 原点からの符号付き距離、対角線Dで正規化
     """
     if polyline_points is None or len(polyline_points) < 2:
         return float("nan"), float("nan")
 
-    # 端点を取得
+    # 端点を取得 (image coords: x=col, y=row)
     p1 = np.array(polyline_points[0], dtype=np.float64)
     p2 = np.array(polyline_points[-1], dtype=np.float64)
 
-    # 中心座標系に変換
+    # image coords → math coords 変換
+    # x' = x - center, y' = -(y - center) でY軸を上向きに反転
     center = image_size / 2.0
-    p1_c = p1 - center
-    p2_c = p2 - center
+    p1_c = np.array([p1[0] - center, -(p1[1] - center)], dtype=np.float64)
+    p2_c = np.array([p2[0] - center, -(p2[1] - center)], dtype=np.float64)
 
     # 直線の方向ベクトル
     direction = p2_c - p1_c

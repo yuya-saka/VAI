@@ -55,16 +55,19 @@ def detect_line_moments(
     """
     ヒートマップから直線を検出（モーメント法）
 
+    内部計算は数学座標系（Y上向き）で実施し、
+    出力の endpoints のみ画像座標系（Y下向き）に変換
+
     引数:
         hm: (H,W) float [0,1] ガウス分布様のヒートマップ
 
     戻り値:
       {
-        "centroid": [xbar, ybar],  # 重心座標
-        "angle_rad": theta,         # 角度（ラジアン）
-        "angle_deg": theta_deg,     # 角度（度）
-        "dir": [dx, dy],            # 方向ベクトル
-        "endpoints": [[x1,y1],[x2,y2]], # 端点座標
+        "centroid": [xbar, ybar],  # 重心座標（画像座標系）
+        "angle_rad": theta,         # 角度（ラジアン、数学座標系）
+        "angle_deg": theta_deg,     # 角度（度、数学座標系）
+        "dir": [dx, dy],            # 方向ベクトル（数学座標系）
+        "endpoints": [[x1,y1],[x2,y2]], # 端点座標（画像座標系、描画用）
         "length": L                 # 直線の長さ
       }
     """
@@ -78,15 +81,14 @@ def detect_line_moments(
     if M00 < min_mass:
         return None
 
-    ys = np.arange(H, dtype=np.float64)
-    xs = np.arange(W, dtype=np.float64)
-    X, Y = np.meshgrid(xs, ys)
+    # 数学座標系（Y上向き、中心原点）で計算
+    y_grid = -(np.arange(H, dtype=np.float64) - H / 2.0)
+    x_grid = np.arange(W, dtype=np.float64) - W / 2.0
+    X, Y = np.meshgrid(x_grid, y_grid)
 
-    # 1次モーメント → 重心
-    M10 = (hm * X).sum()
-    M01 = (hm * Y).sum()
-    xbar = M10 / (M00 + 1e-12)
-    ybar = M01 / (M00 + 1e-12)
+    # 1次モーメント → 重心（数学座標系）
+    xbar = (hm * X).sum() / (M00 + 1e-12)
+    ybar = (hm * Y).sum() / (M00 + 1e-12)
 
     # 2次中心モーメント（M00で正規化）
     dx = X - xbar
@@ -108,7 +110,10 @@ def detect_line_moments(
         thr = np.quantile(hm, 1.0 - float(top_p_fallback))
         yy, xx = np.where(hm >= thr)
         if len(xx) >= 10:
-            t = (xx - xbar) * vx + (yy - ybar) * vy
+            # yy, xx は indices なので X[yy, xx], Y[yy, xx] で math coords を取得
+            x_pts = X[yy, xx]
+            y_pts = Y[yy, xx]
+            t = (x_pts - xbar) * vx + (y_pts - ybar) * vy
             est = float(t.max() - t.min())
             length_px = max(est, 20.0)
         else:
@@ -116,23 +121,37 @@ def detect_line_moments(
 
     L = float(length_px * extend_ratio)
 
-    x1 = xbar - 0.5 * L * vx
-    y1 = ybar - 0.5 * L * vy
-    x2 = xbar + 0.5 * L * vx
-    y2 = ybar + 0.5 * L * vy
+    # 端点を math coords で計算
+    x1_math = xbar - 0.5 * L * vx
+    y1_math = ybar - 0.5 * L * vy
+    x2_math = xbar + 0.5 * L * vx
+    y2_math = ybar + 0.5 * L * vy
+
+    # math coords → image coords 変換（描画用）
+    center_x = W / 2.0
+    center_y = H / 2.0
+    x1_img = x1_math + center_x
+    y1_img = -y1_math + center_y  # Y軸反転
+    x2_img = x2_math + center_x
+    y2_img = -y2_math + center_y  # Y軸反転
 
     if clip:
-        x1, y1 = _clip_pt(x1, y1, W, H)
-        x2, y2 = _clip_pt(x2, y2, W, H)
+        x1_img, y1_img = _clip_pt(x1_img, y1_img, W, H)
+        x2_img, y2_img = _clip_pt(x2_img, y2_img, W, H)
     else:
-        x1, y1, x2, y2 = float(x1), float(y1), float(x2), float(y2)
+        x1_img, y1_img = float(x1_img), float(y1_img)
+        x2_img, y2_img = float(x2_img), float(y2_img)
+
+    # centroid も image coords に変換（描画用）
+    xbar_img = xbar + center_x
+    ybar_img = -ybar + center_y
 
     return {
-        "centroid": [float(xbar), float(ybar)],
-        "angle_rad": float(theta),
-        "angle_deg": float(theta_deg),
-        "dir": [vx, vy],
-        "endpoints": [[x1, y1], [x2, y2]],
+        "centroid": [float(xbar_img), float(ybar_img)],  # 画像座標系
+        "angle_rad": float(theta),         # 数学座標系
+        "angle_deg": float(theta_deg),     # 数学座標系
+        "dir": [vx, vy],                   # 数学座標系
+        "endpoints": [[x1_img, y1_img], [x2_img, y2_img]],  # 画像座標系
         "length": float(L),
         "M00": float(M00),
         "mu20": float(mu20),
