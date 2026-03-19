@@ -1,5 +1,8 @@
 # Unet/line_detection_moments.py
 
+# 過去の実装方法用
+
+
 import json
 import math
 from pathlib import Path

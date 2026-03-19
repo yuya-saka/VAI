@@ -1,69 +1,67 @@
 # Agent Workflow Protocol
 
-**Codex/Gemini相談時の必須手順**
+**Mandatory Procedures for Codex/Gemini Consultations**
 
-## 正しいワークフロー
+## Correct Workflow
 
-### Phase 1: 情報収集
-```
-1. 関連ファイルをRead
-2. 既存のCodex分析を確認（.claude/logs/cli-tools.jsonl）
-3. 問題の範囲を特定
-```
+### Phase 1: Information Gathering
+1. Read relevant files.
+2. Verify existing Codex analysis (`.claude/logs/cli-tools.jsonl`).
+3. Identify the scope of the problem.
 
-### Phase 2: Codex/Gemini相談
-```
-4. サブエージェント経由でCodex/Geminiを起動
-5. TaskOutput(block=true, timeout=120000)で完了を待つ
-6. 完了通知を受け取る
-7. エージェントが保存したファイルをRead
-8. CLI logsで実行結果を確認（.claude/logs/cli-tools.jsonl）
-```
+### Phase 2: Codex/Gemini Consultation
+4. Launch Codex/Gemini via a sub-agent.
+5. Wait for completion using `TaskOutput(block=true, timeout=120000)`.
+6. Receive completion notification.
+7. Read the files saved by the agent.
+8. Verify execution results in CLI logs (`.claude/logs/cli-tools.jsonl`).
 
-### Phase 3: 分析と計画
-```
-9. Codex/Geminiの分析を完全に理解
-10. 重要な推奨事項を抽出
-11. 優先順位付き実装計画を作成
-12. ユーザーに報告
-```
+### Phase 3: Analysis and Planning
+9. Fully understand the Codex/Gemini analysis.
+10. Extract key recommendations.
+11. Create a prioritized implementation plan.
+12. Report to the user.
 
-### Phase 4: 実装
-```
-13. ユーザー承認を得る
-14. 計画に従って段階的に実装
-15. 各ステップをTodoWriteで追跡
-```
+### Phase 4: Implementation
+13. Obtain user approval.
+14. Implement step-by-step according to the plan.
+15. Track each step using `TodoWrite`.
 
-## ❌ やってはいけないこと
+---
 
-1. **エージェント完了前に自分の分析を提供する**
-   - Codexの分析が最優先
+## ❌ Prohibited Actions
 
-2. **並行して直接Codex/Geminiを呼び出す**
-   - サブエージェントと競合する
+1. **Providing your own analysis before the agent completes its task**
+   - The Codex analysis must take top priority.
 
-3. **結果ファイルが見つからないときに諦める**
-   - CLI logsを必ず確認
+2. **Calling Codex/Gemini directly in parallel**
+   - This causes conflicts with the sub-agent.
 
-4. **実装計画なしにいきなりコード変更**
-   - 必ず段階的な計画を作成
+3. **Giving up when result files cannot be found**
+   - Always check the CLI logs.
 
-## 実装計画の構成要素
+4. **Changing code abruptly without an implementation plan**
+   - A phased plan must always be created first.
 
-実装計画には以下を含める：
+---
 
-1. **修正の優先順位**（Phase 1, 2, 3...）
-2. **各修正の影響範囲**（どのファイルを変更するか）
-3. **依存関係**（どの順序で修正するか）
-4. **テスト方法**（修正後の確認方法）
-5. **ロールバック計画**（問題が起きた場合の対処）
+## Components of the Implementation Plan
 
-## チェックリスト
+The implementation plan must include the following:
 
-実装前に以下を確認：
-- [ ] Codex/Geminiの分析を完全に読んだ
-- [ ] 重要な推奨事項を全て理解した
-- [ ] 段階的な実装計画を作成した
-- [ ] ユーザーに計画を提示し、承認を得た
-- [ ] TodoWriteで追跡準備ができている
+1. **Priority of fixes** (Phase 1, 2, 3...)
+2. **Scope of impact** (Which files will be modified)
+3. **Dependencies** (The order in which fixes should be applied)
+4. **Testing methods** (How to verify the results after the fix)
+5. **Rollback plan** (How to handle issues if they arise)
+
+---
+
+## Checklist
+
+Confirm the following before implementation:
+- [ ] I have fully read the Codex/Gemini analysis.
+- [ ] I have understood all key recommendations.
+- [ ] I have created a phased implementation plan.
+- [ ] I have presented the plan to the user and obtained approval.
+- [ ] I am ready to track progress with `TodoWrite`.
