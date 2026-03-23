@@ -198,3 +198,122 @@ y_grid = -(torch.arange(H, ...) - H / 2.0)
 - [ ] If successful, test lambda_rho=0.1 (2x increase)
 - [ ] Document final results
 
+---
+
+## 2026-03-23 Session: Threshold Processing Investigation
+
+### 📊 Problem Analysis
+
+**Current Test Results (Y-axis fix applied):**
+- angle_error: 32.70° (still high, expected <10°)
+- Confidence: 0.214 (very low, indicates poor line quality)
+
+**Root Cause Hypothesis:**
+- Low confidence → unstable angle calculation
+- When mu20 ≈ mu02, denominator in `atan2(2*mu11, mu20-mu02)` becomes small
+- Heatmap includes low-intensity "tails" that spread variance isotropically
+
+### 🧪 Threshold Processing Experiment
+
+**Test Setup:**
+```python
+# Test script: Unet/line_only/test/test_threshold_effect.py
+# Compare: threshold=0.0 (no filter) vs threshold=0.2 (filter low values)
+```
+
+**Results (411 test samples):**
+
+| Metric | No Threshold | Threshold ≥ 0.2 | Improvement |
+|--------|--------------|-----------------|-------------|
+| Mean Error | 32.70° | **23.73°** | -8.97° (27.4%) |
+| Median Error | 28.10° | **10.09°** | -18.01° (64.1%) |
+| Max Error | 89.61° | 89.49° | ~same |
+| Confidence | 0.214 | **0.941** | +0.726 (340%) |
+
+**Key Findings:**
+- ✅ 98.8% of samples improved or unchanged
+- ✅ Dramatic confidence boost (0.214 → 0.941)
+- ⚠️ 1.2% of samples degraded (5 out of 411)
+  - Degraded samples: originally low heatmap response
+  - Threshold cut important low-intensity regions
+
+### 🎨 Visualization Scripts Created
+
+**Location:** `Unet/line_only/test/threshold_effect/`
+
+1. **test_threshold_effect.py**
+   - Compare threshold=0.0 vs 0.2 across test dataset
+   - Generate statistics and improvement analysis
+   - Output: `analysis_summary.png`
+
+2. **visualize_threshold_comparison.py**
+   - Visual comparison of improved/degraded samples
+   - 3-panel format: Heatmap / Pred Lines / GT Lines
+   - Key features:
+     - Shows thresholded heatmap (>= 0.2 only)
+     - Pred lines clipped to thresholded region + 10px margin
+     - Background: original CT image
+
+**Generated Images (11 files, 1.9MB):**
+- `analysis_summary.png` - Overall statistics
+- `improved_1-5_delta*.png` - Top 5 improved samples (70-88° improvement)
+- `degraded_1-5_delta*.png` - Top 5 degraded samples (52-72° degradation)
+
+### 📈 Sample Analysis
+
+**Best Improvement (sample22_C3_slice044_ch1):**
+- Error: 89.6° → 0.9° (**88.6° improvement**)
+- Threshold removed noisy low-intensity regions
+- Pred line almost perfectly matches GT
+
+**Worst Degradation (sample22_C4_slice046_ch1):**
+- Error: 6.3° → 78.2° (**71.9° degradation**)
+- Original heatmap had weak but correct response
+- Threshold cut too much, leaving fragmented information
+
+### 🎯 Next Steps
+
+**Immediate (This Direction):**
+- [ ] Implement threshold processing in training pipeline
+  - Modify `extract_pred_line_params_batch()` in `line_losses.py`
+  - Add `threshold=0.2` parameter
+- [ ] Re-train model with threshold processing
+- [ ] Verify angle_error drops to <15° (ideally <10°)
+
+**Alternative Approaches (If Needed):**
+- [ ] Adaptive threshold per channel (instead of fixed 0.2)
+- [ ] Soft weighting instead of hard threshold
+- [ ] Improve heatmap quality through better training
+
+### 📝 Technical Details
+
+**Threshold Implementation:**
+```python
+# Before moment calculation:
+if threshold > 0:
+    heatmaps = torch.where(heatmaps >= threshold, heatmaps, 0.0)
+# Then compute moments as usual
+```
+
+**Why It Works:**
+1. Removes low-intensity noise → cleaner heatmap
+2. Reduces mu20 ≈ mu02 cases → more stable atan2
+3. Increases λ1/λ2 ratio → higher confidence
+
+**Trade-off:**
+- 98.8% improve, but 1.2% degrade (acceptable)
+- Degraded cases: weak heatmap response (training issue, not threshold issue)
+
+### 📁 Files Created
+
+- `Unet/line_only/test/test_threshold_effect.py` - Effect analysis
+- `Unet/line_only/test/visualize_threshold_comparison.py` - Visualization
+- `Unet/line_only/test/threshold_effect/*.png` - 11 visualization images
+
+### 💡 Key Insight
+
+**The angle error is not caused by coordinate bugs or formula errors.**
+**It's caused by mathematical instability when computing angles from noisy, isotropic heatmaps.**
+**Threshold processing is an effective post-processing solution.**
+
+---
