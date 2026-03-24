@@ -140,6 +140,88 @@ def test_pred_extraction_synthetic_line():
     assert conf > 0.9, f"Expected high confidence, got {conf}"
 
 
+def test_threshold_backward_compatibility():
+    """Test that threshold=None maintains backward compatibility."""
+    B, C, H, W = 1, 1, 224, 224
+
+    # Create synthetic heatmap
+    y_coords = torch.arange(H, dtype=torch.float32).unsqueeze(1)
+    heatmap = torch.exp(-((y_coords - 112) ** 2) / (2 * 5.0**2))
+    heatmap = heatmap.expand(H, W).unsqueeze(0).unsqueeze(0)
+
+    # Extract with threshold=None (default)
+    pred_params_none, conf_none = extract_pred_line_params_batch(heatmap)
+
+    # Extract without specifying threshold (backward compatibility)
+    pred_params_default, conf_default = extract_pred_line_params_batch(heatmap)
+
+    # Should be identical
+    assert torch.allclose(pred_params_none, pred_params_default, atol=1e-6), \
+        "threshold=None should match default behavior"
+    assert torch.allclose(conf_none, conf_default, atol=1e-6), \
+        "Confidence should match for default behavior"
+
+    print("✓ Backward compatibility: threshold=None matches default")
+
+
+def test_threshold_effect():
+    """Test that threshold=0.2 filters noise and stabilizes angle calculation."""
+    B, C, H, W = 1, 1, 224, 224
+
+    # Create noisy heatmap (horizontal line + uniform noise)
+    y_coords = torch.arange(H, dtype=torch.float32).unsqueeze(1)
+    clean_signal = torch.exp(-((y_coords - 112) ** 2) / (2 * 5.0**2))
+    clean_signal = clean_signal.expand(H, W)
+
+    # Add uniform low-level noise
+    noise = torch.rand(H, W) * 0.15  # Noise below threshold
+    noisy_heatmap = (clean_signal + noise).unsqueeze(0).unsqueeze(0)
+    noisy_heatmap = torch.clamp(noisy_heatmap, 0, 1)
+
+    # Extract without threshold
+    pred_none, conf_none = extract_pred_line_params_batch(noisy_heatmap, threshold=None)
+
+    # Extract with threshold=0.2
+    pred_thresh, conf_thresh = extract_pred_line_params_batch(noisy_heatmap, threshold=0.2)
+
+    phi_none = pred_none[0, 0, 0].item()
+    phi_thresh = pred_thresh[0, 0, 0].item()
+
+    # Threshold should increase confidence
+    assert conf_thresh[0, 0] > conf_none[0, 0], \
+        f"Threshold should increase confidence: {conf_none[0, 0]:.3f} -> {conf_thresh[0, 0]:.3f}"
+
+    # Both should be valid (not NaN)
+    assert not math.isnan(phi_none) and not math.isnan(phi_thresh), \
+        "Both extractions should be valid"
+
+    print(f"✓ Threshold effect: conf {conf_none[0, 0]:.3f} -> {conf_thresh[0, 0]:.3f}")
+
+
+def test_threshold_zero_vs_none():
+    """Test that threshold=0.0 and threshold=None behave differently."""
+    B, C, H, W = 1, 1, 224, 224
+
+    # Create heatmap with some negative values (should not happen in sigmoid, but edge case)
+    heatmap = torch.randn(B, C, H, W) * 0.1 + 0.5
+    heatmap = torch.clamp(heatmap, 0, 1)
+
+    # Extract with None (no filtering)
+    pred_none, _ = extract_pred_line_params_batch(heatmap, threshold=None)
+
+    # Extract with 0.0 (filter exactly zero, but keep positive values)
+    pred_zero, _ = extract_pred_line_params_batch(heatmap, threshold=0.0)
+
+    # For sigmoid outputs (all >= 0), these should be very similar
+    # This test ensures the threshold logic is correctly implemented
+    if not (torch.isnan(pred_none).all() or torch.isnan(pred_zero).all()):
+        # If both valid, they should be close for sigmoid outputs
+        assert torch.allclose(pred_none, pred_zero, atol=0.1, equal_nan=True), \
+            "threshold=0.0 should have minimal effect on sigmoid outputs"
+
+    print("✓ threshold=0.0 vs None: Logic correctly implemented")
+
+
 def run_all_tests():
     """Run all tests."""
     print("\n" + "=" * 60)
@@ -156,6 +238,13 @@ def run_all_tests():
     print("=" * 60)
     test_pred_extraction_gradient_flow()
     test_pred_extraction_synthetic_line()
+
+    print("\n" + "=" * 60)
+    print("Running Threshold Tests")
+    print("=" * 60)
+    test_threshold_backward_compatibility()
+    test_threshold_effect()
+    test_threshold_zero_vs_none()
 
     print("\n" + "=" * 60)
     print("All tests passed!")

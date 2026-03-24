@@ -76,7 +76,7 @@ def extract_gt_line_params(polyline_points, image_size=224):
 # -------------------------
 # 予測直線パラメータ抽出（Codex最適化版）
 # -------------------------
-def extract_pred_line_params_batch(heatmaps, image_size=224, min_mass=1e-6):
+def extract_pred_line_params_batch(heatmaps, image_size=224, min_mass=1e-6, threshold=None):
     """
     モーメント法を用いて予測ヒートマップから (φ, ρ) を抽出
 
@@ -90,6 +90,9 @@ def extract_pred_line_params_batch(heatmaps, image_size=224, min_mass=1e-6):
         heatmaps: (B, 4, H, W) 予測ヒートマップ（sigmoid後）
         image_size: 画像の次元
         min_mass: ヒートマップ質量の最小閾値
+        threshold: ヒートマップの閾値処理（デフォルトNone=処理なし）
+                  評価時は0.2を推奨（ノイズ抑制により角度計算を安定化）
+                  訓練時はNoneを推奨（勾配信号を保持）
 
     戻り値:
         pred_params: (B, 4, 2) (phi_rad, rho_normalized) のテンソル
@@ -112,6 +115,11 @@ def extract_pred_line_params_batch(heatmaps, image_size=224, min_mass=1e-6):
     for b in range(B):
         for c in range(C):
             hm = heatmaps[b, c]
+
+            # Apply threshold if specified (evaluation-time noise suppression)
+            if threshold is not None:
+                hm = torch.where(hm >= threshold, hm, torch.tensor(0.0, device=device))
+
             M00 = hm.sum()
 
             # ガード: 質量が小さい場合はスキップ

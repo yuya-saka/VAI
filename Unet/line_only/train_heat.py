@@ -503,7 +503,17 @@ def peak_dist(pred, gt):
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, image_size=224):
+def evaluate(model, loader, device, image_size=224, heatmap_threshold=0.2):
+    """
+    モデルの評価を実行
+
+    Args:
+        model: 評価するモデル
+        loader: データローダー
+        device: 計算デバイス
+        image_size: 画像サイズ
+        heatmap_threshold: 評価時のヒートマップ閾値（デフォルト0.2）
+    """
     model.eval()
     mse_sum = 0.0
     n = 0
@@ -546,7 +556,7 @@ def evaluate(model, loader, device, image_size=224):
         if gt_params is not None:
             gt_params = gt_params.to(device).float()
             pred_params, confidence = line_losses.extract_pred_line_params_batch(
-                pred, image_size
+                pred, image_size, threshold=heatmap_threshold
             )
 
             gt_valid = ~torch.isnan(gt_params).any(dim=-1)
@@ -788,6 +798,7 @@ def run_training_loop(
     es_pat = int(tr_cfg.get("early_stopping_patience", 20))
     grad_clip = float(tr_cfg.get("grad_clip", 1.0))
     image_size = int(cfg.get("data", {}).get("image_size", 224))  # NEW
+    heatmap_threshold = float(eval_cfg.get("heatmap_threshold", 0.2))  # NEW
 
     # NEW: Line loss configuration
     use_angle_loss = loss_cfg.get("use_angle_loss", False)
@@ -855,10 +866,10 @@ def run_training_loop(
 
         # 評価
         if ep % mfreq == 0:
-            val_metrics = evaluate(model, val_loader, device, image_size)
+            val_metrics = evaluate(model, val_loader, device, image_size, heatmap_threshold)
         else:
             # val_mseは最低限earlystop/schedulerに必要なので毎エポック計算
-            val_metrics = evaluate(model, val_loader, device, image_size)
+            val_metrics = evaluate(model, val_loader, device, image_size, heatmap_threshold)
 
         # validation lossに基づいてスケジューラを更新
         scheduler.step(val_metrics["val_loss_mse"])
@@ -916,6 +927,7 @@ def train_one_fold(cfg):
     tr_cfg = cfg.get("training", {})
     eval_cfg = cfg.get("evaluation", {})
     test_fold = int(data_cfg.get("test_fold", 0))
+    heatmap_threshold = float(eval_cfg.get("heatmap_threshold", 0.2))
 
     # データセット準備と分割
     train_s, val_s, test_s, root_dir, group, image_size, sigma, seed = (
@@ -952,7 +964,7 @@ def train_one_fold(cfg):
         model.load_state_dict(ckpt["model"])
     else:
         print(f"[WARNING] No best checkpoint saved (no improvement during training). Using current model state.")
-    test_metrics = evaluate(model, test_loader, device)
+    test_metrics = evaluate(model, test_loader, device, image_size, heatmap_threshold)
     print(
         f"[TEST] fold={test_fold}  "
         f"mse={test_metrics['val_loss_mse']:.6f}  "
