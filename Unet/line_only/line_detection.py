@@ -25,6 +25,15 @@ def polyline_length(pts: list[list[float]] | None) -> float:
     return float(np.sqrt((d**2).sum(axis=1)).sum())
 
 
+def line_extent(pts: list[list[float]] | None) -> float:
+    """最遠点間距離（V字ポリラインでも正しい線長を返す）"""
+    if pts is None or len(pts) < 2:
+        return 0.0
+    arr = np.asarray(pts, dtype=np.float64)
+    dists = np.sqrt(((arr[:, None] - arr[None, :]) ** 2).sum(axis=-1))
+    return float(dists.max())
+
+
 def centroid_dist_px(c_pred, c_gt) -> float:
     return float(math.sqrt((c_pred[0] - c_gt[0]) ** 2 + (c_pred[1] - c_gt[1]) ** 2))
 
@@ -497,8 +506,9 @@ def predict_lines_and_eval_test(
         pred = torch.sigmoid(model(x))
 
         # Extract pred line params for entire batch
+        # hm_thr を渡してノイズ抑制（evaluate() と同じ挙動）
         pred_params, confidence = line_losses.extract_pred_line_params_batch(
-            pred, image_size
+            pred, image_size, threshold=hm_thr
         )
 
         x_np = x.cpu().numpy()
@@ -531,8 +541,8 @@ def predict_lines_and_eval_test(
                 pred_phi = pred_params_np[i, c, 0]
                 pred_rho = pred_params_np[i, c, 1]
 
-                # GT線長（描画長さの参照）
-                Lgt = polyline_length(gt_pts)
+                # GT線長（描画長さの参照）：最遠点間距離でV字2倍カウントを回避
+                Lgt = line_extent(gt_pts)
                 if Lgt <= 1e-6:
                     Lgt = None
 

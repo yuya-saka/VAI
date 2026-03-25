@@ -12,7 +12,7 @@ import torch.nn.functional as F
 # -------------------------
 def extract_gt_line_params(polyline_points, image_size=224):
     """
-    GT折れ線アノテーションから (φ, ρ) を抽出
+    GT折れ線アノテーションから (φ, ρ) を抽出（PCA法）
 
     引数:
         polyline_points: 直線を定義する [x, y] 点のリスト（最低2点）
@@ -23,54 +23,41 @@ def extract_gt_line_params(polyline_points, image_size=224):
         (phi_rad, rho_normalized) または無効な場合は (nan, nan)
         出力は数学座標系 (Y上向き)
 
-    座標系変換:
-        入力 (image coords): x=col, y=row (Y下向き)
-        → 出力 (math coords): x=col-center, y=-(row-center) (Y上向き)
-
-    出力座標系 (math coords):
-        - 原点: 画像中心 (image_size/2, image_size/2)
-        - x軸: 列方向（左から右）
-        - y軸: 上向き (数学座標系)
-        - φ: 法線ベクトルの角度 [0, π)
-        - ρ: 原点からの符号付き距離、対角線Dで正規化
+    PCA法を使う理由:
+        V字型ポリライン（全データの57.3%）では先頭・末尾点が同じ端に集まるため
+        端点法だと角度が大きくずれる。PCAは全点を使うため正確な主軸を返す。
     """
     if polyline_points is None or len(polyline_points) < 2:
         return float("nan"), float("nan")
 
-    # 端点を取得 (image coords: x=col, y=row)
-    p1 = np.array(polyline_points[0], dtype=np.float64)
-    p2 = np.array(polyline_points[-1], dtype=np.float64)
-
-    # image coords → math coords 変換
-    # x' = x - center, y' = -(y - center) でY軸を上向きに反転
     center = image_size / 2.0
-    p1_c = np.array([p1[0] - center, -(p1[1] - center)], dtype=np.float64)
-    p2_c = np.array([p2[0] - center, -(p2[1] - center)], dtype=np.float64)
+    pts = np.array(polyline_points, dtype=np.float64)
 
-    # 直線の方向ベクトル
-    direction = p2_c - p1_c
-    norm_dir = np.linalg.norm(direction)
-    if norm_dir < 1e-6:
-        return float("nan"), float("nan")
-    direction = direction / norm_dir
+    # image coords → math coords 変換（Y軸上向き）
+    pm = np.column_stack([pts[:, 0] - center, -(pts[:, 1] - center)])
+    cen = pm.mean(axis=0)
 
-    # 法線ベクトル（90度反時計回りに回転）
-    normal = np.array([-direction[1], direction[0]], dtype=np.float64)
+    # PCAで主軸方向を取得
+    xc = pm - cen
+    cov = (xc.T @ xc) / max(1, len(pts))
+    evals, evecs = np.linalg.eigh(cov)
+    d = evecs[:, np.argmax(evals)]
+
+    # 法線ベクトル（90度反時計回り）
+    nx, ny = -d[1], d[0]
 
     # φ を [0, π) に制限
-    if normal[1] < 0 or (normal[1] == 0 and normal[0] < 0):
-        normal = -normal
+    if ny < 0 or (ny == 0 and nx < 0):
+        nx, ny = -nx, -ny
 
-    # φ と ρ を抽出
-    phi = np.arctan2(normal[1], normal[0])
-    midpoint = (p1_c + p2_c) / 2.0
-    rho = np.dot(normal, midpoint)
+    # φ と ρ を計算
+    phi = np.arctan2(ny, nx)
+    rho = nx * cen[0] + ny * cen[1]
 
     # ρ を正規化
     D = np.sqrt(image_size**2 + image_size**2)
-    rho_norm = rho / D
 
-    return float(phi), float(rho_norm)
+    return float(phi), float(rho / D)
 
 
 # -------------------------

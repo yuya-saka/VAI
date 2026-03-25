@@ -146,6 +146,62 @@
 
 ---
 
+## 2026-03-25（続き）
+
+### やったこと（続き）
+
+**4. パイプライン修正（完了）**
+
+以下の3つのバグを修正し、コミット済み：
+
+| 修正箇所 | 修正内容 |
+|---------|---------|
+| `line_losses.py: extract_gt_line_params` | 端点法 → PCA法（V字ポリライン対応） |
+| `line_detection.py: line_extent` 関数追加 | `polyline_length`（V字で2倍カウント）→ `line_extent`（最遠点間距離）に置換 |
+| `line_detection.py: predict_lines_and_eval_test` | `extract_pred_line_params_batch` に `threshold=hm_thr` を渡すよう修正 |
+
+**5. 統計評価バグの発見・修正**
+
+`predict_lines_and_eval_test` が `threshold` を渡していなかったため、評価結果が誤っていた：
+
+| | 修正前 | 修正後 |
+|-|--------|--------|
+| angle_error | 28.19° | 5.27° |
+| rho_error | 9.87px | 3.01px |
+| perp_dist | 18.61px | 10.76px |
+
+**6. 新チェックポイント検証**
+
+`checkpoints_sig2.5_ALL_位置ずれ修正こんどこそ_1fold`（修正済みパイプラインで評価）：
+
+| メトリクス | 値 |
+|-----------|-----|
+| angle_error | **4.89°** |
+| rho_error | **2.94px** |
+| perp_dist | **10.48px** |
+| peak_dist | **23.12px** |
+
+### 現状
+
+**完了済みバグ修正（パイプライン）:**
+- [x] GT計算のPCA法化（V字ポリライン問題解決）
+- [x] `polyline_length` → `line_extent`（V字2倍カウント解消）
+- [x] `predict_lines_and_eval_test` の threshold 未渡し修正
+- [x] 可視化スクリプトの GT 描画位置ずれ修正
+
+**モデル精度（fold2, MSEのみ）:**
+- angle_error: ~4.9°（目標 <5° 達成）
+- rho_error: ~2.9px
+- C1椎体の peak_dist が他より高め（32px vs 平均23px）
+
+### 次にやること
+
+- [ ] 全 fold 実行（現在は fold2 のみ）
+- [ ] 角度損失・ρ損失を有効化した実験（Phase 2/3）
+- [ ] C1の精度改善検討
+
+---
+
 ## テンプレート（以下をコピーして使用）
 
 ```markdown
