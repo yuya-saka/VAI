@@ -22,6 +22,16 @@ from torch.utils.data import DataLoader, Dataset
 tempfile.tempdir = "/tmp"
 
 
+def _get_wandb():
+    """wandb を遅延インポート（無効時にインストール不要にするため）"""
+    try:
+        import wandb
+
+        return wandb
+    except ImportError:
+        return None
+
+
 # -------------------------
 # 再現性の確保
 # -------------------------
@@ -772,7 +782,8 @@ def create_model_optimizer_scheduler(cfg, device):
 
 
 def run_training_loop(
-    model, opt, scheduler, train_loader, val_loader, device, cfg, best_path
+    model, opt, scheduler, train_loader, val_loader, device, cfg, best_path,
+    wandb_enabled=False, _wandb=None,
 ):
     """
     訓練ループを実行（早期停止機能付き）
@@ -786,6 +797,8 @@ def run_training_loop(
         device: PyTorchデバイス
         cfg: 設定辞書
         best_path: ベストモデル保存パス
+        wandb_enabled: wandb ログを有効にするか
+        _wandb: wandb モジュール（遅延インポート済み）
 
     Returns:
         None (ベストモデルをbest_pathに保存)
@@ -892,6 +905,21 @@ def run_training_loop(
         log_str += f"time={time.time() - t0:.1f}s"
         print(log_str)
 
+        # wandb にメトリクスを記録
+        if wandb_enabled and _wandb is not None:
+            log_dict = {
+                "epoch": ep,
+                "lr": cur_lr,
+                "train_mse": train_loss,
+                "val_mse": val_metrics["val_loss_mse"],
+                "peak_dist": val_metrics["peak_dist_mean"],
+                "warmup_weight": warmup_weight,
+            }
+            if "angle_error_deg" in val_metrics:
+                log_dict["angle_error_deg"] = val_metrics["angle_error_deg"]
+                log_dict["rho_error_px"] = val_metrics["rho_error_px"]
+            _wandb.log(log_dict, step=ep)
+
         # val_mseによる早期停止
         if val_metrics["val_loss_mse"] < best_val - 1e-8:
             best_val = val_metrics["val_loss_mse"]
@@ -900,6 +928,13 @@ def run_training_loop(
                 {"model": model.state_dict(), "cfg": cfg, "val": val_metrics}, best_path
             )
             print(f"  [SAVE] best -> {best_path} (val_mse={best_val:.6f})")
+            if wandb_enabled and _wandb is not None:
+                _wandb.run.summary["best_val_mse"] = best_val
+                _wandb.run.summary["best_epoch"] = ep
+                _wandb.run.summary["best_peak_dist"] = val_metrics["peak_dist_mean"]
+                if "angle_error_deg" in val_metrics:
+                    _wandb.run.summary["best_angle_error_deg"] = val_metrics["angle_error_deg"]
+                    _wandb.run.summary["best_rho_error_px"] = val_metrics["rho_error_px"]
         else:
             no_improve += 1
             if no_improve >= es_pat:
@@ -944,6 +979,24 @@ def train_one_fold(cfg):
     device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
     print(f"[INFO] device={device}")
 
+    # wandb 初期化
+    wandb_cfg = cfg.get("wandb", {})
+    wandb_enabled = wandb_cfg.get("enabled", False)
+    _wandb = None
+    if wandb_enabled:
+        _wandb = _get_wandb()
+        if _wandb is None:
+            print("[WARNING] wandb.enabled=true だが wandb がインストールされていません。ログをスキップします。")
+            wandb_enabled = False
+        else:
+            run_name = wandb_cfg.get("run_name") or f"fold{test_fold}"
+            _wandb.init(
+                project=wandb_cfg.get("project", "vai-unet-line"),
+                name=run_name,
+                config=cfg,
+                reinit=True,
+            )
+
     # モデル、最適化器、スケジューラー作成
     model, opt, scheduler = create_model_optimizer_scheduler(cfg, device)
 
@@ -955,7 +1008,8 @@ def train_one_fold(cfg):
 
     # 訓練ループ実行
     run_training_loop(
-        model, opt, scheduler, train_loader, val_loader, device, cfg, best_path
+        model, opt, scheduler, train_loader, val_loader, device, cfg, best_path,
+        wandb_enabled=wandb_enabled, _wandb=_wandb,
     )
 
     # ベストモデルを読み込んでテスト
@@ -1059,6 +1113,15 @@ def train_one_fold(cfg):
         tag="TEST",
     )
     print(f"[INFO] saved to {vis_root}/")
+
+    # wandb 終了
+    if wandb_enabled and _wandb is not None:
+        _wandb.run.summary["test_mse"] = test_metrics["val_loss_mse"]
+        _wandb.run.summary["test_peak_dist"] = test_metrics["peak_dist_mean"]
+        _wandb.run.summary["line_perp_dist"] = line_summary["perpendicular_dist_px_mean"]
+        _wandb.run.summary["line_angle_error"] = line_summary["angle_error_deg_mean"]
+        _wandb.run.summary["line_rho_error"] = line_summary["rho_error_px_mean"]
+        _wandb.finish()
 
     # Return results for train.py
     return {
