@@ -51,6 +51,7 @@ def detect_line_moments(
     min_mass: float = 1e-6,
     clip: bool = True,
     top_p_fallback: float = 0.02,
+    threshold: float | None = 0.2,
 ) -> dict[str, Any] | None:
     """
     ヒートマップから直線を検出（モーメント法）
@@ -60,6 +61,8 @@ def detect_line_moments(
 
     引数:
         hm: (H,W) float [0,1] ガウス分布様のヒートマップ
+        threshold: しきい値。これ未満のピクセルをゼロにして
+                   背景ノイズがモーメント計算に影響するのを防ぐ
 
     戻り値:
       {
@@ -76,6 +79,10 @@ def detect_line_moments(
 
     hm = hm.astype(np.float64)
     H, W = hm.shape
+
+    # しきい値適用: 背景ノイズを除去してモーメント計算の精度を向上
+    if threshold is not None:
+        hm = np.where(hm >= threshold, hm, 0.0)
 
     M00 = hm.sum()
     if M00 < min_mass:

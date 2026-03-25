@@ -92,3 +92,64 @@ Both factors contribute:
 2. **Filter low-confidence samples** during training (Conf < 0.3)
 3. **Reduce sigma** in GT generation (2.5 → 1.5-2.0) for sharper heatmaps
 4. **Add heatmap sharpness loss** to encourage higher confidence predictions
+
+---
+
+## UPDATE 2026-03-23 16:00 - Root Cause Identified
+
+### Critical Coordinate System Bug
+
+Codex found the **true root cause**: meshgrid variable assignment is **swapped** in both files.
+
+**Bug Location 1: `line_detection.py:87`**
+```python
+# Current (WRONG):
+X, Y = np.meshgrid(x_grid, y_grid)
+
+# Correct:
+Y, X = np.meshgrid(y_grid, x_grid)
+```
+
+**Bug Location 2: `line_losses.py:109`**
+```python
+# Current (WRONG):
+Y, X = torch.meshgrid(y_grid, x_grid, indexing="ij")
+
+# Correct:
+X, Y = torch.meshgrid(x_grid, y_grid, indexing="xy")
+```
+
+### Why This Causes Vertical Heatmap → Horizontal Line
+
+1. **Swapped coordinates**: X variable contains Y-coordinates, Y variable contains X-coordinates
+2. **mu20 and mu02 are reversed**:
+   - mu20 (X-variance) actually measures Y-variance
+   - mu02 (Y-variance) actually measures X-variance
+3. **Vertical blob case**:
+   - Should be: small X-variance, large Y-variance → mu20 < mu02 → theta ≈ 90°
+   - Actually: mu20 measures Y-variance → mu20 > mu02 → theta ≈ 0° (horizontal)
+
+### Why Both Files Had Same Wrong Result
+
+Both files swap meshgrid outputs the same way → consistent but incorrect calculations.
+
+All three mathematical methods (eigenvector/analytical/covariance) use the same wrong coordinate system, so they produce identical wrong answers.
+
+### Priority Fix Order
+
+**HIGH PRIORITY:**
+1. Fix meshgrid in `line_detection.py:87`
+2. Fix meshgrid in `line_losses.py:109`
+
+**MEDIUM PRIORITY:**
+3. Replace eigenvector formula with analytical formula (lines 167-183 in line_losses.py)
+
+**LOW PRIORITY:**
+4. Confidence filtering and sigma tuning
+
+### Verification After Fix
+
+After meshgrid fix:
+- Vertical blobs should show mu20 < mu02
+- theta should be ≈ 90° for vertical lines
+- Angle errors should drop dramatically (expected < 5° with 5-10% crosstalk)

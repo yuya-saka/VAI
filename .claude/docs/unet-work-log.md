@@ -67,6 +67,79 @@
 ### メモ
 
 - matplotlib の日本語対応仕様が決定済み
+
+---
+
+## 2026-03-25
+
+### やったこと
+
+**1. 線方向の誤差根本原因調査（完了）**
+
+症状: 予測ヒートマップは位置的に正しいが、抽出された線の方向が大きくずれる
+
+**原因1: GT角度の誤計算 (`line_losses.py` → `extract_gt_line_params`)**
+- アノテーションのV字型ポリライン（折れ線）に対して、先頭・末尾点のみで角度を計算していた
+- V字ポリラインは全データの **57.3%**（3639アノテーション中）に存在
+- これにより **46.4%** のアノテーションで角度誤差 >10°（ランダムに近い）
+
+**原因2: `detect_line_moments` のしきい値なし問題**
+- ヒートマップのsigmoid出力は背景全体に低いノイズを持つ
+- しきい値なしでモーメント計算すると mu20/mu02 が ~1000-2000（背景ノイズ支配）
+- しきい値=0.2 を適用すると ~10-200（線ブロブのみ）に絞られ正確な方向抽出が可能
+
+**2. 修正方針決定**
+
+| 修正対象 | 修正内容 | 効果 |
+|---------|---------|------|
+| GT計算: `extract_gt_line_params` | 端点法 → PCA法（全ポリライン点を使う） | 平均角度誤差 22.52° → 4.64° |
+| 予測抽出: `detect_line_moments` | `threshold=0.2` をデフォルト引数に追加 | 平均角度誤差 28.26° → 4.64° |
+
+**3. 実装済み**
+- `line_detection.py`: `detect_line_moments` に `threshold: float | None = 0.2` 引数追加
+- 診断スクリプト群 (`Unet/.tmp/`): V字分析、精度比較、可視化
+- 可視化画像: `Unet/.tmp/vis_threshold_compare/` (20枚、6パネル)
+
+### 現状
+
+**検証済み:**
+- しきい値修正の効果をテストセットで確認（mean 28.26° → 4.64°）
+- PCA法GTの方が端点法GTより正確（57.3%のV字ポリライン問題）
+- 学習済みモデル自体は良好（PCA GTで比較すると91.4%が10°以内）
+
+**未適用:**
+- `line_losses.py` の `extract_gt_line_params` をPCA法に置換（次セッションで実施）
+- PCA法GTで再学習（必要に応じて）
+
+### 次にやること
+
+**優先度：高**
+- [ ] `line_losses.py` の `extract_gt_line_params` をPCA法に置換
+- [ ] 修正後のGT + しきい値修正済み抽出で再評価
+- [ ] 必要なら角度損失・ρ損失を有効化して再学習
+
+### 作成したテストコード (`Unet/.tmp/`)
+
+| ファイル | 目的 | 主な出力 |
+|---------|------|---------|
+| `diagnose_direction.py` | GT heatmap抽出精度の確認（端点法 vs モーメント法の比較） | テキスト出力 |
+| `diagnose_polylines.py` | V字型ポリラインの分析（endpoint_dist/total_length の統計） | テキスト出力 |
+| `diagnose_summary.py` | データセット全体の統計（V字型57.3%、角度誤差46.4%が>10°） | テキスト出力 |
+| `test_pca_fix.py` | PCA法GTの正確性を直線・V字の両ケースで検証 | テキスト出力 |
+| `test_full_statistics.py` | 全データの誤差分布と図（fig1〜3） | `vis_*.png` |
+| `eval_angle_compare.py` | 端点法GT vs PCA法GT の角度誤差比較（22.52° vs 4.64°） | テキスト出力 |
+| `eval_detailed.py` | PCA法GTでのライン別詳細精度評価 | テキスト出力 |
+| `eval_visualize.py` | 3パネル可視化（Heatmap / GT+Pred / polyline+Pred） | `vis_output/*.png` |
+| `eval_worst_pca.py` | PCA法GTでも誤差が大きいワースト20ケースの可視化 | `vis_worst_pca/*.png` |
+| `eval_extraction_debug.py` | チャンネル別ヒートマップ + モーメント値 + GT/Pred重ね表示 | `vis_extraction_debug/*.png` |
+| `test_threshold_fix.py` | しきい値なし/0.15/0.2 の精度比較（28.26°/4.74°/4.64°） | テキスト出力 |
+| `vis_threshold_compare.py` | しきい値なし vs 0.2 の予測線を6パネルで比較可視化 | `vis_threshold_compare/*.png` |
+
+### メモ
+
+- 現行モデルはMSE損失のみで学習（`use_angle_loss: false`, `use_rho_loss: false`）
+- モデル自体は十分学習できている（問題は評価側・抽出側のバグ）
+- `detect_line_moments`（numpy/可視化用）と `extract_pred_line_params_batch`（torch/eval用）は同じ結果を返す
 - `train_heat.py` は削除され、`line_only/train_heat.py` に統合
 - 実装は `Unet_2_plan.md` の方針に完全準拠
 - Codex 相談で角度計算のバグ分析を実施済み
