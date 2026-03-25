@@ -194,6 +194,14 @@
 - rho_error: ~2.9px
 - C1椎体の peak_dist が他より高め（32px vs 平均23px）
 
+**7. wandb ログ統合（完了）**
+
+- `train_heat.py` に wandb 対応追加（遅延インポート、約50行）
+- `config.yaml` に `wandb:` セクション追加（`enabled`, `project`, `run_name`）
+- ログ内容: `train_mse`, `val_mse`, `peak_dist`, `angle_error`, `rho_error`, `lr`, `warmup_weight`
+- best保存時・テスト完了時に `wandb.run.summary` を更新
+- `enabled: false` がデフォルト（後方互換）
+
 ### 次にやること
 
 - [ ] 全 fold 実行（現在は fold2 のみ）
