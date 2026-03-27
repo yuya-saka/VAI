@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 unet_dir = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(unet_dir))
 
-from line_only.line_losses import extract_pred_line_params_batch, extract_gt_line_params
+from line_only.utils.losses import extract_pred_line_params_batch, extract_gt_line_params
 
 
 def create_gaussian_line_hesse(H=224, W=224, phi_deg=45, rho_px=0, sigma=2.5):

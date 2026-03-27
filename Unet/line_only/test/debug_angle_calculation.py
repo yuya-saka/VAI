@@ -16,14 +16,14 @@ import matplotlib.pyplot as plt
 unet_dir = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(unet_dir))
 
-from line_only.train_heat import (
+from line_only.src.data_utils import (
     load_config,
     kfold_split_samples,
     create_data_loaders,
-    TinyUNet,
 )
-from line_only.line_losses import extract_pred_line_params_batch, extract_gt_line_params
-from line_only.line_detection import detect_line_moments
+from line_only.src.model import TinyUNet
+from line_only.utils.losses import extract_pred_line_params_batch, extract_gt_line_params
+from line_only.utils.detection import detect_line_moments
 
 
 def debug_specific_sample(model, test_loader, dataset_root, device, target_sample):

@@ -16,14 +16,14 @@ import torch
 unet_dir = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(unet_dir))
 
-from line_only.train_heat import (
+from line_only.src.data_utils import (
     load_config,
     kfold_split_samples,
     create_data_loaders,
-    TinyUNet,
-    PngLineDataset,
 )
-from line_only.line_detection import detect_line_moments
+from line_only.src.model import TinyUNet
+from line_only.src.dataset import PngLineDataset
+from line_only.utils.detection import detect_line_moments
 
 
 def compare_gt_pred_heatmaps():

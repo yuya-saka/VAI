@@ -66,6 +66,7 @@ segmentations/
 annotation_data/
 tests/
 wandb/
+trash/
 
 # Temporary directory for Claude Code
 .tmp/

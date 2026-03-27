@@ -8,8 +8,8 @@ import yaml
 # プロジェクトルートをパスに追加
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from Unet.line_only.line_detection import predict_lines_and_eval_test
-from Unet.line_only.train_heat import create_data_loaders, get_model
+from Unet.line_only.src.trainer import predict_lines_and_eval_test
+from Unet.line_only.src.data_utils import create_data_loaders, get_model
 
 
 def test_one_sample():

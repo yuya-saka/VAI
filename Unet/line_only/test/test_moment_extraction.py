@@ -7,7 +7,7 @@ Y軸座標系修正が正しく機能することを確認
 import torch
 import numpy as np
 import pytest
-from line_losses import extract_pred_line_params_batch
+from line_only.utils.losses import extract_pred_line_params_batch
 
 
 def test_horizontal_line():

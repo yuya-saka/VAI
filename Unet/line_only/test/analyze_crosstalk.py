@@ -15,12 +15,12 @@ import torch
 unet_dir = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(unet_dir))
 
-from line_only.train_heat import (
+from line_only.src.data_utils import (
     load_config,
     kfold_split_samples,
     create_data_loaders,
-    TinyUNet,
 )
+from line_only.src.model import TinyUNet
 
 
 def create_line_mask(gt_points, image_size=224, thickness=5):

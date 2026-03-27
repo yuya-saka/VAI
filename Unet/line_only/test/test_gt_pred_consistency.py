@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from pathlib import Path
 
-from line_only.line_losses import extract_gt_line_params, extract_pred_line_params_batch
+from line_only.utils.losses import extract_gt_line_params, extract_pred_line_params_batch
 from line_only.heatmap import generate_gaussian_heatmap
 
 

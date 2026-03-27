@@ -20,8 +20,8 @@ from skimage.morphology import skeletonize
 
 # Import from parent directory
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from line_only.line_detection import detect_line_moments
-from line_only.line_losses import extract_gt_line_params, extract_pred_line_params_batch
+from line_only.utils.detection import detect_line_moments
+from line_only.utils.losses import extract_gt_line_params, extract_pred_line_params_batch
 
 
 def load_model_and_data():

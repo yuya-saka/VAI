@@ -15,13 +15,13 @@ import matplotlib.pyplot as plt
 unet_dir = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(unet_dir))
 
-from line_only.train_heat import (
+from line_only.src.data_utils import (
     load_config,
     kfold_split_samples,
     create_data_loaders,
-    TinyUNet,
 )
-from line_only.line_losses import extract_pred_line_params_batch, extract_gt_line_params
+from line_only.src.model import TinyUNet
+from line_only.utils.losses import extract_pred_line_params_batch, extract_gt_line_params
 
 
 def visualize_sample_with_confidence(pred_heatmap, confidence, sample_info, save_path):

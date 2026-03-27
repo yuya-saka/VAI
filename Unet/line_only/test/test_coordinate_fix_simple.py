@@ -2,8 +2,8 @@
 import numpy as np
 from pathlib import Path
 
-from line_only.line_detection import detect_line_moments
-from line_only.line_losses import extract_gt_line_params
+from line_only.utils.detection import detect_line_moments
+from line_only.utils.losses import extract_gt_line_params
 
 def test_gt_extraction():
     """GT抽出が数学座標系になっているか確認"""

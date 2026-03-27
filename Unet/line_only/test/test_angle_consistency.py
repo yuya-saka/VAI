@@ -1,8 +1,8 @@
 """detect_line_moments と extract_pred_line_params_batch の角度が一致するか確認"""
 import torch
 import numpy as np
-from line_only.line_detection import detect_line_moments
-from line_only.line_losses import extract_pred_line_params_batch
+from line_only.utils.detection import detect_line_moments
+from line_only.utils.losses import extract_pred_line_params_batch
 
 
 def test_angle_consistency():

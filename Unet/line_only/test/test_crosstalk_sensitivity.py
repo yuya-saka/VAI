@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 unet_dir = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(unet_dir))
 
-from line_only.line_detection import detect_line_moments
+from line_only.utils.detection import detect_line_moments
 
 
 def create_gaussian_line(H=224, W=224, angle_deg=45, center=(112, 112), sigma=2.5, length=100):

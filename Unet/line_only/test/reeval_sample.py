@@ -15,9 +15,11 @@ import json
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from train_heat import UNet, ImageDataset
-from line_losses import extract_pred_line_params_batch
-from line_detection import draw_lines_on_image
+# NOTE: UNet has been replaced by TinyUNet; ImageDataset is no longer available.
+from line_only.src.model import TinyUNet as UNet
+from line_only.utils.losses import extract_pred_line_params_batch
+# NOTE: draw_lines_on_image no longer exists; using closest equivalent.
+from line_only.utils.visualization import draw_line_overlay
 import torch.utils.data as data
 
 

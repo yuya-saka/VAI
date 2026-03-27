@@ -5,7 +5,7 @@ import math
 import numpy as np
 import torch
 
-from ..line_losses import extract_gt_line_params, extract_pred_line_params_batch
+from ..utils.losses import extract_gt_line_params, extract_pred_line_params_batch
 
 
 def test_gt_extraction_horizontal():

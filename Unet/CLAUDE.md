@@ -44,47 +44,59 @@
 
 ---
 
-## 📝 現在の作業内容
+## 📁 line_only/ ディレクトリ構成
 
-### 実装中の機能
+```
+line_only/
+├── train.py              ← 全fold実行エントリポイント
+├── __init__.py
+├── src/                  ← 訓練パイプライン
+│   ├── model.py          TinyUNet (DoubleConv)
+│   ├── dataset.py        PngLineDataset, データ拡張
+│   ├── data_utils.py     config読込, seed, k-fold分割, DataLoader
+│   └── trainer.py        訓練ループ, evaluate, train_one_fold
+├── utils/                ← 汎用ロジック（再利用可）
+│   ├── losses.py         損失関数 (phi, rho, MSE)
+│   ├── metrics.py        評価メトリクス (angle, rho, perp)
+│   ├── detection.py      直線検出 (moments ベース)
+│   └── visualization.py  描画関数
+├── shim/                 ← 旧コード保管（参照用・import 不可）
+│   ├── train_heat.py
+│   ├── line_detection.py
+│   ├── line_losses.py
+│   └── line_metrics.py
+└── test/                 ← ユニットテスト (23ファイル)
+```
 
-**line_only/ ディレクトリ**
+### 実装済み機能
+
 - Heatmap-moment ベースの直線検出
 - 幾何学的制約（phi, rho）による損失関数
 - 段階的 warmup による学習
+- 5-fold クロスバリデーション
+- wandb ログ統合
 
-主要ファイル：
-- `line_only/line_detection.py` - 直線検出ロジック
-- `line_only/line_losses.py` - 損失関数
-- `line_only/line_metrics.py` - 評価メトリクス
-- `line_only/train_heat.py` - 訓練スクリプト
-
-### 最近の変更
-
-- `train_heat.py` を削除 → `line_only/train_heat.py` に移行
-- `run_all_folds.py` を `train.py` にリネーム
-- matplotlib の日本語対応仕様決定
-
-### TODO (詳細は DESIGN.md 参照)
+### TODO
 
 主要タスク：
-- [ ] 訓練/評価パイプラインのリファクタリング
-- [ ] 評価ユーティリティの抽出
-- [ ] コメントの英語化
+- [ ] sigma チューニング実験の継続
 
 ---
 
 ## 🛠️ よく使うコマンド
 
 ```bash
-# 訓練実行
-uv run python Unet/line_only/train_heat.py
+# 全 fold 実行（line_only/ から）
+uv run python Unet/line_only/train.py --config config/config.yaml
 
-# 全 fold 実行
-uv run python Unet/train.py
+# 特定 fold のみ
+uv run python Unet/line_only/train.py --start_fold 0 --end_fold 0
+
+# 全椎体モード
+uv run python Unet/line_only/train.py --all_vertebrae
 
 # テスト
-uv run pytest Unet/line_only/test_line_losses.py -v
+uv run pytest Unet/line_only/test/ -v
 
 # 設定確認
 cat Unet/config/config.yaml

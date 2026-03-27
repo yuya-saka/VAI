@@ -13,7 +13,7 @@ from pathlib import Path
 # 親ディレクトリをパスに追加
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from line_losses import extract_pred_line_params_batch
+from line_only.utils.losses import extract_pred_line_params_batch
 
 
 def create_test_heatmap_from_angle(angle_deg, H=224, W=224):
