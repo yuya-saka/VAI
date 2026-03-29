@@ -92,14 +92,17 @@ def get_transforms(phase="train", cfg_aug=None):
 
     if cfg_aug.get("scale", False):
         ts.append(
-            A.ShiftScaleRotate(
-                shift_limit=0.0,
-                scale_limit=float(cfg_aug.get("scale_limit", 0.1)),
-                rotate_limit=0,
+            A.Affine(
+                scale=(
+                    1.0 - float(cfg_aug.get("scale_limit", 0.1)),
+                    1.0 + float(cfg_aug.get("scale_limit", 0.1)),
+                ),
+                translate_percent=0.0,
+                rotate=0,
                 p=0.5,
                 border_mode=cv2.BORDER_CONSTANT,
-                value=0.0,
-                mask_value=0.0,
+                fill=0.0,
+                fill_mask=0.0,
             )
         )
 

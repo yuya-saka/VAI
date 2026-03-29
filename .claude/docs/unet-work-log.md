@@ -429,6 +429,75 @@ L_line = λ₁ · (1 - dot²)                # 角度損失（sin²(Δφ) と等
 
 ---
 
+---
+
+## 2026-03-30
+
+### やったこと
+
+**1. albumentations 警告修正（完了）**
+
+`dataset.py` の ShiftScaleRotate → `A.Affine` 移行で発生していた引数警告を修正。
+
+```python
+# 修正前（誤ったパラメータ名）
+A.Affine(..., mode=cv2.BORDER_CONSTANT, cval=0.0, cval_mask=0.0)
+
+# 修正後（正しいパラメータ名）
+A.Affine(..., border_mode=cv2.BORDER_CONSTANT, fill=0.0, fill_mask=0.0)
+```
+
+デフォルト値は同じだったため挙動への影響は最小限だが警告は解消。
+
+---
+
+**2. fold1 回帰調査（継続中）**
+
+sig2.0_base（新 src コード）で fold1 角度誤差が **8.60° → 17.77°** に悪化した原因を調査。
+
+**実験: ShiftScaleRotate vs Affine の影響測定**
+
+`test/test_aug_fold1.py` を作成して fold1 で両 augmentation を比較：
+
+| 実験 | 角度誤差 |
+|------|---------|
+| ShiftScaleRotate（旧） | 10.71° |
+| Affine（新） | 10.93° |
+
+→ **augmentation の変更は原因ではない**（差 0.22°）
+
+**Codex 相談結果**
+
+- `wandb.init()` は torch RNG を消費しない → wandb on/off は原因ではない
+- 共有 `torch.Generator` バグ（train/val/test が同一 generator を使用）を特定
+- 詳細: `.claude/docs/codex/20260329-wandb-randomness.md`
+
+**ログ比較: baseline（旧 shim）vs 新 src の fold1**
+
+| 時期 | コード | fold1 収束パターン |
+|------|--------|-----------------|
+| baseline | 旧 shim | epoch 108 まで peak=33px/angle=38°（未収束）→ epoch 113 で 5.87° に突然収束、以後安定 |
+| sig2.0_base | 新 src | epoch 96 で 6.43° → epoch 103-170 で 13°→31°→37° と**不安定に振動** |
+
+**重要な発見**: 旧コードでも fold1 は収束が遅い（fold4 は epoch 130 で収束するのに fold1 は epoch 113）。ただし旧コードは一度収束すると安定。**新コードは収束後も不安定**。
+
+**現時点の最有力仮説**: 評価時の valid_mask 変更（`~isnan()` → `confidence > 0`）と confidence 計算式変更（`1-lam2/lam1` → `(lam1-lam2)/(lam1+lam2+eps)`）が fold1 の不安定な training signal につながっている。
+
+詳細: `.claude/docs/codex/20260329-fold1-regression.md`
+
+---
+
+### 次にやること（次セッション）
+
+- [ ] **根本原因の特定（優先）**: 新コードの fold1 不安定さの原因を絞り込む
+  - 旧コード（shim）の confidence 計算式・valid_mask を新コードで再現して実験
+  - float64 → float32 の精度変化の影響確認
+- [ ] **共有 generator バグの修正**: `data_utils.py` で train/val/test に別々の generator を使うよう修正
+- [ ] 壊れているテスト 3 件の修正（test_gt_pred_consistency.py / test_one_sample.py / test_sample_fix.py）
+- [ ] 根本原因が解消できたら `use_line_loss: true` の実験へ
+
+---
+
 ## テンプレート（以下をコピーして使用）
 
 ```markdown
