@@ -5,7 +5,14 @@ import math
 import numpy as np
 import torch
 
-from ..utils.losses import extract_gt_line_params, extract_pred_line_params_batch
+from ..utils.losses import (
+    angle_loss,
+    compute_line_loss,
+    extract_gt_line_params,
+    extract_pred_line_params_batch,
+    get_warmup_weight,
+    rho_loss,
+)
 
 
 def test_gt_extraction_horizontal():
@@ -92,9 +99,8 @@ def test_pred_extraction_gradient_flow():
     # Extract parameters
     pred_params, confidence = extract_pred_line_params_batch(heatmaps)
 
-    # Check that we can compute gradients
-    # Sum valid (non-NaN) parameters
-    valid_mask = ~torch.isnan(pred_params).any(dim=-1)
+    # Check that we can compute gradients (confidence ベースの valid_mask)
+    valid_mask = confidence > 0
     loss = (pred_params * valid_mask.unsqueeze(-1).float()).sum()
 
     # Backward
@@ -222,6 +228,211 @@ def test_threshold_zero_vs_none():
     print("✓ threshold=0.0 vs None: Logic correctly implemented")
 
 
+def test_pred_extraction_no_nan():
+    """Test that extraction never returns NaN (even for degenerate inputs)."""
+    # ランダムヒートマップ（全値が閾値以下になる可能性あり）
+    B, C, H, W = 2, 4, 224, 224
+    heatmaps = torch.sigmoid(torch.randn(B, C, H, W))
+    pred_params, confidence = extract_pred_line_params_batch(heatmaps)
+
+    assert not torch.isnan(pred_params).any(), "pred_params must not contain NaN"
+    assert not torch.isnan(confidence).any(), "confidence must not contain NaN"
+    assert (confidence >= 0).all(), "confidence must be >= 0"
+    assert (confidence <= 1).all(), "confidence must be <= 1"
+
+    # ゼロヒートマップ（完全に無効）
+    zero_hm = torch.zeros(B, C, H, W)
+    zero_params, zero_conf = extract_pred_line_params_batch(zero_hm)
+    assert not torch.isnan(zero_params).any(), "Zero heatmap must not produce NaN"
+    assert (zero_conf == 0).all(), "Zero heatmap must give confidence=0"
+
+    print(f"✓ No NaN: valid={( confidence > 0).sum().item()}/{B*C}")
+
+
+def test_pred_extraction_batch_consistency():
+    """Test that processing B=2 gives same result as two B=1 calls."""
+    C, H, W = 4, 224, 224
+
+    # ガウシアンヒートマップ（水平線 y=112）
+    y_coords = torch.arange(H, dtype=torch.float32).unsqueeze(1)
+    hm_single = torch.exp(-((y_coords - 112) ** 2) / (2 * 5.0**2)).expand(H, W)
+    hm1 = hm_single.unsqueeze(0).unsqueeze(0).expand(1, C, H, W).clone()
+    hm2 = (hm_single * 0.8).unsqueeze(0).unsqueeze(0).expand(1, C, H, W).clone()
+    hm_batch = torch.cat([hm1, hm2], dim=0)  # (2, C, H, W)
+
+    # 個別処理
+    params1, conf1 = extract_pred_line_params_batch(hm1)
+    params2, conf2 = extract_pred_line_params_batch(hm2)
+
+    # バッチ処理
+    params_batch, conf_batch = extract_pred_line_params_batch(hm_batch)
+
+    assert torch.allclose(params_batch[0], params1[0], atol=1e-5), \
+        "Batch[0] must match single B=1 result"
+    assert torch.allclose(params_batch[1], params2[0], atol=1e-5), \
+        "Batch[1] must match single B=1 result"
+    assert torch.allclose(conf_batch[0], conf1[0], atol=1e-5), \
+        "Confidence Batch[0] must match single B=1 result"
+
+    print("✓ Batch consistency: B=2 matches two B=1 calls")
+
+
+def test_warmup_weight_linear():
+    """linear warmup: 0→1 の単調増加、境界値の確認"""
+    w0 = get_warmup_weight(0, warmup_epochs=10, warmup_start_epoch=0)
+    w5 = get_warmup_weight(5, warmup_epochs=10, warmup_start_epoch=0)
+    w10 = get_warmup_weight(10, warmup_epochs=10, warmup_start_epoch=0)
+    w20 = get_warmup_weight(20, warmup_epochs=10, warmup_start_epoch=0)
+
+    assert abs(w0 - 0.0) < 1e-6, f"epoch=0: expected 0, got {w0}"
+    assert abs(w5 - 0.5) < 1e-6, f"epoch=5: expected 0.5, got {w5}"
+    assert abs(w10 - 1.0) < 1e-6, f"epoch=10: expected 1.0, got {w10}"
+    assert abs(w20 - 1.0) < 1e-6, f"epoch=20: expected 1.0 (saturate), got {w20}"
+    print(f"✓ warmup linear: w(0)={w0:.2f}, w(5)={w5:.2f}, w(10)={w10:.2f}")
+
+
+def test_warmup_weight_start_epoch():
+    """warmup_start_epoch: 開始前は 0、開始後に warmup 進行"""
+    # warmup_start_epoch=20, warmup_epochs=10 → epoch<20 は 0、epoch=25 は 0.5
+    w_before = get_warmup_weight(10, warmup_epochs=10, warmup_start_epoch=20)
+    w_at = get_warmup_weight(20, warmup_epochs=10, warmup_start_epoch=20)
+    w_mid = get_warmup_weight(25, warmup_epochs=10, warmup_start_epoch=20)
+    w_done = get_warmup_weight(30, warmup_epochs=10, warmup_start_epoch=20)
+
+    assert abs(w_before - 0.0) < 1e-6, f"before start: expected 0, got {w_before}"
+    assert abs(w_at - 0.0) < 1e-6, f"at start: expected 0, got {w_at}"
+    assert abs(w_mid - 0.5) < 1e-6, f"midpoint: expected 0.5, got {w_mid}"
+    assert abs(w_done - 1.0) < 1e-6, f"done: expected 1.0, got {w_done}"
+    print(f"✓ warmup start_epoch: before={w_before:.2f}, mid={w_mid:.2f}, done={w_done:.2f}")
+
+
+def test_angle_loss_aligned():
+    """pred=gt → loss=0"""
+    phi = torch.tensor([[0.5, 1.0, 1.5, 2.0]])  # (1, 4)
+    nx_pred = torch.cos(phi)
+    ny_pred = torch.sin(phi)
+    L, _ = angle_loss(nx_pred, ny_pred, phi)
+    assert L.max().item() < 1e-6, f"Aligned: expected 0, got {L.max().item()}"
+    print(f"✓ angle_loss aligned: max={L.max().item():.2e}")
+
+
+def test_angle_loss_orthogonal():
+    """90° ずれ → loss=1"""
+    phi_gt = torch.tensor([[0.0, math.pi / 4]])   # (1, 2)
+    phi_pred = phi_gt + math.pi / 2               # 90° ずれ
+    nx_pred = torch.cos(phi_pred)
+    ny_pred = torch.sin(phi_pred)
+    L, _ = angle_loss(nx_pred, ny_pred, phi_gt)
+    assert abs(L.max().item() - 1.0) < 1e-5, f"Orthogonal: expected 1, got {L.max().item()}"
+    print(f"✓ angle_loss orthogonal: max={L.max().item():.6f}")
+
+
+def test_angle_loss_pi_periodic():
+    """φ+π → loss=0（π 周期性: anti-parallel の法線は同じ直線）"""
+    phi_gt = torch.tensor([[0.3, 1.2, 2.5]])      # (1, 3)
+    phi_pred = phi_gt + math.pi                    # π だけずらす
+    nx_pred = torch.cos(phi_pred)
+    ny_pred = torch.sin(phi_pred)
+    L, _ = angle_loss(nx_pred, ny_pred, phi_gt)
+    assert L.max().item() < 1e-5, f"π-periodic: expected 0, got {L.max().item()}"
+    print(f"✓ angle_loss π-periodic: max={L.max().item():.2e}")
+
+
+def test_angle_loss_smooth_at_zero():
+    """Δφ=0 付近の勾配 ≈ 0（cusp なし）"""
+    phi_gt = torch.tensor([[1.0]])
+    phi_pred = phi_gt.clone().requires_grad_(True)
+    nx_pred = torch.cos(phi_pred)
+    ny_pred = torch.sin(phi_pred)
+    L, _ = angle_loss(nx_pred, ny_pred, phi_gt)
+    L.sum().backward()
+    grad = phi_pred.grad
+    assert grad is not None
+    assert abs(grad.item()) < 1e-5, f"Smooth at zero: gradient should be ~0, got {grad.item()}"
+    print(f"✓ angle_loss smooth at zero: grad={grad.item():.2e}")
+
+
+def test_rho_loss_sign_ambiguity():
+    """法線が逆向き（φ+π）でも rho_loss ≈ 0"""
+    import math as _math
+    D = _math.sqrt(224**2 + 224**2)
+    phi_gt = torch.tensor([[0.5]])  # (1, 1)
+    rho_gt = torch.tensor([[0.3]])
+
+    # GT normal
+    nx_gt = torch.cos(phi_gt)
+    ny_gt = torch.sin(phi_gt)
+    # GT 重心
+    cx = rho_gt * nx_gt
+    cy = rho_gt * ny_gt
+
+    # 逆向き pred 法線（φ+π に対応）
+    nx_pred = -nx_gt
+    ny_pred = -ny_gt
+
+    # angle_loss の dot を取得
+    _, dot = angle_loss(nx_pred, ny_pred, phi_gt)
+
+    L = rho_loss(nx_pred, ny_pred, cx * D, cy * D, rho_gt, dot, D)
+    assert L.max().item() < 1e-5, f"Sign ambiguity: expected ≈0, got {L.max().item()}"
+    print(f"✓ rho_loss sign ambiguity: max={L.max().item():.2e}")
+
+
+def test_soft_gate_bounds():
+    """gate の境界値確認（confidence < low → 0, confidence > high → 1）"""
+    B, C = 1, 4
+    H, W = 224, 224
+
+    # ガウシアン（高 confidence）と等方性ブロブ（低 confidence）
+    y_coords = torch.arange(H, dtype=torch.float32).unsqueeze(1)
+    x_coords = torch.arange(W, dtype=torch.float32).unsqueeze(0)
+    hm_line = torch.exp(-((y_coords - 112) ** 2) / (2 * 3.0**2)).expand(H, W)
+    hm_blob = torch.exp(-((y_coords - 112) ** 2 + (x_coords - 112) ** 2) / (2 * 20.0**2))
+
+    heatmaps_line = hm_line.unsqueeze(0).unsqueeze(0).expand(B, C, H, W).clone()
+    heatmaps_blob = hm_blob.unsqueeze(0).unsqueeze(0).expand(B, C, H, W).clone()
+
+    from ..utils.losses import _compute_moments_batch
+    conf_line, *_ = _compute_moments_batch(heatmaps_line)
+    conf_blob, *_ = _compute_moments_batch(heatmaps_blob)
+
+    gate_low, gate_high = 0.3, 0.6
+    gate_line = ((conf_line - gate_low) / (gate_high - gate_low)).clamp(0, 1)
+    gate_blob = ((conf_blob - gate_low) / (gate_high - gate_low)).clamp(0, 1)
+
+    assert gate_line.min().item() > 0.99, f"直線ヒートマップは gate≈1 のはず: {gate_line.min().item()}"
+    assert gate_blob.max().item() < 0.01, f"等方性ブロブは gate≈0 のはず: {gate_blob.max().item()}"
+    print(f"✓ soft gate: line={gate_line.min().item():.3f}, blob={gate_blob.max().item():.3f}")
+
+
+def test_compute_line_loss_backward():
+    """compute_line_loss の backward で NaN が出ないことを確認"""
+    B, C, H, W = 2, 4, 224, 224
+    heatmaps_raw = torch.randn(B, C, H, W, requires_grad=True)
+    heatmaps = torch.sigmoid(heatmaps_raw)
+
+    # GT params（phi ∈ [0, π), rho ∈ [-0.5, 0.5]）
+    gt_params = torch.zeros(B, C, 2)
+    gt_params[..., 0] = torch.tensor([0.5, 1.0, 1.5, 2.0])
+    gt_params[..., 1] = torch.tensor([0.1, -0.1, 0.2, -0.2])
+
+    losses = compute_line_loss(
+        heatmaps,
+        gt_params,
+        use_line_loss=True,
+        lambda_angle=1.0,
+        lambda_rho=1.0,
+    )
+    total = losses["total"]
+    assert not torch.isnan(total), f"total loss is NaN"
+
+    total.backward()
+    assert heatmaps_raw.grad is not None
+    assert not torch.isnan(heatmaps_raw.grad).any(), "Gradient contains NaN"
+
+    print(f"✓ compute_line_loss backward: total={total.item():.4f}, gate_ratio={losses['gate_ratio'].item():.3f}")
+
+
 def run_all_tests():
     """Run all tests."""
     print("\n" + "=" * 60)
@@ -238,6 +449,8 @@ def run_all_tests():
     print("=" * 60)
     test_pred_extraction_gradient_flow()
     test_pred_extraction_synthetic_line()
+    test_pred_extraction_no_nan()
+    test_pred_extraction_batch_consistency()
 
     print("\n" + "=" * 60)
     print("Running Threshold Tests")
@@ -245,6 +458,23 @@ def run_all_tests():
     test_threshold_backward_compatibility()
     test_threshold_effect()
     test_threshold_zero_vs_none()
+
+    print("\n" + "=" * 60)
+    print("Running Warmup Tests (Stage 3)")
+    print("=" * 60)
+    test_warmup_weight_linear()
+    test_warmup_weight_start_epoch()
+
+    print("\n" + "=" * 60)
+    print("Running Loss Function Tests (Stage 2)")
+    print("=" * 60)
+    test_angle_loss_aligned()
+    test_angle_loss_orthogonal()
+    test_angle_loss_pi_periodic()
+    test_angle_loss_smooth_at_zero()
+    test_rho_loss_sign_ambiguity()
+    test_soft_gate_bounds()
+    test_compute_line_loss_backward()
 
     print("\n" + "=" * 60)
     print("All tests passed!")

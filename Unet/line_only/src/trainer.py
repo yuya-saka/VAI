@@ -108,7 +108,7 @@ def evaluate(model, loader, device, image_size=224, heatmap_threshold=0.2):
             )
 
             gt_valid = ~torch.isnan(gt_params).any(dim=-1)
-            pred_valid = ~torch.isnan(pred_params).any(dim=-1)
+            pred_valid = confidence > 0
             valid_mask = gt_valid & pred_valid
 
             angle_err = line_metrics.compute_angle_error(
@@ -176,13 +176,15 @@ def run_training_loop(
     image_size = int(cfg.get("data", {}).get("image_size", 224))
     heatmap_threshold = float(eval_cfg.get("heatmap_threshold", 0.2))
 
-    # Line loss configuration
-    use_angle_loss = loss_cfg.get("use_angle_loss", False)
-    use_rho_loss = loss_cfg.get("use_rho_loss", False)
-    lambda_theta = float(loss_cfg.get("lambda_theta", 0.1))
-    lambda_rho = float(loss_cfg.get("lambda_rho", 0.05))
+    # Line loss configuration（旧キーへのフォールバック付き）
+    use_line_loss = loss_cfg.get("use_line_loss", False)
+    lambda_angle = float(loss_cfg.get("lambda_angle", loss_cfg.get("lambda_theta", 1.0)))
+    lambda_rho = float(loss_cfg.get("lambda_rho", 1.0))
     warmup_epochs = int(loss_cfg.get("warmup_epochs", 10))
+    warmup_start_epoch = int(loss_cfg.get("warmup_start_epoch", 0))
     warmup_mode = loss_cfg.get("warmup_mode", "linear")
+    conf_gate_low = float(loss_cfg.get("confidence_gate_low", 0.3))
+    conf_gate_high = float(loss_cfg.get("confidence_gate_high", 0.6))
 
     best_val = float("inf")
     no_improve = 0
@@ -199,7 +201,13 @@ def run_training_loop(
         steps = 0
 
         # Compute warmup weight
-        warmup_weight = line_losses.get_warmup_weight(ep, warmup_epochs, warmup_mode)
+        warmup_weight = line_losses.get_warmup_weight(
+            ep, warmup_epochs, warmup_mode, warmup_start_epoch
+        )
+
+        ang_sum = 0.0
+        rho_sum = 0.0
+        gate_sum = 0.0
 
         for batch in train_loader:
             x = batch["image"].to(device).float()
@@ -212,19 +220,23 @@ def run_training_loop(
             loss_mse = F.mse_loss(pred, gt, reduction="mean")
 
             # Line losses
-            if (use_angle_loss or use_rho_loss) and gt_params is not None:
+            if use_line_loss and gt_params is not None:
                 gt_params = gt_params.to(device).float()
                 line_loss_dict = line_losses.compute_line_loss(
                     pred,
                     gt_params,
                     image_size,
-                    lambda_theta,
-                    lambda_rho,
-                    use_angle_loss,
-                    use_rho_loss,
+                    lambda_angle=lambda_angle,
+                    lambda_rho=lambda_rho,
+                    use_line_loss=True,
+                    confidence_gate_low=conf_gate_low,
+                    confidence_gate_high=conf_gate_high,
                 )
-                # Combined loss with inverse weighting for MSE
-                loss = (1 - 0.5 * warmup_weight) * loss_mse + warmup_weight * line_loss_dict["total"]
+                # MSE + w * L_line（MSE 重みは常に 1.0）
+                loss = loss_mse + warmup_weight * line_loss_dict["total"]
+                ang_sum += line_loss_dict["angle"].item()
+                rho_sum += line_loss_dict["rho"].item()
+                gate_sum += line_loss_dict["gate_ratio"].item()
             else:
                 # MSE only
                 loss = loss_mse
@@ -238,6 +250,9 @@ def run_training_loop(
             steps += 1
 
         train_loss = loss_sum / max(1, steps)
+        train_ang = ang_sum / max(1, steps)
+        train_rho = rho_sum / max(1, steps)
+        train_gate = gate_sum / max(1, steps)
 
         # 評価
         if ep % mfreq == 0:
@@ -256,7 +271,14 @@ def run_training_loop(
             f"peak={val_metrics['peak_dist_mean']:.2f}px  "
         )
 
-        # Add line metrics if available
+        if use_line_loss:
+            log_str += (
+                f"L_ang={train_ang:.4f}  "
+                f"L_rho={train_rho:.4f}  "
+                f"gate={train_gate:.2f}  "
+                f"w={warmup_weight:.2f}  "
+            )
+
         if "angle_error_deg" in val_metrics:
             log_str += (
                 f"angle={val_metrics['angle_error_deg']:.2f}°  "
@@ -276,6 +298,10 @@ def run_training_loop(
                 "peak_dist": val_metrics["peak_dist_mean"],
                 "warmup_weight": warmup_weight,
             }
+            if use_line_loss:
+                log_dict["train_L_ang"] = train_ang
+                log_dict["train_L_rho"] = train_rho
+                log_dict["train_gate_ratio"] = train_gate
             if "angle_error_deg" in val_metrics:
                 log_dict["angle_error_deg"] = val_metrics["angle_error_deg"]
                 log_dict["rho_error_px"] = val_metrics["rho_error_px"]
@@ -373,6 +399,7 @@ def predict_lines_and_eval_test(
         x_np = x.cpu().numpy()
         pr_np = pred.cpu().numpy()
         pred_params_np = pred_params.cpu().numpy()
+        conf_np = confidence.cpu().numpy()
 
         B = pr_np.shape[0]
         for i in range(B):
@@ -399,6 +426,7 @@ def predict_lines_and_eval_test(
                 # Pred line params
                 pred_phi = pred_params_np[i, c, 0]
                 pred_rho = pred_params_np[i, c, 1]
+                pred_conf = conf_np[i, c]
 
                 # GT線長（描画長さの参照）：最遠点間距離でV字2倍カウントを回避
                 Lgt = line_extent(gt_pts)
@@ -411,8 +439,8 @@ def predict_lines_and_eval_test(
                 )
                 pred_lines_out[k] = pred_info
 
-                # 統一評価メトリクス
-                if not (np.isnan(gt_phi) or np.isnan(pred_phi)):
+                # 統一評価メトリクス（confidence > 0 で有効判定）
+                if not np.isnan(gt_phi) and pred_conf > 0:
                     # Angle error
                     gt_params_single = torch.tensor([[gt_phi, gt_rho]], dtype=torch.float32)
                     pred_params_single = torch.tensor([[pred_phi, pred_rho]], dtype=torch.float32)

@@ -277,6 +277,158 @@ line_only/
 
 ---
 
+## 2026-03-28
+
+### やったこと
+
+**1. 学習推移の分析**
+
+wandb ログ（fold0, sigma=2.5 baseline）の epoch 別メトリクスを詳細分析。
+
+- Phase 1 (epoch 1-50): val_mse 0.219→0.006, angle 35-50°（NaN多発）
+- Phase 2 (epoch 50-95): val_mse 0.006→0.002, angle 25-40°
+- Phase 3 (epoch 95-136): val_mse ~0.002, angle **突然 40°→7-10°** に改善
+
+角度抽出が信頼できるのは val_mse < 0.002（~epoch 96）以降。MSE のみでは 7-10° でプラトー。
+
+**2. angle_loss の設計検討（Codex 相談 2 回）**
+
+Codex に以下を相談し、設計方針を決定：
+- `.claude/docs/codex/20260328-angle-loss-design.md`
+- `.claude/docs/codex/20260328-line-loss-design.md`
+
+**Codex からの主要指摘：**
+
+| 問題 | 修正方針 |
+|------|---------|
+| `float('nan')` 代入が勾配を汚染 | NaN 廃止、confidence=0 で無効を表現 |
+| `1 - \|dot\|` は dot=0 で cusp | `1 - dot²`（全域滑らか） |
+| `torch.where` sign flip が勾配不連続 | 訓練中は使わない、dot² で 180° 曖昧性を自然に処理 |
+| `atan2(0,0)` が勾配未定義 | 損失では atan2 を使わず法線ベクトルの内積で直接計算 |
+| `sqrt(a²+b²)` が数値不安定 | `torch.hypot` を使用 |
+| `(1-0.5w)*MSE` が MSE 品質を劣化 | `MSE + w*L_line`（MSE 常に weight=1.0） |
+| warmup_epochs=50 が早すぎ | epoch 85 or val_mse < 0.0025 トリガー |
+
+**3. 実装計画の策定**
+
+`.claude/docs/plan-line-loss-redesign.md` に 3 段階の実装計画を作成：
+
+| Stage | 内容 | MSE 学習への影響 |
+|-------|------|----------------|
+| Stage 1 | 抽出関数のベクトル化・NaN 廃止 | なし |
+| Stage 2 | 新損失関数（`1-dot²` + detach 符号整合 SmoothL1） | なし（use_line_loss=false） |
+| Stage 3 | Warmup 統合 + config 更新 | あり（use_line_loss=true） |
+
+### 設計の核心
+
+```
+L_total = L_mse + w(t) · L_line
+
+L_line = λ₁ · (1 - dot²)                # 角度損失 = sin²(Δφ)
+       + λ₂ · SmoothL1(ρ_pred - ρ_gt)   # ρ損失（detach 符号整合）
+
+dot = n_pred · n_gt（法線ベクトルの内積）
+ρ_pred は dot の符号（detach）で GT 方向に整合してから計算
+ソフト信頼度ゲート: conf 0.3〜0.6 でスムーズにオン
+```
+
+### 次にやること
+
+- [ ] Stage 1: `extract_pred_line_params_batch` のベクトル化（NaN 廃止）
+- [ ] Stage 2: 新損失関数の実装（`1-dot²` + detach 符号整合）
+- [ ] Stage 3: Warmup 統合 + 訓練実行
+- [ ] `use_line_loss: true` で angle_error < 5° を目指す
+
+### 作成ファイル
+
+| ファイル | 内容 |
+|---------|------|
+| `.claude/docs/codex/20260328-angle-loss-design.md` | Codex 分析（勾配・warmup・設計比較） |
+| `.claude/docs/codex/20260328-line-loss-design.md` | Codex 分析（損失オプション・実装ステップ） |
+| `.claude/docs/plan-line-loss-redesign.md` | 3 段階の実装計画 |
+
+---
+
+## 2026-03-29
+
+### やったこと
+
+**1. 線一致度損失の再設計 — 3 ステージ実装完了**
+
+前セッション（2026-03-28）で策定した `plan-line-loss-redesign.md` に沿って、全 3 ステージを実装・テスト完了。
+
+---
+
+#### Stage 1: 抽出関数のベクトル化（NaN 廃止）
+
+**変更ファイル:** `utils/losses.py`, `src/trainer.py`, `test/test_line_losses.py`
+
+| 変更内容 | 詳細 |
+|---------|------|
+| for ループ廃止 | `(B*C, H, W)` reshape で一括演算 |
+| NaN 廃止 | 無効時は `(phi=0, rho=0, confidence=0)` |
+| `sqrt(disc)` → `torch.hypot` | 数値安定化 |
+| confidence 再定義 | `(lam1-lam2)/(lam1+lam2+eps)` で [0,1] 正規化 |
+| 縮退時フォールバック | `sxy≈0` 軸平行ケースを `torch.where` で一括処理 |
+| `_compute_moments_batch` 切り出し | Stage 2 の損失関数が phi 正規化なしの法線を使えるよう分離 |
+| trainer.py の NaN チェック更新 | `~isnan()` → `confidence > 0` |
+| 新テスト 2 本追加 | `test_pred_extraction_no_nan`, `test_pred_extraction_batch_consistency` |
+
+---
+
+#### Stage 2: 新損失関数
+
+**変更ファイル:** `utils/losses.py`, `test/test_line_losses.py`
+
+| 変更内容 | 詳細 |
+|---------|------|
+| `angle_loss` | `1-\|dot\|` → `1-dot²`（全域滑らか、cusp なし、π 周期） |
+| `rho_loss` | smooth-min → detach 符号整合 + SmoothL1 |
+| 損失関数のシグネチャ変更 | `(pred_params, ...)` → `(nx_pred, ny_pred, ...)` で phi 正規化を回避 |
+| `compute_line_loss` | `use_angle`/`use_rho` → 単一 `use_line_loss` フラグ |
+| ソフト信頼度ゲート追加 | `conf_gate_low=0.3`, `conf_gate_high=0.6` |
+| MSE 重み修正 | `(1-0.5w)*MSE` → `MSE + w*L_line`（MSE 常に weight=1.0） |
+| 新テスト 7 本追加 | aligned/orthogonal/π-periodic/smooth/sign_ambiguity/gate/backward |
+
+---
+
+#### Stage 3: Warmup 統合 + config 更新
+
+**変更ファイル:** `utils/losses.py`, `src/trainer.py`, `config/config.yaml`, `test/test_line_losses.py`
+
+| 変更内容 | 詳細 |
+|---------|------|
+| `get_warmup_weight` | `warmup_start_epoch` 引数追加（開始前は weight=0） |
+| trainer.py config 読み込み | 旧キー（`use_angle_loss` 等）→ 新キーへ（フォールバック付き） |
+| wandb ログ追加 | `train_L_ang`, `train_L_rho`, `train_gate_ratio` |
+| console ログ追加 | `use_line_loss` 時に L_ang / L_rho / gate / w を表示 |
+| config.yaml 更新 | 新キー群（`use_line_loss`, `lambda_angle`, `confidence_gate_*`, `warmup_start_epoch`）に置換 |
+| 新テスト 2 本追加 | `test_warmup_weight_linear`, `test_warmup_weight_start_epoch` |
+
+---
+
+**テスト結果:** 21/21 全通過（9.45 s）
+
+### 現状
+
+```
+L_total = L_mse + w(t) · L_line
+
+L_line = λ₁ · (1 - dot²)                # 角度損失（sin²(Δφ) と等価）
+       + λ₂ · SmoothL1(ρ_pred - ρ_gt)   # ρ損失（detach 符号整合）
+```
+
+- `use_line_loss: false` で MSE-only モードは変更なし（後方互換）
+- 実験を始めるには `config.yaml` で `use_line_loss: true` に変更するだけ
+
+### 次にやること
+
+- [ ] `use_line_loss: true` で fold0 実験（sigma=2.5、`warmup_start_epoch=85`）
+- [ ] 実験比較: MSE-only vs +L_line で angle_error の変化を確認
+- [ ] target: angle_error < 5°（現状 5.7-6.0°）
+
+---
+
 ## テンプレート（以下をコピーして使用）
 
 ```markdown

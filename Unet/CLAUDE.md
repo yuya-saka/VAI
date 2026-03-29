@@ -153,3 +153,5 @@ Claude が自動で Gemini CLI に調査依頼します（`.claude/rules/gemini-
 - [設計ドキュメント](../.claude/docs/DESIGN.md)
 - [開発環境](../.claude/rules/dev-environment.md)
 - [コーディング規約](../.claude/rules/coding-principles.md)
+- [言語規約](../.claude/rules/language.md)
+- [matplotlibでの日本語使用規約](../.claude/rules/matplotlib-japanese.md)

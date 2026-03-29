@@ -40,6 +40,11 @@ def extract_gt_line_params(polyline_points, image_size=224):
     # PCAで主軸方向を取得
     xc = pm - cen
     cov = (xc.T @ xc) / max(1, len(pts))
+
+    # 全点が同一（ゼロ分散）の場合は無効
+    if cov.max() < 1e-10:
+        return float("nan"), float("nan")
+
     evals, evecs = np.linalg.eigh(cov)
     d = evecs[:, np.argmax(evals)]
 
@@ -61,298 +66,296 @@ def extract_gt_line_params(polyline_points, image_size=224):
 
 
 # -------------------------
-# 予測直線パラメータ抽出（Codex最適化版）
+# 内部ヘルパー: モーメント計算（phi 正規化なし）
 # -------------------------
-def extract_pred_line_params_batch(heatmaps, image_size=224, min_mass=1e-6, threshold=None):
+def _compute_moments_batch(heatmaps, min_mass=1e-6, threshold=None):
     """
-    モーメント法を用いて予測ヒートマップから (φ, ρ) を抽出
+    ヒートマップから損失計算・抽出に使う中間変数を一括計算
 
-    Codexレビューによる主要改善点:
-    - 直線方向には最大固有値の固有ベクトルを使用
-    - 共分散行列にはFloat64精度
-    - 安定性のための正則化
-    - 信頼度ベースのマスキング
+    phi [0,π) 正規化は行わない（損失パスで atan2/sign-flip を回避するため）
 
     引数:
-        heatmaps: (B, 4, H, W) 予測ヒートマップ（sigmoid後）
-        image_size: 画像の次元
-        min_mass: ヒートマップ質量の最小閾値
-        threshold: ヒートマップの閾値処理（デフォルトNone=処理なし）
-                  評価時は0.2を推奨（ノイズ抑制により角度計算を安定化）
-                  訓練時はNoneを推奨（勾配信号を保持）
+        heatmaps: (B, C, H, W) sigmoid後の予測ヒートマップ
+        min_mass: 有効判定の最小質量閾値
+        threshold: 評価時ノイズ抑制閾値（訓練時は None）
 
-    戻り値:
-        pred_params: (B, 4, 2) (phi_rad, rho_normalized) のテンソル
-        confidence: (B, 4) 固有値比のテンソル
-        無効な直線はNaNでマーク
+    戻り値（すべて (B, C) 形状）:
+        confidence: 異方性比 (lam1-lam2)/(lam1+lam2+eps)、無効時は 0
+        nx, ny:     法線ベクトル（正規化済み、phi 正規化なし）
+        cx, cy:     重み付き重心
+        valid:      有効フラグ (bool)
     """
     B, C, H, W = heatmaps.shape
     device = heatmaps.device
+    N = B * C
 
-    # 座標グリッド（中心原点）
-    # Y軸を上向きに設定（数学座標系: row 0=上→+H/2, row H-1=下→-H/2）
+    # 座標グリッド（中心原点、数学座標系: Y上向き）
     y_grid = -(torch.arange(H, device=device, dtype=torch.float32) - H / 2.0)
     x_grid = torch.arange(W, device=device, dtype=torch.float32) - W / 2.0
-    Y, X = torch.meshgrid(y_grid, x_grid, indexing="ij")
+    Y, X = torch.meshgrid(y_grid, x_grid, indexing="ij")  # (H, W)
 
+    # (B, C, H, W) → (N, H, W)
+    hm = heatmaps.reshape(N, H, W)
+
+    # 評価時ノイズ抑制（勾配は通さない）
+    if threshold is not None:
+        hm = torch.where(hm >= threshold, hm, torch.zeros_like(hm))
+
+    # 質量: (N,)
+    hm_flat = hm.reshape(N, -1)        # (N, H*W)
+    X_flat = X.reshape(-1)             # (H*W,)
+    Y_flat = Y.reshape(-1)             # (H*W,)
+    M = hm_flat.sum(dim=-1)            # (N,)
+    M_safe = M.clamp(min=min_mass)
+
+    # 重み付き重心: (N,)
+    cx = (hm_flat * X_flat).sum(dim=-1) / M_safe
+    cy = (hm_flat * Y_flat).sum(dim=-1) / M_safe
+
+    # 重み付き共分散: (N,)
+    dx = X_flat.unsqueeze(0) - cx.unsqueeze(1)   # (N, H*W)
+    dy = Y_flat.unsqueeze(0) - cy.unsqueeze(1)   # (N, H*W)
+    sxx = (hm_flat * dx * dx).sum(dim=-1) / M_safe + 1e-6
+    syy = (hm_flat * dy * dy).sum(dim=-1) / M_safe + 1e-6
+    sxy = (hm_flat * dx * dy).sum(dim=-1) / M_safe
+
+    # 固有値: hypot で数値安定化
+    disc = torch.hypot(sxx - syy, 2.0 * sxy)
+    trace = sxx + syy
+    lam1 = (trace + disc) / 2
+    lam2 = (trace - disc) / 2
+
+    # 有効マスク
+    valid = (M >= min_mass) & (lam1 > 1e-8)  # (N,)
+
+    # confidence = (lam1-lam2)/(lam1+lam2+eps): [0,1]
+    conf = (lam1 - lam2) / (lam1 + lam2 + 1e-8)
+    conf = torch.where(valid, conf, torch.zeros_like(conf))
+
+    # 直線方向の固有ベクトル（縮退時フォールバック付き）
+    dir_x_raw = sxy
+    dir_y_raw = lam1 - sxx
+    dir_norm = torch.hypot(dir_x_raw, dir_y_raw)
+    degenerate = dir_norm < 1e-8
+    dir_x_fb = torch.where(sxx >= syy, torch.ones_like(dir_x_raw), torch.zeros_like(dir_x_raw))
+    dir_y_fb = torch.where(sxx >= syy, torch.zeros_like(dir_x_raw), torch.ones_like(dir_x_raw))
+    dir_x = torch.where(degenerate, dir_x_fb, dir_x_raw / dir_norm.clamp(min=1e-8))
+    dir_y = torch.where(degenerate, dir_y_fb, dir_y_raw / dir_norm.clamp(min=1e-8))
+
+    # 法線: 90度反時計回り（phi 正規化なし）
+    nx = -dir_y  # (N,)
+    ny =  dir_x  # (N,)
+
+    return (
+        conf.view(B, C),
+        nx.view(B, C),
+        ny.view(B, C),
+        cx.view(B, C),
+        cy.view(B, C),
+        valid.view(B, C),
+    )
+
+
+# -------------------------
+# 予測直線パラメータ抽出（評価・デバッグ用）
+# -------------------------
+def extract_pred_line_params_batch(heatmaps, image_size=224, min_mass=1e-6, threshold=None):
+    """
+    モーメント法を用いて予測ヒートマップから (φ, ρ) を一括抽出
+
+    評価・デバッグ用。訓練損失パスでは _compute_moments_batch を直接使うこと
+    （atan2 / phi 正規化の勾配問題を回避するため）
+
+    引数:
+        heatmaps: (B, C, H, W) 予測ヒートマップ（sigmoid後）
+        image_size: 画像の次元
+        min_mass: ヒートマップ質量の最小閾値
+        threshold: ヒートマップの閾値処理（評価時 0.2 推奨、訓練時 None）
+
+    戻り値:
+        pred_params: (B, C, 2) (phi_rad, rho_normalized)（NaN なし、無効時は 0）
+        confidence: (B, C) 異方性比 [0,1]（無効時は 0）
+    """
+    B, C, _, _ = heatmaps.shape
+    device = heatmaps.device
     D = math.sqrt(image_size**2 + image_size**2)
-    output = torch.zeros(B, C, 2, device=device)
-    confidence = torch.zeros(B, C, device=device)
 
-    for b in range(B):
-        for c in range(C):
-            hm = heatmaps[b, c]
+    conf, nx, ny, cx, cy, valid = _compute_moments_batch(heatmaps, min_mass, threshold)
 
-            # Apply threshold if specified (evaluation-time noise suppression)
-            if threshold is not None:
-                hm = torch.where(hm >= threshold, hm, torch.tensor(0.0, device=device))
+    # (B*C,) に flatten して phi 正規化を一括適用
+    nx_f = nx.reshape(-1)
+    ny_f = ny.reshape(-1)
+    cx_f = cx.reshape(-1)
+    cy_f = cy.reshape(-1)
+    valid_f = valid.reshape(-1)
 
-            M00 = hm.sum()
+    # φ∈[0,π) 正規化（評価互換性のため維持）
+    flip = (ny_f < 0) | ((ny_f == 0) & (nx_f < 0))
+    sgn = torch.where(flip, torch.full_like(nx_f, -1.0), torch.ones_like(nx_f))
+    nx_n = nx_f * sgn
+    ny_n = ny_f * sgn
 
-            # ガード: 質量が小さい場合はスキップ
-            if M00 < min_mass:
-                output[b, c] = float("nan")
-                confidence[b, c] = 0.0
-                continue
+    phi = torch.atan2(ny_n, nx_n)
+    rho = (nx_n * cx_f + ny_n * cy_f) / D
 
-            # 重み付き重心
-            cx = (hm * X).sum() / M00
-            cy = (hm * Y).sum() / M00
+    # 無効エントリはゼロ（NaN なし）
+    phi = torch.where(valid_f, phi, torch.zeros_like(phi))
+    rho = torch.where(valid_f, rho, torch.zeros_like(rho))
 
-            # 共分散（安定性のためFLOAT64）
-            dx = (X - cx).double()
-            dy = (Y - cy).double()
-            hm_d = hm.double()
-
-            mu20 = (hm_d * dx * dx).sum() / M00
-            mu02 = (hm_d * dy * dy).sum() / M00
-            mu11 = (hm_d * dx * dy).sum() / M00
-
-            # 正則化
-            eps_reg = 1e-6
-            mu20 = mu20 + eps_reg
-            mu02 = mu02 + eps_reg
-
-            # 固有値
-            trace = mu20 + mu02
-            det = mu20 * mu02 - mu11 * mu11
-            discriminant = torch.clamp(trace * trace - 4 * det, min=0.0)
-            sqrt_disc = torch.sqrt(discriminant)
-
-            lambda1 = (trace + sqrt_disc) / 2  # 大きい方（直線方向）
-            lambda2 = (trace - sqrt_disc) / 2  # 小さい方
-
-            # 信頼度: 固有値比
-            if lambda1 > 1e-8:
-                conf = 1.0 - lambda2 / lambda1
-                confidence[b, c] = conf  # 勾配フローのためテンソルのまま
-            else:
-                output[b, c] = float("nan")
-                confidence[b, c] = 0.0
-                continue
-
-            # 直線方向: 最大固有値の固有ベクトル
-            if abs(mu11) > 1e-8:
-                dir_x = mu11
-                dir_y = lambda1 - mu20
-            else:
-                # 軸に平行（一貫性のためテンソルを使用）
-                if mu20 > mu02:
-                    dir_x = torch.tensor(1.0, dtype=mu20.dtype, device=device)
-                    dir_y = torch.tensor(0.0, dtype=mu20.dtype, device=device)
-                else:
-                    dir_x = torch.tensor(0.0, dtype=mu20.dtype, device=device)
-                    dir_y = torch.tensor(1.0, dtype=mu20.dtype, device=device)
-
-            # 方向ベクトルを正規化
-            dir_norm = torch.sqrt(dir_x * dir_x + dir_y * dir_y)
-            dir_x = dir_x / (dir_norm + 1e-10)
-            dir_y = dir_y / (dir_norm + 1e-10)
-
-            # 法線: 90度反時計回りに回転
-            nx = -dir_y
-            ny = dir_x
-
-            # φ を [0, π) に制限
-            if ny < 0 or (ny == 0 and nx < 0):
-                nx, ny = -nx, -ny
-
-            # φ と ρ を計算
-            phi = torch.atan2(ny, nx)
-            rho = nx * cx + ny * cy
-            rho_norm = rho / D
-
-            output[b, c, 0] = phi.float()
-            output[b, c, 1] = rho_norm.float()
-
-    return output, confidence
+    output = torch.stack([phi, rho], dim=-1).view(B, C, 2)
+    return output, conf
 
 
 # -------------------------
-# 損失関数（Codex最適化版）
+# 損失関数（再設計版）
 # -------------------------
-def angle_loss(pred_params, gt_params, confidence, valid_mask):
+def angle_loss(nx_pred, ny_pred, phi_gt):
     """
-    角度損失: 1 - |n_pred · n_gt|
+    角度損失（要素ごと）: L = 1 - (n_pred · n_gt)²
 
-    1 - |cos(φ_pred - φ_gt)| より効率的で、atan2の勾配を回避
+    π 周期・全域滑らか（|dot| と違い dot=0 で cusp なし）
+    atan2 / sign-flip を使わないため勾配が安定
 
     引数:
-        pred_params: (B, 4, 2) 予測された (phi, rho)
-        gt_params: (B, 4, 2) GT (phi, rho)
-        confidence: (B, 4) 信頼度の重み
-        valid_mask: (B, 4) ブール値マスク
+        nx_pred, ny_pred: (B, C) 予測法線ベクトル（phi 正規化なし）
+        phi_gt:           (B, C) GT 角度 [rad]
 
     戻り値:
-        スカラー損失
+        L_ang: (B, C) 要素ごとの損失 [0, 1]
+        dot:   (B, C) 内積（rho_loss の符号整合に利用）
     """
-    # 全サンプル無効時のガード（NaN/無限大防止）
-    if not valid_mask.any():
-        return torch.tensor(0.0, device=pred_params.device, requires_grad=True)
-
-    # 有効なエントリのみを抽出（NaN処理の前に実行）
-    valid_pred_phi = pred_params[..., 0][valid_mask]
-    valid_gt_phi = gt_params[..., 0][valid_mask]
-    valid_conf = confidence[valid_mask].detach()  # 勾配フロー防止
-
-    # 法線ベクトルを計算（有効なエントリのみ）
-    pred_nx = torch.cos(valid_pred_phi)
-    pred_ny = torch.sin(valid_pred_phi)
-    gt_nx = torch.cos(valid_gt_phi)
-    gt_ny = torch.sin(valid_gt_phi)
-
-    # 内積
-    dot = pred_nx * gt_nx + pred_ny * gt_ny
-
-    # 損失: 1 - |dot|
-    loss = 1.0 - torch.abs(dot)
-
-    # 信頼度で重み付け
-    weighted_loss = (loss * valid_conf).sum() / (valid_conf.sum() + 1e-8)
-
-    # MSEスケール（~0.01）に合わせるためのスケール係数
-    return weighted_loss * 0.01
+    nx_gt = torch.cos(phi_gt)
+    ny_gt = torch.sin(phi_gt)
+    dot = nx_pred * nx_gt + ny_pred * ny_gt   # (B, C)
+    L_ang = 1.0 - dot.pow(2)                  # [0, 1], π 周期
+    return L_ang, dot
 
 
-def rho_loss(pred_params, gt_params, confidence, valid_mask):
+def rho_loss(nx_pred, ny_pred, cx, cy, rho_gt, dot, D):
     """
-    Rho損失: min(|ρ_p - ρ_g|, |ρ_p + ρ_g|)
+    ρ 損失（要素ごと）: detach 符号整合 + SmoothL1
 
-    (φ, ρ) ≡ (φ+π, -ρ) の曖昧性を扱うための符号不変
-    微分可能性のためにsmooth minを使用
+    dot の符号で予測法線を GT 方向に揃えてから ρ を計算。
+    smooth-min 廃止: φ∈[0,π) 正規化後の曖昧性はこれで解決。
 
     引数:
-        pred_params: (B, 4, 2) 予測された (phi, rho)
-        gt_params: (B, 4, 2) GT (phi, rho)
-        confidence: (B, 4) 信頼度の重み
-        valid_mask: (B, 4) ブール値マスク
+        nx_pred, ny_pred: (B, C) 予測法線ベクトル（phi 正規化なし）
+        cx, cy:           (B, C) 重み付き重心
+        rho_gt:           (B, C) GT 正規化済み ρ
+        dot:              (B, C) angle_loss の内積（detach してから使う）
+        D:                float 正規化定数 (= √2·image_size)
 
     戻り値:
-        スカラー損失
+        L_rho: (B, C) 要素ごとの損失
     """
-    # 全サンプル無効時のガード（NaN/無限大防止）
-    if not valid_mask.any():
-        return torch.tensor(0.0, device=pred_params.device, requires_grad=True)
-
-    # 有効なエントリのみを抽出（NaN処理の前に実行）
-    valid_pred_rho = pred_params[..., 1][valid_mask]
-    valid_gt_rho = gt_params[..., 1][valid_mask]
-    valid_conf = confidence[valid_mask].detach()  # 勾配フロー防止
-
-    # 2つの可能性のある誤差（有効なエントリのみ）
-    err1 = torch.abs(valid_pred_rho - valid_gt_rho)
-    err2 = torch.abs(valid_pred_rho + valid_gt_rho)
-
-    # smooth最小値（微分可能）
-    alpha = 10.0
-    exp1 = torch.exp(-alpha * err1)
-    exp2 = torch.exp(-alpha * err2)
-    loss = (err1 * exp1 + err2 * exp2) / (exp1 + exp2 + 1e-8)
-
-    # 信頼度で重み付け
-    weighted_loss = (loss * valid_conf).sum() / (valid_conf.sum() + 1e-8)
-
-    # MSEスケール（~0.01）に合わせるためのスケール係数
-    return weighted_loss * 0.01
+    # dot の符号で法線方向を GT に整合（勾配は通さない）
+    sgn = torch.where(
+        dot.detach() >= 0,
+        torch.ones_like(dot),
+        -torch.ones_like(dot),
+    )
+    nx_a = sgn * nx_pred
+    ny_a = sgn * ny_pred
+    rho_pred = (nx_a * cx + ny_a * cy) / D
+    return F.smooth_l1_loss(rho_pred, rho_gt, reduction="none")  # (B, C)
 
 
 def compute_line_loss(
     pred_heatmaps,
     gt_line_params,
     image_size=224,
-    lambda_theta=0.1,
-    lambda_rho=0.05,
-    use_angle=False,
-    use_rho=False,
-    min_confidence=0.3,
+    lambda_angle=1.0,
+    lambda_rho=1.0,
+    use_line_loss=False,
+    confidence_gate_low=0.3,
+    confidence_gate_high=0.6,
 ):
     """
-    信頼度ベースのマスキングを用いた統合直線損失
+    ソフト信頼度ゲート付き統合直線損失
 
     引数:
-        pred_heatmaps: (B, 4, H, W) sigmoid後の予測ヒートマップ
-        gt_line_params: (B, 4, 2) GT (phi, rho)
-        image_size: 画像サイズ
-        lambda_theta: 角度損失の重み
-        lambda_rho: rho損失の重み
-        use_angle: 角度損失を有効化
-        use_rho: rho損失を有効化
-        min_confidence: 損失計算のための最小固有値比
+        pred_heatmaps:        (B, C, H, W) sigmoid後の予測ヒートマップ
+        gt_line_params:       (B, C, 2) GT (phi, rho)（無効時は NaN）
+        image_size:           画像サイズ
+        lambda_angle:         角度損失の重み（L_ang ∈ [0,1] なのでスケール調整不要）
+        lambda_rho:           ρ 損失の重み
+        use_line_loss:        直線損失を有効にするか
+        confidence_gate_low:  gate が 0 になる信頼度下限
+        confidence_gate_high: gate が 1 になる信頼度上限
 
     戻り値:
-        以下のキーを持つ辞書:
-            'total': 統合直線損失
-            'angle': 角度損失成分（または0）
-            'rho': rho損失成分（または0）
+        dict:
+            'total':      統合直線損失
+            'angle':      角度損失成分（または 0）
+            'rho':        ρ 損失成分（または 0）
+            'gate_ratio': gate が有効なサンプルの割合
     """
-    pred_params, confidence = extract_pred_line_params_batch(pred_heatmaps, image_size)
+    device = pred_heatmaps.device
+    D = math.sqrt(image_size**2 + image_size**2)
+    zero = torch.tensor(0.0, device=device)
 
-    # 有効マスク
-    gt_valid = ~torch.isnan(gt_line_params).any(dim=-1)
-    pred_valid = ~torch.isnan(pred_params).any(dim=-1)
-    conf_valid = confidence > min_confidence
-    valid_mask = gt_valid & pred_valid & conf_valid
+    if not use_line_loss:
+        return {"total": zero, "angle": zero, "rho": zero, "gate_ratio": zero}
 
-    losses = {}
-    total = torch.tensor(0.0, device=pred_heatmaps.device)
+    conf, nx, ny, cx, cy, pred_valid = _compute_moments_batch(pred_heatmaps)
 
-    if use_angle:
-        loss_a = angle_loss(pred_params, gt_line_params, confidence, valid_mask)
-        losses["angle"] = loss_a
-        total = total + lambda_theta * loss_a
-    else:
-        losses["angle"] = torch.tensor(0.0, device=pred_heatmaps.device)
+    # GT 有効マスク（NaN チェック）
+    gt_valid = ~torch.isnan(gt_line_params).any(dim=-1)  # (B, C)
 
-    if use_rho:
-        loss_r = rho_loss(pred_params, gt_line_params, confidence, valid_mask)
-        losses["rho"] = loss_r
-        total = total + lambda_rho * loss_r
-    else:
-        losses["rho"] = torch.tensor(0.0, device=pred_heatmaps.device)
+    # ソフト信頼度ゲート
+    gate_range = confidence_gate_high - confidence_gate_low
+    gate = ((conf - confidence_gate_low) / gate_range).clamp(0.0, 1.0).detach()
+    gate = gate * (gt_valid & pred_valid).float()  # 無効エントリはゼロ
 
-    losses["total"] = total
-    return losses
+    gate_sum = gate.sum().clamp(min=1.0)
+    gate_ratio = gate.sum() / (gt_valid.float().sum().clamp(min=1.0))
+
+    phi_gt = gt_line_params[..., 0]   # (B, C)
+    rho_gt = gt_line_params[..., 1]   # (B, C)
+
+    L_ang, dot = angle_loss(nx, ny, phi_gt)        # (B, C)
+    L_rho = rho_loss(nx, ny, cx, cy, rho_gt, dot, D)  # (B, C)
+
+    loss_a = (gate * L_ang).sum() / gate_sum
+    loss_r = (gate * L_rho).sum() / gate_sum
+
+    total = lambda_angle * loss_a + lambda_rho * loss_r
+
+    return {
+        "total": total,
+        "angle": loss_a,
+        "rho": loss_r,
+        "gate_ratio": gate_ratio.detach(),
+    }
 
 
 # -------------------------
-# Warmupスケジュール
+# Warmup スケジュール
 # -------------------------
-def get_warmup_weight(current_epoch, warmup_epochs, warmup_mode="linear"):
+def get_warmup_weight(current_epoch, warmup_epochs, warmup_mode="linear", warmup_start_epoch=0):
     """
-    直線損失のためのwarmup重み w(t) を計算
+    直線損失のための warmup 重み w(t) を計算
 
     引数:
-        current_epoch: 現在のエポック（1から始まる）
-        warmup_epochs: warmupするエポック数
-        warmup_mode: 'linear', 'cosine', または 'step'
+        current_epoch:       現在のエポック（1 から始まる）
+        warmup_epochs:       warmup するエポック数
+        warmup_mode:         'linear' または 'cosine'
+        warmup_start_epoch:  warmup を開始するエポック（デフォルト 0 で旧動作と互換）
 
     戻り値:
         [0, 1] の重み
     """
-    if current_epoch > warmup_epochs or warmup_epochs == 0:
+    # 開始前はゼロ
+    if current_epoch < warmup_start_epoch:
+        return 0.0
+
+    # 開始後の経過エポック
+    elapsed = current_epoch - warmup_start_epoch
+
+    if elapsed >= warmup_epochs or warmup_epochs == 0:
         return 1.0
 
-    progress = current_epoch / warmup_epochs
+    progress = elapsed / warmup_epochs
 
     if warmup_mode == "linear":
         return progress
