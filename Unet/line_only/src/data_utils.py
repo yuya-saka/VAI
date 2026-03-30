@@ -233,10 +233,16 @@ def create_model_optimizer_scheduler(cfg, device):
     out_ch = int(model_cfg.get("out_channels", 4))
     feats = tuple(model_cfg.get("features", [16, 32, 64, 128]))
     dropout = float(model_cfg.get("dropout", 0.0))
+    use_vertebra_conditioning = bool(model_cfg.get("use_vertebra_conditioning", False))
+    num_vertebra = int(model_cfg.get("num_vertebra", 7)) if use_vertebra_conditioning else 0
 
-    model = TinyUNet(in_ch=in_ch, out_ch=out_ch, feats=feats, dropout=dropout).to(
-        device
-    )
+    model = TinyUNet(
+        in_ch=in_ch,
+        out_ch=out_ch,
+        feats=feats,
+        dropout=dropout,
+        num_vertebra=num_vertebra,
+    ).to(device)
 
     lr = float(tr_cfg.get("learning_rate", 1e-4))
     wd = float(tr_cfg.get("weight_decay", 1e-4))

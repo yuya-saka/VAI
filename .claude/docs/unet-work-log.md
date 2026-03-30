@@ -576,6 +576,60 @@ Codex CLI を直接実行して調査（`.claude/docs/codex/20260330-codex-fold1
 
 ---
 
+---
+
+## 2026-03-30（続き②）
+
+### やったこと
+
+**椎体ラベル条件付き U-Net の実装（完了）**
+
+`Unet/memo/椎体ラベル条件付き U-Net 実装計画メモ.md` の方針に沿って実装。
+
+**背景・目的:**
+C1〜C7 は解剖学的形状が大きく異なるため、椎体ラベルを条件として与えることで学習の安定化を狙う。
+
+**実装方針（Codex に確認済み）:**
+- bottleneck concat + one-hot が小規模データ（<100患者）には最適
+- FiLM conditioning が次点（次の実験ステップ候補）
+- multi-level injection は過学習リスク最大で非推奨
+
+**実装内容:**
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `src/model.py` | `VERTEBRA_TO_IDX`、`num_vertebra` パラメータ、`cond_proj`（identity初期化）、`_onehot_map`、`forward(x, vertebra_idx=None)` |
+| `src/data_utils.py` | `use_vertebra_conditioning` フラグを読み、`True` なら `num_vertebra=7`、`False` なら `num_vertebra=0` で TinyUNet を構築 |
+| `src/trainer.py` | 4箇所の `model(x)` → `model(x, v_idx)` に変更（evaluate / train_loop / predict_test / save_examples） |
+| `config/config.yaml` | `use_vertebra_conditioning: true` + `num_vertebra: 7` を `model:` セクションに追加 |
+
+**identity初期化の意義:**
+`cond_proj` の weight を identity 初期化することで、`t=0` 時点で旧モデルと全く同じ出力になる。
+既存 checkpoint から継続訓練する場合も安全。
+
+**config での ON/OFF 切り替え:**
+```yaml
+model:
+  use_vertebra_conditioning: true   # ← ここで ON/OFF
+  num_vertebra: 7
+```
+
+**テスト結果:** 33 passed（既存の壊れたテスト 3 件は今回と無関係）
+
+### 現状
+
+- 椎体条件付け実装完了・テスト通過
+- config: `sigma: 2.0`, `use_vertebra_conditioning: true`, `wandb: false`（テスト実験用設定）
+- checkpoint_dir: `outputs/checkpoints_vertebrae-onehot_sig2.0_test`
+
+### 次にやること
+
+- [ ] `use_vertebra_conditioning: true` で fold0 実験を実行
+- [ ] ベースライン（条件なし）との angle_error 比較
+- [ ] 効果があれば全 fold で評価
+
+---
+
 ## テンプレート（以下をコピーして使用）
 
 ```markdown

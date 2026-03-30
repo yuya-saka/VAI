@@ -26,6 +26,7 @@ from .data_utils import (
     create_model_optimizer_scheduler,
     prepare_datasets_and_splits,
 )
+from .model import VERTEBRA_TO_IDX
 
 tempfile.tempdir = "/tmp"
 
@@ -78,10 +79,15 @@ def evaluate(model, loader, device, image_size=224, heatmap_threshold=0.2):
 
     for batch in loader:
         x = batch["image"].to(device).float()
+        v_idx = torch.as_tensor(
+            [VERTEBRA_TO_IDX.get(v, 0) for v in batch["vertebra"]],
+            device=device,
+            dtype=torch.long,
+        )
         gt = batch["heatmaps"].to(device).float()
         gt_params = batch.get("line_params_gt")
 
-        pred = torch.sigmoid(model(x))
+        pred = torch.sigmoid(model(x, v_idx))
 
         mse_sum += F.mse_loss(pred, gt, reduction="mean").item()
         n += 1
@@ -211,10 +217,15 @@ def run_training_loop(
 
         for batch in train_loader:
             x = batch["image"].to(device).float()
+            v_idx = torch.as_tensor(
+                [VERTEBRA_TO_IDX.get(v, 0) for v in batch["vertebra"]],
+                device=device,
+                dtype=torch.long,
+            )
             gt = batch["heatmaps"].to(device).float()
             gt_params = batch.get("line_params_gt")
 
-            pred = torch.sigmoid(model(x))
+            pred = torch.sigmoid(model(x, v_idx))
 
             # MSE loss
             loss_mse = F.mse_loss(pred, gt, reduction="mean")
@@ -389,7 +400,12 @@ def predict_lines_and_eval_test(
 
     for batch in test_loader:
         x = batch["image"].to(device).float()
-        pred = torch.sigmoid(model(x))
+        v_idx = torch.as_tensor(
+            [VERTEBRA_TO_IDX.get(v, 0) for v in batch["vertebra"]],
+            device=device,
+            dtype=torch.long,
+        )
+        pred = torch.sigmoid(model(x, v_idx))
 
         # Extract pred line params for entire batch
         pred_params, confidence = line_losses.extract_pred_line_params_batch(
@@ -564,8 +580,13 @@ def save_examples(model, loader, device, out_dir: Path, n_save=12, tag="VAL"):
 
     for batch in loader:
         x = batch["image"].to(device).float()
+        v_idx = torch.as_tensor(
+            [VERTEBRA_TO_IDX.get(v, 0) for v in batch["vertebra"]],
+            device=device,
+            dtype=torch.long,
+        )
         gt = batch["heatmaps"].to(device).float()
-        pred = torch.sigmoid(model(x))
+        pred = torch.sigmoid(model(x, v_idx))
 
         x_np = x.cpu().numpy()
         gt_np = gt.cpu().numpy()
