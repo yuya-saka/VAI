@@ -498,6 +498,84 @@ sig2.0_base（新 src コード）で fold1 角度誤差が **8.60° → 17.77°
 
 ---
 
+## 2026-03-30（続き）
+
+### やったこと
+
+**1. test_aug_fold1.py のパッチバグ発見**
+
+`test_aug_fold1.py`（旧）と `test_aug_fold1_修正.py` の差分を調査。
+
+**バグ内容**: 旧テストは `dataset_module.get_transforms` のみパッチしていたが、
+`data_utils.py` はモジュールレベルで `from .dataset import get_transforms` しているため、
+`data_utils_module.get_transforms` 側の参照は差し替わっていなかった。
+→ 旧テストの SSR 実験は実際には効いておらず、両実験ともデフォルト aug で走っていた。
+
+修正版（`test_aug_fold1_修正.py`）は両モジュールをパッチし、正しく比較できる。
+
+**実験結果（修正版）:**
+
+| 実験 | val angle |
+|------|-----------|
+| ShiftScaleRotate（修正版） | 5.39° |
+| Affine（修正版） | 5.19° |
+
+→ **augmentation の変更は原因ではない**（差 0.20°）
+→ **両結果ともベースラインに近い精度を再現**
+
+**2. sig2.0_base_debug 実験（全 fold）の結果**
+
+新 src コードで改めて 5-fold 実行（wandb=false、confidence_gate 0.1/0.8）：
+
+| fold | debug | 精度悪化したやつ | baseline |
+|------|-------|----------------|----------|
+| fold0 | 5.57° | 5.94° | 5.43° |
+| fold1 | **7.60°** | **17.77°** | 8.60° |
+| fold2 | 5.08° | 5.14° | 4.94° |
+| fold3 | 4.26° | 5.11° | 4.78° |
+| fold4 | 7.99° | 8.11° | 8.11° |
+| **AVG** | **6.10°** | **8.41°** | **6.37°** |
+
+→ debug は baseline より良い平均精度（6.10° vs 6.37°）を達成
+→ fold1 のみの劣化（17.77°）が debug では解消（7.60°）
+
+**3. Codex による根本原因分析**
+
+Codex CLI を直接実行して調査（`.claude/docs/codex/20260330-codex-fold1-direct.md`）。
+
+| 質問 | Codex 回答 |
+|------|-----------|
+| wandb.init() が Python/numpy RNG を消費するか | **No**（secrets.choice を使用、実測で不変） |
+| kaiming_uniform_ が numpy/Python RNG を使うか | **No**（torch RNG のみ） |
+| reinit=True がfold1で特別か | fold1 は最初の「finish→reinit 境界」を跨ぐ fold |
+| なぜ fold1 だけか | fold1 は元々難しいfold。微小な非決定性が最も増幅されやすい |
+
+**Codex 推奨の決定的な修正:**
+- 本命: `--start_fold 1 --end_fold 1` でfoldごとに別プロセス実行し reinit=True 連鎖をやめる
+- 追加策: `wandb.init()` 直後に `set_seed(seed)` を再呼び出し
+- 追加策: `torch.use_deterministic_algorithms(True)` を有効化
+
+**4. wandb=true での実験で精度異常が再現しないことを確認**
+
+改めて wandb=true で実験し直したところ、精度が異常になることはなくなった。
+→ 精度悪化したやつ の fold1 劣化は**再現性のない非決定的な挙動**と確定。
+   コード自体に問題はない。
+
+### 現状
+
+- **新 src コードは正常に動作している**（avg 6.10° でベースライン超え）
+- fold1 の一時的劣化は再現せず、非決定的挙動と確定
+- augmentation（ShiftScaleRotate vs Affine）は精度に影響しない
+- **次ステップ: `use_line_loss: true` の実験へ移行可能**
+
+### 次にやること
+
+- [ ] `use_line_loss: true` で fold0 実験（sigma=2.0、`warmup_start_epoch=90`）
+- [ ] 実験比較: MSE-only（avg 6.10°）vs +L_line で angle_error の変化を確認
+- [ ] target: angle_error < 5°
+
+---
+
 ## テンプレート（以下をコピーして使用）
 
 ```markdown
