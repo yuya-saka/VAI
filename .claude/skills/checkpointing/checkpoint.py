@@ -35,11 +35,7 @@ LOG_FILE = PROJECT_ROOT / ".claude" / "logs" / "cli-tools.jsonl"
 CHECKPOINTS_DIR = PROJECT_ROOT / ".claude" / "checkpoints"
 DESIGN_FILE = PROJECT_ROOT / ".claude" / "docs" / "DESIGN.md"
 
-CONTEXT_FILES = {
-    "claude": PROJECT_ROOT / "CLAUDE.md",
-    "codex": PROJECT_ROOT / ".codex" / "AGENTS.md",
-    "gemini": PROJECT_ROOT / ".gemini" / "GEMINI.md",
-}
+CONTEXT_FILES: dict = {}  # Session history no longer written to agent config files
 
 SESSION_HISTORY_HEADER = "## Session History"
 
@@ -494,8 +490,8 @@ Examples:
     )
     args = parser.parse_args()
 
-    if args.full:
-        # Full checkpoint mode
+    if args.full or not args.analyze:
+        # Full checkpoint mode (default when no --analyze-only flag)
         print("Creating full checkpoint...")
         checkpoint_file = generate_full_checkpoint(args.since)
         if checkpoint_file:
@@ -523,35 +519,6 @@ Examples:
                 print(f"\nThe subagent will identify reusable patterns and suggest new skills.")
         else:
             print("Failed to create checkpoint.")
-        return
-
-    # Session history mode (default)
-    entries = parse_logs(args.since)
-    if not entries:
-        print("No log entries found.")
-        print(f"Log file: {LOG_FILE}")
-        return
-
-    print(f"Found {len(entries)} log entries")
-
-    # Summarize
-    by_date = summarize_entries(entries)
-
-    # Generate session history
-    session_history = generate_session_history(by_date)
-    if not session_history:
-        print("No session history to write")
-        return
-
-    # Update each context file
-    for name, file_path in CONTEXT_FILES.items():
-        if update_context_file(file_path, session_history):
-            print(f"Updated: {file_path}")
-        else:
-            print(f"Skipped: {file_path}")
-
-    print("\nSession history has been written to all context files.")
-    print("All agents (Claude, Codex, Gemini) can now see the session history.")
 
 
 if __name__ == "__main__":
