@@ -1,6 +1,6 @@
 # Unet/ 作業サマリー
 
-<!-- 最終更新: 2026-03-30 -->
+<!-- 最終更新: 2026-03-31 -->
 <!-- 大きな変更（新実験結果・設計変更・コード構成変更）があった時だけ更新する -->
 
 ## プロジェクト概要
@@ -31,16 +31,43 @@ line_only/
 
 ---
 
-## 現在の精度（MSE-only, sigma=2.0, 5-fold CV）
+## outputs/ 整理（2026-03-31）
 
-| fold | angle_error |
-|------|------------|
-| fold0 | 5.57° |
-| fold1 | 7.60° |
-| fold2 | 5.08° |
-| fold3 | 4.26° |
-| fold4 | 7.99° |
-| **avg** | **6.10°** |
+フラットだった `outputs/` をテーマ別に再編。
+
+```
+outputs/
+├── baseline/              ← baseline_sig2.0, baseline_sig3.5
+├── augmentation/          ← 拡張弱め実験
+├── regularization/        ← 正則化強化実験
+├── vertebrae-onehot/      ← 椎体条件付け実験
+├── 過去実装のbaseline/    ← ALL系実験（sig2.0/2.5/3.0/3.5）
+└── archive/               ← 旧 past_run の中身
+```
+
+**config変更**: `experiment.phase` + `experiment.name` を設定するだけでパスが自動導出される。
+
+```yaml
+experiment:
+  phase: "regularization"
+  name: "sig3.5_正則化強化"
+# → outputs/regularization/sig3.5_正則化強化/checkpoints/ & vis/ が自動生成
+# → wandb project も unet-regularization-sig3.5_正則化強化 に自動設定
+```
+
+---
+
+## 現在の精度（MSE-only, 5-fold CV）
+
+**sigma=3.5 が最良（2026-03-31 確定）:**
+
+| 指標 | sig2.0 | sig3.5 |
+|------|--------|--------|
+| 角度誤差 (deg) | 6.793 | **6.263** |
+| ρ誤差 (px) | 3.808 | **3.465** |
+| Peak Dist (px) | 21.34 | **20.76** |
+
+詳細: `.claude/docs/experiments/2026-03-31-regularization-sigma.md`
 
 ---
 
@@ -49,7 +76,7 @@ line_only/
 | 項目 | 決定内容 | 理由 |
 |------|---------|------|
 | GT計算 | PCA法（全ポリライン点） | V字ポリラインが57.3%存在、端点法だと角度誤差>10° |
-| 予測抽出 | `threshold=0.2` | ノイズ背景によるモーメント不安定性を解消 |
+| 予測抽出 | `threshold=0.2`（→0.50検討中） | ノイズ背景によるモーメント不安定性を解消。0.50で mean -1.8°、max -14° 改善（GT確認後に更新予定） |
 | confidence定義 | `(lam1-lam2)/(lam1+lam2+eps)` | [0,1]正規化、NaN廃止 |
 | 角度損失 | `1 - dot²`（sin²(Δφ)と等価） | cuspなし、全域滑らか、π周期 |
 | ρ損失 | detach符号整合 + SmoothL1 | 勾配不連続を回避 |
@@ -64,10 +91,9 @@ line_only/
 ## 現在の config.yaml 設定
 
 ```yaml
-sigma: 2.0
-use_line_loss: false        # trueにすると L_line 有効
-use_vertebra_conditioning: true
-num_vertebra: 7
+sigma: 3.5                  # 2026-03-31 確定（sig3.5 が全指標で優位）
+use_line_loss: false        # true にすると L_line 有効
+use_vertebra_conditioning: false
 warmup_start_epoch: 90
 conf_gate_low: 0.1
 conf_gate_high: 0.8
@@ -79,9 +105,18 @@ wandb:
 
 ## 次にやること
 
-- [ ] `use_line_loss: true` で fold0 実験（sigma=2.0、`warmup_start_epoch=90`）
-- [ ] 椎体条件付けの効果確認（条件なし baseline との比較）
-- [ ] **目標: angle_error < 5°**（現状 avg 6.10°）
+- [ ] **GT アノテーション品質確認**（最優先・次セッション）
+  - sample15.2/C2/slice040-042 の line_2（71°誤差）
+  - sample15.2/C4/slice049-057 の line_3（30-35°誤差）
+  - sample22/C2/slice043 の line_4（38°誤差）
+  - 確認ツール: `Unet/debug_worst_cases.py`、出力: `vis/fold1/worst_thr05/`
+- [ ] GT確認後、`heatmap_threshold: 0.50` に更新するか判断
+- [ ] geometry loss 有効化実験（Config B、sigma=3.5）
+  - `lambda_angle: 0.08`, `lambda_rho: 0.30`
+  - `warmup_start_epoch: 50`, `warmup_epochs: 30`
+  - `gate_low: 0.05`, `gate_high: 0.65`
+  - 根拠: `.claude/docs/codex/20260331-geometry-loss-activation.md`
+- [ ] **目標: angle_error < 5.5°**（現状 avg 6.26°）
 
 ---
 
@@ -89,6 +124,7 @@ wandb:
 
 | 日付 | 主な内容 |
 |------|---------|
+| [2026-03-31](work-logs/2026-03-31.md) | sigma確定(3.5)、threshold sweep調査(0.20→0.50で23%改善)、GT品質確認待ち |
 | [2026-03-30](work-logs/2026-03-30.md) | 椎体条件付け実装、fold1回帰調査（非決定的挙動と確定） |
 | [2026-03-29](work-logs/2026-03-29.md) | 線損失3ステージ実装完了（テスト21/21通過） |
 | [2026-03-28](work-logs/2026-03-28.md) | angle_loss設計（Codex相談2回）、実装計画策定 |

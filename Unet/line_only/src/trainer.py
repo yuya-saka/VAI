@@ -31,6 +31,17 @@ from .model import VERTEBRA_TO_IDX
 tempfile.tempdir = "/tmp"
 
 
+def _resolve_output_base(cfg: dict, script_dir: Path) -> Path | None:
+    """experiment セクションが存在すればベースパスを返す。なければ None。
+
+    outputs/{phase}/{name}/ をベースとして使用する。
+    """
+    exp = cfg.get("experiment")
+    if exp and exp.get("phase") and exp.get("name"):
+        return script_dir / "outputs" / exp["phase"] / exp["name"]
+    return None
+
+
 def _get_wandb():
     """wandb を遅延インポート（無効時にインストール不要にするため）"""
     try:
@@ -656,8 +667,14 @@ def train_one_fold(cfg):
             wandb_enabled = False
         else:
             run_name = wandb_cfg.get("run_name") or f"fold{test_fold}"
+            # experiment セクションがあれば project 名を自動導出
+            exp = cfg.get("experiment", {})
+            if exp.get("phase") and exp.get("name"):
+                default_project = f"unet-{exp['phase']}-{exp['name']}"
+            else:
+                default_project = "vai-unet-line"
             _wandb.init(
-                project=wandb_cfg.get("project", "vai-unet-line"),
+                project=wandb_cfg.get("project") or default_project,
                 name=run_name,
                 config=cfg,
                 reinit=True,
@@ -668,7 +685,11 @@ def train_one_fold(cfg):
 
     # チェックポイントディレクトリ作成（Unetディレクトリを基準に）
     script_dir = Path(__file__).resolve().parent.parent.parent  # Unet/ directory
-    ckpt_dir = script_dir / tr_cfg.get("checkpoint_dir", "checkpoints")
+    output_base = _resolve_output_base(cfg, script_dir)
+    if output_base is not None:
+        ckpt_dir = output_base / "checkpoints"
+    else:
+        ckpt_dir = script_dir / tr_cfg.get("checkpoint_dir", "checkpoints")
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     best_path = ckpt_dir / f"best_fold{test_fold}.pt"
 
@@ -692,12 +713,11 @@ def train_one_fold(cfg):
     )
 
     # テストデータに対する直線検出
-    out_dir = (
-        script_dir
-        / cfg.get("evaluation", {}).get("visualization_dir", "vis")
-        / f"fold{test_fold}"
-        / "test_lines"
-    )
+    if output_base is not None:
+        vis_base = output_base / "vis"
+    else:
+        vis_base = script_dir / cfg.get("evaluation", {}).get("visualization_dir", "vis")
+    out_dir = vis_base / f"fold{test_fold}" / "test_lines"
     line_summary = predict_lines_and_eval_test(
         cfg=cfg,
         model=model,
@@ -724,7 +744,7 @@ def train_one_fold(cfg):
     print("=" * 60)
 
     # サンプル画像を保存
-    vis_root = script_dir / eval_cfg.get("visualization_dir", "vis_2")
+    vis_root = vis_base
     print("[INFO] saving example overlays ...")
     save_examples(
         model,
