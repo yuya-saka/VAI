@@ -1,6 +1,6 @@
 # Unet/ 作業サマリー
 
-<!-- 最終更新: 2026-03-31 -->
+<!-- 最終更新: 2026-04-01 -->
 <!-- 大きな変更（新実験結果・設計変更・コード構成変更）があった時だけ更新する -->
 
 ## プロジェクト概要
@@ -103,14 +103,20 @@ wandb:
 
 ---
 
+## GT アノテーション品質管理（2026-03-31 完了）
+
+- 検証スクリプト: `Unet/debug/gt_validation.py`（全3640アノテーションをスキャン）
+- 可視化スクリプト: `Unet/debug/gt_show_flagged.py`
+- 除外リスト: `dataset/bad_slices.json`（4スライス）
+- 前処理: `preprocess_polyline()` in `dataset.py`（near-dup除去のみ。2点化は [A,B,A'] パターンで phi が 90° ずれるバグがあり削除済み）
+
+詳細: `work-logs/2026-03-31.md` §5
+
+---
+
 ## 次にやること
 
-- [ ] **GT アノテーション品質確認**（最優先・次セッション）
-  - sample15.2/C2/slice040-042 の line_2（71°誤差）
-  - sample15.2/C4/slice049-057 の line_3（30-35°誤差）
-  - sample22/C2/slice043 の line_4（38°誤差）
-  - 確認ツール: `Unet/debug_worst_cases.py`、出力: `vis/fold1/worst_thr05/`
-- [ ] GT確認後、`heatmap_threshold: 0.50` に更新するか判断
+- [ ] heatmap_threshold を 0.50 に更新するか判断
 - [ ] geometry loss 有効化実験（Config B、sigma=3.5）
   - `lambda_angle: 0.08`, `lambda_rho: 0.30`
   - `warmup_start_epoch: 50`, `warmup_epochs: 30`
@@ -124,6 +130,7 @@ wandb:
 
 | 日付 | 主な内容 |
 |------|---------|
+| [2026-04-01](work-logs/2026-04-01.md) | eval_error_viz.py 実装（誤差分布・Bland-Altman・worst sample可視化） |
 | [2026-03-31](work-logs/2026-03-31.md) | sigma確定(3.5)、threshold sweep調査(0.20→0.50で23%改善)、GT品質確認待ち |
 | [2026-03-30](work-logs/2026-03-30.md) | 椎体条件付け実装、fold1回帰調査（非決定的挙動と確定） |
 | [2026-03-29](work-logs/2026-03-29.md) | 線損失3ステージ実装完了（テスト21/21通過） |
