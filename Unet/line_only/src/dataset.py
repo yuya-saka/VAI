@@ -14,6 +14,47 @@ from ..utils import losses as line_losses
 
 
 # -------------------------
+# ポリライン前処理
+# -------------------------
+def preprocess_polyline(pts_xy: list, tau_dup: float = 1.0) -> list:
+    """
+    GT ポリラインの前処理：近接重複点の除去のみ
+
+    アノテーションツールが生成する near-duplicate 中間点（< tau_dup px）を除去する。
+    始点・終点は常に保持する。
+
+    注意: 2点化（始終点のみに縮退）は行わない。
+    [A, B, A'] のような折り返しパターンで pts[[0,-1]] = [A, A'] となり
+    phi が最大 90° ずれるバグが生じるため。
+    PCA ベースの extract_gt_line_params は多点のまま渡せば正しく処理できる。
+
+    引数:
+        pts_xy: [[x, y], ...] の点リスト（最低2点）
+        tau_dup: 近接重複点の除去閾値 (px)
+
+    戻り値:
+        前処理済みの点リスト（最低2点は保持）
+    """
+    if pts_xy is None or len(pts_xy) < 2:
+        return pts_xy
+
+    pts = np.array(pts_xy, dtype=np.float64)
+
+    # 近接重複点の除去（始点・終点は必ず保持）
+    keep = [0]
+    for i in range(1, len(pts) - 1):
+        if np.linalg.norm(pts[i] - pts[keep[-1]]) >= tau_dup:
+            keep.append(i)
+    keep.append(len(pts) - 1)
+    pts = pts[keep]
+
+    if len(pts) < 2:
+        return pts_xy  # フォールバック
+
+    return pts.tolist()
+
+
+# -------------------------
 # 椎体グループ展開
 # -------------------------
 def vertebra_names_from_group(group: str):
@@ -172,9 +213,29 @@ class PngLineDataset(Dataset):
         self.transform = transform
         self.cfg_aug = cfg_aug or {}
 
+        # GT品質不良スライスの除外セット {(sample, vertebra, slice_idx)}
+        self._bad_slices = self._load_bad_slices()
+
         self.items = []
         self._build_index()
         print(f"[INFO] PngLineDataset: {len(self.items)} slices")
+
+    def _load_bad_slices(self) -> set:
+        """bad_slices.json を読み込み、除外スライスのセットを返す"""
+        bad_json = self.root_dir / "bad_slices.json"
+        if not bad_json.exists():
+            return set()
+        try:
+            data = json.loads(bad_json.read_text())
+            result = set()
+            for entry in data.get("bad_slices", []):
+                result.add((entry["sample"], entry["vertebra"], int(entry["slice_idx"])))
+            if result:
+                print(f"[INFO] bad_slices: {len(result)} スライスを除外")
+            return result
+        except Exception as e:
+            print(f"[WARN] bad_slices.json の読み込みに失敗: {e}")
+            return set()
 
     def _build_index(self):
         """有効なスライスをインデックスに追加"""
@@ -204,6 +265,11 @@ class PngLineDataset(Dataset):
                         continue
 
                     slice_idx = int(slice_idx_str)
+
+                    # GT品質不良スライスをスキップ
+                    if (s, v, slice_idx) in self._bad_slices:
+                        continue
+
                     ip = vd / "images" / f"slice_{slice_idx:03d}.png"
                     mp = vd / "masks" / f"slice_{slice_idx:03d}.png"
                     if not ip.exists() or not mp.exists():
@@ -262,14 +328,15 @@ class PngLineDataset(Dataset):
 
         hms = []
         for k in ["line_1", "line_2", "line_3", "line_4"]:
-            hms.append(self._heatmap_from_polyline(it["lines"][k]))
+            pts = preprocess_polyline(it["lines"][k])
+            hms.append(self._heatmap_from_polyline(pts))
         hms = np.stack(hms, 0).astype(np.float32)  # (4,H,W)
 
         # GT直線パラメータ (φ, ρ) を抽出
         gt_line_params = []
         for k in ["line_1", "line_2", "line_3", "line_4"]:
-            polyline = it["lines"][k]
-            phi, rho = line_losses.extract_gt_line_params(polyline, self.image_size)
+            pts = preprocess_polyline(it["lines"][k])
+            phi, rho = line_losses.extract_gt_line_params(pts, self.image_size)
             gt_line_params.append([phi, rho])
         gt_line_params = np.array(gt_line_params, dtype=np.float32)  # (4, 2)
 

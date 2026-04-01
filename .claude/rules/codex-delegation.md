@@ -93,7 +93,7 @@ Task tool parameters:
     {Task description}
 
     Step 1: Execute Codex CLI:
-    codex exec --model gpt-5.3-codex --sandbox read-only --full-auto "
+    codex exec --model gpt-5.4 --sandbox read-only --full-auto "
     {Question for Codex}
     " 2>/dev/null
 
@@ -136,15 +136,15 @@ Only use direct Bash call when:
 
 ```bash
 # Only for simple queries
-codex exec --model gpt-5.3-codex --sandbox read-only --full-auto "Brief question" 2>/dev/null
+codex exec --model gpt-5.4 --sandbox read-only --full-auto "Brief question" 2>/dev/null
 ```
 
-### Sandbox Modes
+### Sandbox Modes & Model Selection
 
-| Mode | Sandbox | Use Case |
-|------|---------|----------|
-| Analysis | `read-only` | Design review, debugging analysis, trade-offs |
-| Work | `workspace-write` | Implement, fix, refactor (subagent recommended) |
+| Mode | Model | Sandbox | Use Case |
+|------|-------|---------|----------|
+| Analysis | `gpt-5.4` | `read-only` | Design review, debugging analysis, trade-offs |
+| Implementation | `gpt-5.3-codex` | `workspace-write` | Implement, fix, refactor (subagent recommended) |
 
 **Language protocol:**
 1. Ask Codex in **English**
