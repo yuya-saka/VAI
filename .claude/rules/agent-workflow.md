@@ -22,25 +22,30 @@
 11. Create a prioritized implementation plan.
 12. Report to the user.
 
-### Phase 4: Implementation
+### Phase 4: Implementation (Codex が実装する)
 13. Obtain user approval.
-14. Implement step-by-step according to the plan.
-15. Track each step using `TodoWrite`.
+14. **Delegate implementation to Codex** via sub-agent (`gpt-5.3-codex`, `workspace-write`).
+15. Claude does NOT write code directly — Codex handles all code and test writing.
+16. Claude reviews Codex output and reports to user.
 
 ---
 
 ## ❌ Prohibited Actions
 
-1. **Providing your own analysis before the agent completes its task**
+1. **Claude が直接コードを書くこと**
+   - All code implementation and test writing MUST be delegated to Codex.
+   - Claude's role is orchestration, planning, review, and user communication only.
+
+2. **Providing your own analysis before the agent completes its task**
    - The Codex analysis must take top priority.
 
-2. **Calling Codex/Gemini directly in parallel**
+3. **Calling Codex/Gemini directly in parallel**
    - This causes conflicts with the sub-agent.
 
-3. **Giving up when result files cannot be found**
+4. **Giving up when result files cannot be found**
    - Always check the CLI logs.
 
-4. **Changing code abruptly without an implementation plan**
+5. **Changing code abruptly without an implementation plan**
    - A phased plan must always be created first.
 
 ---
