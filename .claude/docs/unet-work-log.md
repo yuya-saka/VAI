@@ -1,7 +1,7 @@
 # Unet/ 作業サマリー
 
 <!-- ルール: 現在地・次アクションのみ。完了詳細は work-logs/YYYY-MM-DD.md へ。上限60行 -->
-<!-- 最終更新: 2026-04-02 -->
+<!-- 最終更新: 2026-04-06 -->
 
 ## 現在の精度（MSE-only, sigma=3.5, 5-fold CV）
 
@@ -24,7 +24,7 @@ line_only/
 └── utils/  losses.py / metrics.py / detection.py / visualization.py
 
 preprocessing/
-├── generate_region_mask.py   ← ⚠️ 要再実装（設計ミス）
+├── generate_region_mask.py   ✅ 半平面分割で再実装済み（236行）
 ├── pilot_region_mask.py
 ├── visualize_region_masks.py
 └── tests/test_generate_region_mask.py
@@ -34,17 +34,23 @@ preprocessing/
 
 ---
 
-## 現在のフェーズ：region-mask 再設計待ち
+## 現在のフェーズ：TotalSegmentatorマスク品質対策の検討
 
 | Phase | 状態 | 概要 |
 |-------|------|------|
-| 0〜2 | ✅ | 可視化・影響範囲・テスト作成 |
-| 3 | ⚠️ 要再実装 | generate_region_mask.py（設計ミス、詳細→2026-04-02.md） |
-| 4 | ✅（参考値） | パイロット100slice（結果は不正） |
-| 5〜7 | ⏳ | Phase 3 再実装後 |
+| 0〜3 | ✅ | generate_region_mask.py 半平面分割で再実装（870行→236行） |
+| 4 | ✅ | パイロット100スライス: **100/100成功** ・可視化確認OK |
+| 5 | ⏳ | TotalSegmentatorマスク歪み対策（次セッション） |
+| 6〜 | ⏳ | 訓練パイプラインへの組み込み |
 
-**次のアクション**: `generate_region_mask.py` の再設計方針を決定して再実装。
-候補: 半平面分割 or 折れ線バリア（詳細→`work-logs/2026-04-02.md`）
+**課題 (2026-04-06)**:
+- TotalSegmentatorマスク自体が歪むと領域品質が低下
+- Codex推奨優先順: ① QCフィルタリング → ② eroded mask で外周依存を下げる
+- 詳細: `codex/20260406-mask-quality-strategy.md`
+
+**次のアクション**:
+1. TotalSegmentatorマスクのQCスコアリング実装（`solidity`・隣接スライス連続性・line端点がmask内か）
+2. eroded maskベースの領域生成を試験（boundary歪み影響を低減）
 
 ---
 
@@ -59,10 +65,10 @@ preprocessing/
 
 | 日付 | 主な内容 |
 |------|---------|
+| [2026-04-06](work-logs/2026-04-06.md) | 半平面分割実装完了・テスト6/6・パイロット100/100・マスク品質課題整理 |
+| [2026-04-05](work-logs/2026-04-05.md) | 半平面分割プロトタイプ検証(99.9%)・方針決定 |
 | [2026-04-02](work-logs/2026-04-02.md) | region-mask 設計ミス判明・再設計候補整理 |
 | [2026-04-01](work-logs/2026-04-01.md) | eval_error_viz.py 実装 |
 | [2026-03-31](work-logs/2026-03-31.md) | sigma確定(3.5)、threshold sweep、GT品質確認 |
 | [2026-03-30](work-logs/2026-03-30.md) | 椎体条件付け実装、fold1回帰調査 |
 | [2026-03-29](work-logs/2026-03-29.md) | 線損失3ステージ実装（テスト21/21通過） |
-| [2026-03-18](work-logs/2026-03-18.md) | 重大バグ修正（Y軸座標・NaN処理・warmup式） |
-| [2026-03-13](work-logs/2026-03-13.md) | line_only/ 初期実装 |
