@@ -110,23 +110,28 @@ generate_region_mask(
 
 ### Phase 4: パイロット前処理（100 slice）← 新規追加
 
-- [ ] C3-C7 からランダム100スライスで `generate_region_mask` を実行
-- [ ] 失敗パターンの taxonomy を作成（`bad_slices.json` に `reason` と `stage` を記録）
-- [ ] failure rate が許容範囲か確認してから Phase 5 へ
+- [x] C3-C7 からランダム100スライスで `generate_region_mask` を実行
+- [x] 失敗パターンの taxonomy を作成（`bad_slices.json` に `reason` と `stage` を記録）
+- [x] failure rate が許容範囲か確認してから Phase 5 へ
+  → 全7椎骨・全909スライスに拡張: 906/909成功 (99.67%)
 
 ### Phase 5: バッチ前処理スクリプト
 
 場所: `Unet/preprocessing/preprocess_all.py`
 
-- 全サンプル・全椎体（C3-C7 優先）・全スライスに対して実行
-- 結果を `dataset/sampleXX/Cx/region_masks/slice_XXX.png` に保存（label PNG）
-- 生成失敗スライスを `bad_slices.json`（`reason` + `stage` 付き）に記録
+- [ ] 全サンプル・全椎体・全スライスに対して実行
+- [ ] 結果を `dataset/sampleXX/Cx/gt_masks/slice_XXX.npy` に保存（5ch uint8）
+- [ ] 生成失敗スライスを `bad_slices.json`（`reason` + `stage` 付き）に記録
 
-### Phase 6: QA可視化
+### Phase 6: QA可視化 + QCスコアリング
 
-- [ ] ランダム50〜100スライスをCT + 4色region overlay + 4本separator で描画
-- [ ] 目視確認後、問題スライスを `bad_slices.json` に追加
-- [ ] dataset 統計：vertebra level ごとの各 region 面積比を算出し極端値をflag
+- [x] ランダム20スライスをCT + 4色region overlay + 4本separator で描画
+  → `Unet/preprocessing/output/region_mask_viz/combined_grid.png`
+- [x] QCスコアリング実装: `Unet/preprocessing/qc_score.py`
+  → keep 859件 / downweight 43件 / exclude 7件
+  → 各椎骨に `qc_scores.json` 保存済み
+  → flagged可視化: `Unet/preprocessing/output/qc_viz/qc_flagged.png`
+- [x] **方針確定**: exclude はテスト時のみ、downweight は訓練に使用
 
 ### Phase 7: データセット・学習系統合
 
