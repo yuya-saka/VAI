@@ -221,8 +221,8 @@ class PngLineDataset(Dataset):
         print(f"[INFO] PngLineDataset: {len(self.items)} slices")
 
     def _load_bad_slices(self) -> set:
-        """bad_slices.json を読み込み、除外スライスのセットを返す"""
-        bad_json = self.root_dir / "bad_slices.json"
+        """bad_slices_all.json を読み込み、除外スライスのセットを返す"""
+        bad_json = self.root_dir / "bad_slices_all.json"
         if not bad_json.exists():
             return set()
         try:
@@ -234,8 +234,25 @@ class PngLineDataset(Dataset):
                 print(f"[INFO] bad_slices: {len(result)} スライスを除外")
             return result
         except Exception as e:
-            print(f"[WARN] bad_slices.json の読み込みに失敗: {e}")
+            print(f"[WARN] bad_slices_all.json の読み込みに失敗: {e}")
             return set()
+
+    def _load_qc_excludes(self, vertebra_dir: Path) -> frozenset[int]:
+        """qc_scores.json を読み込み、label=='exclude' の slice_idx 集合を返す"""
+        qc_json = vertebra_dir / "qc_scores.json"
+        if not qc_json.exists():
+            return frozenset()
+
+        try:
+            data = json.loads(qc_json.read_text())
+            excludes = {
+                int(entry["slice_idx"])
+                for entry in data
+                if entry.get("label") == "exclude"
+            }
+            return frozenset(excludes)
+        except Exception:
+            return frozenset()
 
     def _build_index(self):
         """有効なスライスをインデックスに追加"""
@@ -268,6 +285,10 @@ class PngLineDataset(Dataset):
 
                     # GT品質不良スライスをスキップ
                     if (s, v, slice_idx) in self._bad_slices:
+                        continue
+
+                    qc_excludes = self._load_qc_excludes(vd)
+                    if slice_idx in qc_excludes:
                         continue
 
                     ip = vd / "images" / f"slice_{slice_idx:03d}.png"
