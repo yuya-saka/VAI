@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from typing import Any
 
 import albumentations as A
 import cv2
@@ -117,7 +118,9 @@ def _is_sample_valid_png(sample_dir: Path, vertebra_group: str) -> bool:
 # -------------------------
 # データ拡張（オンライン）
 # -------------------------
-def get_transforms(phase="train", cfg_aug=None):
+def get_transforms(
+    phase: str = "train", cfg_aug: dict | None = None
+) -> A.Compose | A.ReplayCompose | None:
     """
     CT（画像）、mask（マスク）、heatmaps（画像として扱う）に同じ幾何変換を適用
     """
@@ -168,6 +171,7 @@ def get_transforms(phase="train", cfg_aug=None):
 
     additional_targets = {
         "mask": "mask",  # 椎体マスクはnearest補間
+        "gt_mask": "mask",  # 領域ラベルはclass indexなのでnearest補間
         "hm1": "image",  # ヒートマップはbilinear補間でOK
         "hm2": "image",
         "hm3": "image",
@@ -227,9 +231,15 @@ class PngLineDataset(Dataset):
             return set()
         try:
             data = json.loads(bad_json.read_text())
+            # フォーマット: リスト形式 [{sample, vertebra, slice, ...}, ...]
+            entries = data if isinstance(data, list) else data.get("bad_slices", [])
             result = set()
-            for entry in data.get("bad_slices", []):
-                result.add((entry["sample"], entry["vertebra"], int(entry["slice_idx"])))
+            for entry in entries:
+                # キー名は "slice_idx" または "slice" のどちらかに対応
+                slice_val = entry.get("slice_idx", entry.get("slice"))
+                if slice_val is None:
+                    continue
+                result.add((entry["sample"], entry["vertebra"], int(slice_val)))
             if result:
                 print(f"[INFO] bad_slices: {len(result)} スライスを除外")
             return result
@@ -254,7 +264,7 @@ class PngLineDataset(Dataset):
         except Exception:
             return frozenset()
 
-    def _build_index(self):
+    def _build_index(self) -> None:
         """有効なスライスをインデックスに追加"""
         for s in self.sample_names:
             sd = self.root_dir / s
@@ -272,6 +282,8 @@ class PngLineDataset(Dataset):
                 except Exception:
                     continue
 
+                qc_excludes = self._load_qc_excludes(vd)
+
                 for slice_idx_str, lines in lines_data.items():
                     ok = True
                     for k in ["line_1", "line_2", "line_3", "line_4"]:
@@ -287,7 +299,6 @@ class PngLineDataset(Dataset):
                     if (s, v, slice_idx) in self._bad_slices:
                         continue
 
-                    qc_excludes = self._load_qc_excludes(vd)
                     if slice_idx in qc_excludes:
                         continue
 
@@ -296,6 +307,9 @@ class PngLineDataset(Dataset):
                     if not ip.exists() or not mp.exists():
                         continue
 
+                    gp = vd / "gt_masks" / f"slice_{slice_idx:03d}.png"
+                    gt_mask_path = gp if gp.exists() else None
+
                     self.items.append(
                         {
                             "sample": s,
@@ -303,9 +317,56 @@ class PngLineDataset(Dataset):
                             "slice_idx": slice_idx,
                             "img_path": ip,
                             "mask_path": mp,
+                            "gt_mask_path": gt_mask_path,
                             "lines": lines,
                         }
                     )
+
+    def _load_gt_mask(self, gt_mask_path: Path | None) -> tuple[np.ndarray, bool]:
+        """gt_masks を読み込み、欠損時はゼロマスクを返す"""
+        empty_mask = np.zeros((self.image_size, self.image_size), dtype=np.uint8)
+        if gt_mask_path is None:
+            return empty_mask, False
+
+        try:
+            gt_mask = np.array(Image.open(gt_mask_path), dtype=np.uint8)
+        except Exception as e:
+            print(f"[WARN] gt_mask の読み込みに失敗: {gt_mask_path} ({e})")
+            return empty_mask, False
+
+        if gt_mask.ndim == 3:
+            gt_mask = gt_mask[..., 0]
+
+        if gt_mask.shape != (self.image_size, self.image_size):
+            gt_mask = cv2.resize(
+                gt_mask,
+                (self.image_size, self.image_size),
+                interpolation=cv2.INTER_NEAREST,
+            )
+
+        gt_mask = np.clip(gt_mask, 0, 4).astype(np.uint8)
+        return gt_mask, True
+
+    def _did_apply_horizontal_flip(self, replay: dict[str, Any] | None) -> bool:
+        """ReplayCompose の記録から水平反転の有無を判定する"""
+        if replay is None:
+            return False
+
+        for tr in replay.get("transforms", []):
+            if not tr.get("__class_fullname__", "").endswith("HorizontalFlip"):
+                continue
+            if tr.get("applied", False):
+                return True
+
+        return False
+
+    def _swap_gt_mask_left_right(self, gt_mask: np.ndarray) -> np.ndarray:
+        """水平反転後に right/left ラベルを入れ替える"""
+        if gt_mask.size == 0:
+            return gt_mask
+
+        label_map = np.array([0, 1, 3, 2, 4], dtype=np.uint8)
+        return label_map[gt_mask]
 
     def _heatmap_from_polyline(self, pts_xy):
         """折れ線からガウシアンヒートマップを生成（距離変換ベース）"""
@@ -329,14 +390,15 @@ class PngLineDataset(Dataset):
         hm = np.exp(-(dist**2) / (2.0 * s2)).astype(np.float32)
         return hm
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.items)
 
-    def __getitem__(self, i):
+    def __getitem__(self, i: int) -> dict[str, Any]:
         it = self.items[i]
 
         ct = np.array(Image.open(it["img_path"]).convert("L"), np.float32) / 255.0
         mk = np.array(Image.open(it["mask_path"]).convert("L"), np.float32) / 255.0
+        gt_mask, has_gt_mask = self._load_gt_mask(it.get("gt_mask_path"))
 
         if ct.shape != (self.image_size, self.image_size):
             ct = cv2.resize(
@@ -366,6 +428,7 @@ class PngLineDataset(Dataset):
             out = self.transform(
                 image=ct,
                 mask=mk,
+                gt_mask=gt_mask,
                 hm1=hms[0],
                 hm2=hms[1],
                 hm3=hms[2],
@@ -373,6 +436,7 @@ class PngLineDataset(Dataset):
             )
             ct = out["image"]
             mk = out["mask"]
+            gt_mask = out["gt_mask"].astype(np.uint8)
             hms = np.stack(
                 [out["hm1"], out["hm2"], out["hm3"], out["hm4"]], axis=0
             ).astype(np.float32)
@@ -381,22 +445,18 @@ class PngLineDataset(Dataset):
             if isinstance(self.transform, A.ReplayCompose) and self.cfg_aug.get(
                 "horizontal_flip", False
             ):
-                did_flip = False
-                for tr in out["replay"]["transforms"]:
-                    if tr.get("__class_fullname__", "").endswith(
-                        "HorizontalFlip"
-                    ) and tr.get("applied", False):
-                        did_flip = True
-                        break
+                did_flip = self._did_apply_horizontal_flip(out.get("replay"))
                 if did_flip:
                     swap_map = self.cfg_aug.get("hflip_channel_swap", None)
                     if swap_map is not None:
                         idx = [int(v) - 1 for v in swap_map]
                         hms = hms[idx]
+                    gt_mask = self._swap_gt_mask_left_right(gt_mask)
 
         ct = np.clip(ct, 0.0, 1.0).astype(np.float32)
         mk = np.clip(mk, 0.0, 1.0).astype(np.float32)
         hms = np.clip(hms, 0.0, 1.0).astype(np.float32)
+        gt_mask = np.clip(gt_mask, 0, 4).astype(np.uint8)
 
         x = np.stack([ct, mk], 0).astype(np.float32)  # (2,H,W)
 
@@ -404,6 +464,8 @@ class PngLineDataset(Dataset):
             "image": torch.from_numpy(x),
             "heatmaps": torch.from_numpy(hms),
             "line_params_gt": torch.from_numpy(gt_line_params),  # (4, 2)
+            "gt_region_mask": torch.from_numpy(gt_mask.astype(np.int64)),
+            "has_gt_region_mask": torch.tensor(has_gt_mask, dtype=torch.bool),
             "sample": it["sample"],
             "vertebra": it["vertebra"],
             "slice_idx": it["slice_idx"],

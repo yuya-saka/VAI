@@ -108,7 +108,9 @@ def _classify_by_half_planes(
     s2 = (xs - float(l2.centroid[0])) * float(n2[0]) + (ys - float(l2.centroid[1])) * float(n2[1])
     s3 = (xs - float(l3.centroid[0])) * float(n3[0]) + (ys - float(l3.centroid[1])) * float(n3[1])
     s4 = (xs - float(l4.centroid[0])) * float(n4[0]) + (ys - float(l4.centroid[1])) * float(n4[1])
-    body = mask & (s1 >= 0.0) & (s2 >= 0.0) & (s3 >= 0.0) & (s4 >= 0.0)
+    x_mid = (float(j_r[0]) + float(j_l[0])) / 2.0
+    right_side = xs >= x_mid
+    body = mask & (s1 >= 0.0) & (s3 >= 0.0) & (~right_side | (s2 >= 0.0)) & (right_side | (s4 >= 0.0))
     right_foramen = mask & (s1 < 0.0) & (s2 >= 0.0)
     left_foramen = mask & (s3 < 0.0) & (s4 >= 0.0) & (~right_foramen)
     posterior = mask & (~body) & (~right_foramen) & (~left_foramen)
