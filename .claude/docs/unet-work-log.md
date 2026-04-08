@@ -35,7 +35,7 @@ preprocessing/
 
 ---
 
-## 現在のフェーズ：Phase 7 完了 → 学習アーキテクチャ設計へ
+## 現在のフェーズ：Phase 10 — multitask 実装中（Phase 5 テスト未着手）
 
 | Phase | 状態 | 概要 |
 |-------|------|------|
@@ -50,9 +50,26 @@ preprocessing/
 - 単一チャネルラベルPNG（ピクセル値 0=bg, 1=body, 2=right, 3=left, 4=posterior）
 - ※値が0〜4なので画像ビューアでは真っ黒に見える（正常）
 
+**損失設計（確定）**:
+- `L = L_line(MSE) + 0.03·L_seg(CE)`
+- 幾何損失（angle/rho）は導入しない
+- Sampler で seg-labeled を 3〜4/8 確保
+- 動的重みは初期不採用
+
+**multitask 実装進捗（2026-04-08）**:
+
+| 実装フェーズ | 状態 | ファイル |
+|------------|------|---------|
+| Phase 1: 基盤 | ✅ | config.yaml, __init__.py 類, detection.py, visualization.py |
+| Phase 2: 核心モジュール | ✅ | losses.py, metrics.py, model.py（ResUNet 1.58M params） |
+| Phase 3: データパイプライン | ✅ | dataset.py, data_utils.py（WeightedRandomSampler） |
+| Phase 4: 訓練ループ | ✅ | trainer.py, train.py（import OK） |
+| Phase 5: テスト | ⬜ | test/test_model.py, test/test_losses.py |
+
 **次のアクション**:
-1. gt_region_mask を学習にどう使うか設計（追加入力チャネル vs 補助損失）
-2. モデル・訓練パイプラインへの統合
+1. Phase 5: `test/test_model.py`, `test/test_losses.py` を Codex で実装
+2. `uv run pytest Unet/multitask/test/ -v` 全 pass 確認
+3. 1 fold dry-run で学習動作確認
 
 **dataset.py 返り値（Phase 7 完了）**:
 - `gt_region_mask`: `torch.LongTensor (H, W)` 値 0=bg / 1=body / 2=right / 3=left / 4=posterior
@@ -71,6 +88,7 @@ preprocessing/
 
 | 日付 | 主な内容 |
 |------|---------|
+| [2026-04-08](work-logs/2026-04-08.md) | multitask アーキテクチャ仕様・損失設計確定: `L=L_line+0.03·L_seg`, MSE only, 幾何損失なし |
 | [2026-04-07](work-logs/2026-04-07.md) | Phase 7完了: dataset.py に gt_masks 読込統合・bad_slices フォーマット修正 |
 | [2026-04-06](work-logs/2026-04-06.md) | 半平面分割実装・CT-maskアフィンズレ修正・全件バッチ保存(906/909)・QCスコアリング完了 |
 | [2026-04-05](work-logs/2026-04-05.md) | 半平面分割プロトタイプ検証(99.9%)・方針決定 |
