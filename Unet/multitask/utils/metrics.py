@@ -164,9 +164,11 @@ def compute_seg_metrics(
 
     戻り値:
         {
-            'miou': float,
+            'miou': float,           # 全クラス平均IoU（bg込み）
             'per_class_iou': list[float],
-            'dice': float,
+            'dice': float,           # 全クラス平均Dice（bg込み）
+            'fg_miou': float,        # 前景クラスのみ平均IoU（bg除く）
+            'fg_mdice': float,       # 前景クラスのみ平均Dice（bg除く）、primary metric
         }
     """
     pred_class = seg_logits.argmax(dim=1)  # (B, H, W)
@@ -182,8 +184,13 @@ def compute_seg_metrics(
         dice_denom = pred_c.sum().float() + gt_c.sum().float()
         dice = (2.0 * intersection + eps) / (dice_denom + eps)
         dices.append(dice.item())
+    # class 0 = bg を除いた前景クラスのみ
+    fg_ious = ious[1:]
+    fg_dices = dices[1:]
     return {
         "miou": float(sum(ious) / len(ious)),
         "per_class_iou": ious,
         "dice": float(sum(dices) / len(dices)),
+        "fg_miou": float(sum(fg_ious) / len(fg_ious)),
+        "fg_mdice": float(sum(fg_dices) / len(fg_dices)),
     }

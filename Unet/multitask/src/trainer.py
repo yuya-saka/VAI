@@ -104,6 +104,9 @@ def evaluate(
     rho_errors: list[float] = []
 
     seg_miou_sum = 0.0
+    seg_dice_sum = 0.0
+    seg_fg_miou_sum = 0.0
+    seg_fg_mdice_sum = 0.0
     seg_miou_count = 0
 
     vertebrae = ["C1", "C2", "C3", "C4", "C5", "C6", "C7"]
@@ -180,6 +183,9 @@ def evaluate(
             )
             labeled_count = int(has_seg_label.sum().item())
             seg_miou_sum += seg_metrics["miou"] * labeled_count
+            seg_dice_sum += seg_metrics["dice"] * labeled_count
+            seg_fg_miou_sum += seg_metrics["fg_miou"] * labeled_count
+            seg_fg_mdice_sum += seg_metrics["fg_mdice"] * labeled_count
             seg_miou_count += labeled_count
 
     per_vert_stats: dict[str, dict[str, float | int]] = {}
@@ -198,6 +204,21 @@ def evaluate(
         "val_weighted_seg_loss": weighted_seg_loss_sum / max(1, n),
         "seg_miou": (
             float(seg_miou_sum / seg_miou_count)
+            if seg_miou_count > 0
+            else float("nan")
+        ),
+        "seg_dice": (
+            float(seg_dice_sum / seg_miou_count)
+            if seg_miou_count > 0
+            else float("nan")
+        ),
+        "seg_fg_miou": (
+            float(seg_fg_miou_sum / seg_miou_count)
+            if seg_miou_count > 0
+            else float("nan")
+        ),
+        "seg_fg_mdice": (
+            float(seg_fg_mdice_sum / seg_miou_count)
             if seg_miou_count > 0
             else float("nan")
         ),
@@ -322,6 +343,7 @@ def run_training_loop(
             f"val_line={val_metrics['val_line_loss']:.6f} "
             f"val_seg={val_metrics['val_seg_loss']:.6f} "
             f"seg_miou={val_metrics['seg_miou']:.4f} "
+            f"seg_dice={val_metrics['seg_dice']:.4f} "
             f"peak={val_metrics['peak_dist_mean']:.2f}px "
             f"angle={val_metrics['angle_error_deg']:.2f}° "
             f"rho={val_metrics['rho_error_px']:.2f}px "
@@ -342,6 +364,7 @@ def run_training_loop(
                     "val_seg_loss": val_metrics["val_seg_loss"],
                     "val_weighted_seg_loss": val_metrics["val_weighted_seg_loss"],
                     "seg_miou": val_metrics["seg_miou"],
+                    "seg_dice": val_metrics["seg_dice"],
                     "peak_dist": val_metrics["peak_dist_mean"],
                     "angle_error_deg": val_metrics["angle_error_deg"],
                     "rho_error_px": val_metrics["rho_error_px"],
@@ -364,6 +387,7 @@ def run_training_loop(
                 _wandb.run.summary["best_val_line_loss"] = val_metrics["val_line_loss"]
                 _wandb.run.summary["best_val_seg_loss"] = val_metrics["val_seg_loss"]
                 _wandb.run.summary["best_seg_miou"] = val_metrics["seg_miou"]
+                _wandb.run.summary["best_seg_dice"] = val_metrics["seg_dice"]
                 _wandb.run.summary["best_peak_dist"] = val_metrics["peak_dist_mean"]
                 _wandb.run.summary["best_angle_error_deg"] = val_metrics[
                     "angle_error_deg"
@@ -604,7 +628,7 @@ def save_examples(
     n_save: int = 12,
     tag: str = "VAL",
 ) -> None:
-    """サンプル画像（heatmap・seg overlay）を保存する。"""
+    """サンプル画像（heatmap）を保存する。"""
     model.eval()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -613,17 +637,13 @@ def save_examples(
     for batch in loader:
         x = batch["image"].to(device).float()
         gt_heatmap = batch["heatmaps"].to(device).float()
-        gt_mask, has_seg_label = _extract_seg_batch(batch, device)
 
         out = model(x)
         pred_heatmaps = torch.sigmoid(out["line_heatmaps"])
-        pred_mask = out["seg_logits"].argmax(dim=1)
 
         x_np = x.cpu().numpy()
         gt_np = gt_heatmap.cpu().numpy()
         pred_np = pred_heatmaps.cpu().numpy()
-        gt_mask_np = gt_mask.cpu().numpy()
-        pred_mask_np = pred_mask.cpu().numpy()
 
         batch_size = x_np.shape[0]
         for i in range(batch_size):
@@ -642,17 +662,50 @@ def save_examples(
                 out_dir / f"{tag}_{name}_PRED_merged.png",
             )
 
-            if bool(has_seg_label[i].item()):
+            saved += 1
+            if saved >= n_save:
+                return
+
+
+def save_seg_examples(
+    model: nn.Module,
+    loader,
+    device: torch.device,
+    out_dir: Path,
+    tag: str = "TEST",
+) -> None:
+    """C1~C7を網羅したセグメンテーション可視化を専用フォルダに保存する。"""
+    model.eval()
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    with torch.no_grad():
+        for batch in loader:
+            x = batch["image"].to(device).float()
+            gt_mask, has_seg_label = _extract_seg_batch(batch, device)
+
+            out = model(x)
+            pred_mask = out["seg_logits"].argmax(dim=1)
+
+            x_np = x.cpu().numpy()
+            gt_mask_np = gt_mask.cpu().numpy()
+            pred_mask_np = pred_mask.cpu().numpy()
+
+            batch_size = x_np.shape[0]
+            for i in range(batch_size):
+                if not bool(has_seg_label[i].item()):
+                    continue
+                ct01 = x_np[i, 0]
+                name = (
+                    f"{batch['sample'][i]}_{batch['vertebra'][i]}_"
+                    f"slice{int(batch['slice_idx'][i]):03d}"
+                )
                 save_seg_overlay(
                     ct=ct01,
                     pred_mask=pred_mask_np[i].astype(np.int32),
                     gt_mask=gt_mask_np[i].astype(np.int32),
-                    out_path=out_dir / f"{tag}_{name}_SEG_overlay.png",
+                    out_path=out_dir / f"{tag}_{name}_seg.png",
                 )
-
-            saved += 1
-            if saved >= n_save:
-                return
 
 
 # -------------------------
@@ -776,11 +829,15 @@ def train_one_fold(cfg: dict[str, Any]) -> dict[str, Any]:
         dataset_root=root_dir,
         out_dir=out_dir,
     )
+    seg_vis_dir = vis_base / f"fold{test_fold}" / "test_seg"
+    save_seg_examples(model, test_loader, device, seg_vis_dir, tag="TEST")
+    print(f"[INFO] seg overlays saved to {seg_vis_dir}/")
 
     print("\n" + "=" * 60)
     print("[MULTITASK EVALUATION]")
     print("=" * 60)
     print(f"  Seg mIoU:              {test_metrics['seg_miou']:.4f}")
+    print(f"  Seg Dice:              {test_metrics['seg_dice']:.4f}")
     print(f"  Perpendicular Distance: {line_summary['perpendicular_dist_px_mean']:.2f} px")
     print(f"  Angle Error:           {line_summary['angle_error_deg_mean']:.2f} deg")
     print(f"  Rho Error:             {line_summary['rho_error_px_mean']:.2f} px")
@@ -818,6 +875,7 @@ def train_one_fold(cfg: dict[str, Any]) -> dict[str, Any]:
         _wandb.run.summary["test_line_loss"] = test_metrics["val_line_loss"]
         _wandb.run.summary["test_seg_loss"] = test_metrics["val_seg_loss"]
         _wandb.run.summary["test_seg_miou"] = test_metrics["seg_miou"]
+        _wandb.run.summary["test_seg_dice"] = test_metrics["seg_dice"]
         _wandb.run.summary["test_peak_dist"] = test_metrics["peak_dist_mean"]
         _wandb.run.summary["line_perp_dist"] = line_summary["perpendicular_dist_px_mean"]
         _wandb.run.summary["line_angle_error"] = line_summary["angle_error_deg_mean"]
@@ -829,6 +887,9 @@ def train_one_fold(cfg: dict[str, Any]) -> dict[str, Any]:
         "test_line_loss": test_metrics["val_line_loss"],
         "test_seg_loss": test_metrics["val_seg_loss"],
         "test_seg_miou": test_metrics["seg_miou"],
+        "test_seg_dice": test_metrics["seg_dice"],
+        "test_seg_fg_miou": test_metrics["seg_fg_miou"],
+        "test_seg_fg_mdice": test_metrics["seg_fg_mdice"],
         "seg_miou": test_metrics["seg_miou"],
         "test_peak_dist_mean": test_metrics["peak_dist_mean"],
         "line_perpendicular_dist_px_mean": line_summary["perpendicular_dist_px_mean"],

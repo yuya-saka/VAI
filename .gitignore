@@ -68,6 +68,8 @@ annotation_data/
 tests/
 wandb/
 trash/
+.claude/docs/codex/
+scripts/
 
 # Temporary directory for Claude Code
 .tmp/
