@@ -389,9 +389,7 @@ def run_training_loop(
                 _wandb.run.summary["best_seg_miou"] = val_metrics["seg_miou"]
                 _wandb.run.summary["best_seg_dice"] = val_metrics["seg_dice"]
                 _wandb.run.summary["best_peak_dist"] = val_metrics["peak_dist_mean"]
-                _wandb.run.summary["best_angle_error_deg"] = val_metrics[
-                    "angle_error_deg"
-                ]
+                _wandb.run.summary["best_angle_error_deg"] = val_metrics["angle_error_deg"]
                 _wandb.run.summary["best_rho_error_px"] = val_metrics["rho_error_px"]
         else:
             no_improve += 1
