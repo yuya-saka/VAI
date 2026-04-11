@@ -2,6 +2,10 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+
+VERTEBRA_TO_IDX = {'C1': 0, 'C2': 1, 'C3': 2, 'C4': 3, 'C5': 4, 'C6': 5, 'C7': 6}
 
 
 class ResBlock(nn.Module):
@@ -11,6 +15,7 @@ class ResBlock(nn.Module):
     shortcut: チャンネル数が変わる場合は 1x1 Conv、同じ場合は identity
     Conv の bias=False（GN の直後は不要）
     '''
+
     def __init__(self, in_ch: int, out_ch: int, dropout: float = 0.0, norm_groups: int = 8):
         super().__init__()
         # num_channels が norm_groups より小さい場合に備えてクランプ
@@ -46,6 +51,7 @@ class Encoder(nn.Module):
     x3: Stage3出力 (B, f[2], H/4, W/4)
     x4: Stage4出力（ボトルネック）(B, f[3], H/8, W/8)
     '''
+
     def __init__(self, in_ch: int, features: tuple, dropout: float = 0.0, norm_groups: int = 8):
         super().__init__()
         f = features
@@ -71,6 +77,7 @@ class Decoder(nn.Module):
     Seg / Line それぞれに独立したインスタンスを作成する。
     パラメータは共有しない。
     '''
+
     def __init__(self, features: tuple, out_ch: int, dropout: float = 0.0, norm_groups: int = 8):
         super().__init__()
         f = features
@@ -104,6 +111,7 @@ class ResUNet(nn.Module):
             'line_heatmaps': (B, line_channels, H, W),
         }
     '''
+
     def __init__(
         self,
         in_channels: int = 2,
@@ -112,14 +120,44 @@ class ResUNet(nn.Module):
         features: tuple = (24, 48, 96, 192),
         dropout: float = 0.05,
         norm_groups: int = 8,
+        num_vertebra: int = 0,
     ):
         super().__init__()
+        self.num_vertebra = num_vertebra
         self.encoder = Encoder(in_channels, features, dropout=dropout, norm_groups=norm_groups)
         self.seg_decoder = Decoder(features, seg_classes, dropout=dropout, norm_groups=norm_groups)
         self.line_decoder = Decoder(features, line_channels, dropout=dropout, norm_groups=norm_groups)
 
-    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        if self.num_vertebra > 0:
+            self.cond_proj = nn.Conv2d(features[3] + self.num_vertebra, features[3], 1, bias=True)
+            self._init_cond_proj_identity(features[3])
+
+    def _init_cond_proj_identity(self, bottleneck_ch: int) -> None:
+        '''条件結合 1x1 Conv を恒等写像初期化する。'''
+        with torch.no_grad():
+            self.cond_proj.weight.zero_()
+            self.cond_proj.bias.zero_()
+            self.cond_proj.weight[:, :bottleneck_ch, 0, 0] = torch.eye(bottleneck_ch)
+
+    def _onehot_map(
+        self,
+        vertebra_idx: torch.Tensor,
+        h: int,
+        w: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        '''椎体インデックスを空間展開済み one-hot マップへ変換する。'''
+        one_hot = F.one_hot(vertebra_idx, num_classes=self.num_vertebra).to(dtype=dtype, device=device)
+        return one_hot[:, :, None, None].expand(-1, -1, h, w)
+
+    def forward(self, x: torch.Tensor, vertebra_idx: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
         x1, x2, x3, x4 = self.encoder(x)
+
+        if vertebra_idx is not None and self.num_vertebra > 0:
+            cond = self._onehot_map(vertebra_idx, x4.shape[-2], x4.shape[-1], x4.dtype, x4.device)
+            x4 = self.cond_proj(torch.cat([x4, cond], dim=1))
+
         seg_logits = self.seg_decoder(x4, x3, x2, x1)
         line_heatmaps = self.line_decoder(x4, x3, x2, x1)
         return {'seg_logits': seg_logits, 'line_heatmaps': line_heatmaps}

@@ -147,6 +147,9 @@ def compute_perpendicular_distance(
     return float(distances.mean())
 
 
+CLASS_NAMES = ["bg", "body", "right", "left", "posterior"]
+
+
 def compute_seg_metrics(
     seg_logits: torch.Tensor,
     gt_mask: torch.Tensor,
@@ -190,6 +193,10 @@ def compute_seg_metrics(
     return {
         "miou": float(sum(ious) / len(ious)),
         "per_class_iou": ious,
+        "per_class": {
+            name: {"iou": ious[i], "dice": dices[i]}
+            for i, name in enumerate(CLASS_NAMES)
+        },
         "dice": float(sum(dices) / len(dices)),
         "fg_miou": float(sum(fg_ious) / len(fg_ious)),
         "fg_mdice": float(sum(fg_dices) / len(fg_dices)),

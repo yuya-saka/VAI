@@ -1,46 +1,45 @@
 # Unet/ 作業サマリー
 
 <!-- ルール: 現在地・次アクションのみ。完了詳細は work-logs/YYYY-MM-DD.md へ。上限60行 -->
-<!-- 最終更新: 2026-04-09 (session 3) -->
+<!-- 最終更新: 2026-04-12 -->
 
-## 精度比較（5-fold CV, 指標統一済み）
+## 精度比較（5-fold CV 平均）
 
-| モデル | perp (px) | angle (°) | rho (px) | fg_miou | fg_mdice |
+| モデル | perp (px) | angle (°) | rho (px) | seg_mIoU | fg_mdice |
 |--------|:-:|:-:|:-:|:-:|:-:|
 | line_only sig3.5 | 11.55 | 5.53 | 3.29 | — | — |
-| seg_only_v1 | — | — | — | 0.882 | 0.936 |
-| multitask_v1 (re-run) | 11.56 | 6.07 | 3.54 | 0.888 | 0.939 |
+| seg_only_v1 | — | — | — | 0.906 | 0.936 |
+| multitask_v1 (α=0.03) | 11.56 | 6.07 | 3.54 | 0.910 | 0.939 |
+| multitask α=0.02 | **11.34** | **5.30** | **3.46** | 0.909 | 0.938 |
+| **multitask_v2 (椎体条件付け)** | 11.45 | **5.47** | 3.42 | 0.907 | 0.937 |
 
-- multitask: seg は seg_only を上回る。直線は line_only より angle/rho がやや劣る
-- C1 perp≈22px（突出して悪い）、C7 perp≈13px。C3〜C5 が最良（8px台）
+- v2: C1 angle ▼1.1°、C2 angle ▼1.4° — 形状特異な上位椎体で顕著な改善
 
----
+## multitask_v2 椎体別 angle_error（v1 比）
 
-## 現在の問題
+| C1 | C2 | C3 | C4 | C5 | C6 | C7 |
+|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| 8.30→**7.17** | 8.33→**6.90** | 4.89→**4.10** | 4.32→4.25 | 4.21≈4.22 | 4.59→4.77 | 7.20→**7.01** |
 
-**multitask の heatmap が line_only より"太く・鈍く"なる negative transfer**
+## 実装状況
 
-- 原因: dense な seg 勾配（全ピクセル）が sparse な line 信号を圧倒
-- epoch 28 以降: seg_miou は改善し続けるが line metrics は振動・停滞
-- seg head は seg_loss なしでは学習不可（line_loss の勾配は seg head に流れない）
+- `multitask/` + `seg_only/` 両方に vertebra conditioning 実装済み（config で on/off）
+- `multitask/` に per_class (body/right/left/posterior) Dice/IoU の記録追加済み
+- テスト: multitask 16/16、seg_only 14/14 pass
 
 ## 次のアクション（優先順）
 
-1. **alpha_seg を下げる実験**（現在 0.03）
-2. **seg loss 遅延導入**（最初 10〜20 epoch は alpha_seg=0）
-3. **line_only checkpoint で encoder 初期化** → seg head だけ立ち上げ → unfreeze
-4. **weighted MSE heatmap loss**（peak 帯強調: `w = 1 + 8*gt`）
-5. **C1/C7 vertebra-aware weighting**（C1: 1.75〜2.0x, C7: 1.25〜1.5x、line loss のみ）
-
-参考: `.claude/docs/codex/20260409-1830-accuracy-improvement.md`
-参考: `.claude/docs/codex/20260409-1900-heatmap-improvement.md`
+1. **seg_only + 椎体条件付け実験**（seg 単体での条件付け効果を確認）
+2. **left クラス悪化の原因調査**（C1・C4 で left が落ちる理由）
+3. **seg loss 遅延導入**（最初 10〜20 epoch は alpha_seg=0）
+4. **line_only checkpoint で encoder 初期化** → seg head だけ立ち上げ → unfreeze
 
 ---
 
 ## コード構成
 
 実行: `uv run python Unet/multitask/train.py --config Unet/multitask/config/config.yaml`
-テスト: `uv run pytest Unet/multitask/test/ -v`（13/13 pass）
+テスト: `uv run pytest Unet/multitask/test/ Unet/seg_only/test/ -v`（30/30 pass）
 
 ---
 
@@ -48,6 +47,8 @@
 
 | 日付 | 主な内容 |
 |------|---------|
+| [2026-04-12](work-logs/2026-04-12.md) | vertebra conditioning 実装（multitask/seg_only）・v2 結果確認・per_class メトリクス追加 |
+| [2026-04-10](work-logs/2026-04-10.md) | multitask vs seg_only 比較・per-image ハードケース分析 |
 | [2026-04-09](work-logs/2026-04-09.md) | seg_only/ プロジェクト新規作成（11/11テスト pass）・background_weight/gamma_dice 設計方針確認 |
 | [2026-04-08](work-logs/2026-04-08.md) | Phase 5完了(13/13 pass)・fold 0実験: angle 5.42deg / mIoU 0.911 |
 | [2026-04-07](work-logs/2026-04-07.md) | Phase 7完了: dataset.py に gt_masks 読込統合・bad_slices フォーマット修正 |

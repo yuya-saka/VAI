@@ -16,6 +16,7 @@ from .data_utils import (
     create_model_optimizer_scheduler,
     prepare_datasets_and_splits,
 )
+from .model import VERTEBRA_TO_IDX
 
 
 def _resolve_output_base(cfg: dict[str, Any], script_dir: Path) -> Path | None:
@@ -64,7 +65,12 @@ def evaluate(
         x = batch['image'].to(device).float()
         gt_mask = batch['gt_region_mask'].to(device).long()
 
-        out = model(x)
+        v_idx = torch.as_tensor(
+            [VERTEBRA_TO_IDX.get(v, 0) for v in batch['vertebra']],
+            device=device,
+            dtype=torch.long,
+        )
+        out = model(x, v_idx)
         seg_logits = out['seg_logits']
 
         loss_dict = compute_seg_only_loss(
@@ -145,7 +151,12 @@ def run_training_loop(
             x = batch['image'].to(device).float()
             gt_mask = batch['gt_region_mask'].to(device).long()
 
-            out = model(x)
+            v_idx = torch.as_tensor(
+                [VERTEBRA_TO_IDX.get(v, 0) for v in batch['vertebra']],
+                device=device,
+                dtype=torch.long,
+            )
+            out = model(x, v_idx)
             loss_dict = compute_seg_only_loss(
                 seg_logits=out['seg_logits'],
                 gt_mask=gt_mask,
@@ -224,7 +235,12 @@ def save_seg_examples(
         x = batch['image'].to(device).float()
         gt_mask = batch['gt_region_mask'].to(device).long()
 
-        out = model(x)
+        v_idx = torch.as_tensor(
+            [VERTEBRA_TO_IDX.get(v, 0) for v in batch['vertebra']],
+            device=device,
+            dtype=torch.long,
+        )
+        out = model(x, v_idx)
         pred_mask = out['seg_logits'].argmax(dim=1)
 
         x_np = x.cpu().numpy()

@@ -26,6 +26,7 @@ from .data_utils import (
     create_model_optimizer_scheduler,
     prepare_datasets_and_splits,
 )
+from .model import VERTEBRA_TO_IDX
 
 tempfile.tempdir = "/tmp"
 
@@ -108,6 +109,8 @@ def evaluate(
     seg_fg_miou_sum = 0.0
     seg_fg_mdice_sum = 0.0
     seg_miou_count = 0
+    per_class_dice: dict[str, list[float]] = {}
+    per_class_iou_acc: dict[str, list[float]] = {}
 
     vertebrae = ["C1", "C2", "C3", "C4", "C5", "C6", "C7"]
     per_vertebra = {v: {"peak_dists": []} for v in vertebrae}
@@ -118,7 +121,12 @@ def evaluate(
         gt_mask, has_seg_label = _extract_seg_batch(batch, device)
         gt_params = batch.get("line_params_gt")
 
-        out = model(x)
+        v_idx = torch.as_tensor(
+            [VERTEBRA_TO_IDX.get(v, 0) for v in batch["vertebra"]],
+            device=device,
+            dtype=torch.long,
+        )
+        out = model(x, v_idx)
         seg_logits = out["seg_logits"]
         line_logits = out["line_heatmaps"]
 
@@ -187,6 +195,9 @@ def evaluate(
             seg_fg_miou_sum += seg_metrics["fg_miou"] * labeled_count
             seg_fg_mdice_sum += seg_metrics["fg_mdice"] * labeled_count
             seg_miou_count += labeled_count
+            for cls_name, vals in seg_metrics["per_class"].items():
+                per_class_dice.setdefault(cls_name, []).append(vals["dice"])
+                per_class_iou_acc.setdefault(cls_name, []).append(vals["iou"])
 
     per_vert_stats: dict[str, dict[str, float | int]] = {}
     for v, vals in per_vertebra.items():
@@ -221,6 +232,17 @@ def evaluate(
             float(seg_fg_mdice_sum / seg_miou_count)
             if seg_miou_count > 0
             else float("nan")
+        ),
+        "per_class": (
+            {
+                cls_name: {
+                    "dice": float(np.mean(dices)),
+                    "iou": float(np.mean(per_class_iou_acc[cls_name])),
+                }
+                for cls_name, dices in per_class_dice.items()
+            }
+            if per_class_dice
+            else {}
         ),
         "peak_dist_mean": float(np.nanmean(peak_dists)) if peak_dists else float("nan"),
         "per_vertebra": per_vert_stats,
@@ -285,7 +307,12 @@ def run_training_loop(
             gt_heatmap = batch["heatmaps"].to(device).float()
             gt_mask, has_seg_label = _extract_seg_batch(batch, device)
 
-            out = model(x)
+            v_idx = torch.as_tensor(
+                [VERTEBRA_TO_IDX.get(v, 0) for v in batch["vertebra"]],
+                device=device,
+                dtype=torch.long,
+            )
+            out = model(x, v_idx)
             loss_dict = multitask_losses.compute_multitask_loss(
                 seg_logits=out["seg_logits"],
                 line_heatmaps=out["line_heatmaps"],
@@ -444,7 +471,12 @@ def predict_lines_and_eval_test(
     for batch in test_loader:
         x = batch["image"].to(device).float()
 
-        out = model(x)
+        v_idx = torch.as_tensor(
+            [VERTEBRA_TO_IDX.get(v, 0) for v in batch["vertebra"]],
+            device=device,
+            dtype=torch.long,
+        )
+        out = model(x, v_idx)
         pred = torch.sigmoid(out["line_heatmaps"])
 
         pred_params, confidence = multitask_losses.extract_pred_line_params_batch(
@@ -636,7 +668,12 @@ def save_examples(
         x = batch["image"].to(device).float()
         gt_heatmap = batch["heatmaps"].to(device).float()
 
-        out = model(x)
+        v_idx = torch.as_tensor(
+            [VERTEBRA_TO_IDX.get(v, 0) for v in batch["vertebra"]],
+            device=device,
+            dtype=torch.long,
+        )
+        out = model(x, v_idx)
         pred_heatmaps = torch.sigmoid(out["line_heatmaps"])
 
         x_np = x.cpu().numpy()
@@ -682,7 +719,12 @@ def save_seg_examples(
             x = batch["image"].to(device).float()
             gt_mask, has_seg_label = _extract_seg_batch(batch, device)
 
-            out = model(x)
+            v_idx = torch.as_tensor(
+                [VERTEBRA_TO_IDX.get(v, 0) for v in batch["vertebra"]],
+                device=device,
+                dtype=torch.long,
+            )
+            out = model(x, v_idx)
             pred_mask = out["seg_logits"].argmax(dim=1)
 
             x_np = x.cpu().numpy()
@@ -894,4 +936,5 @@ def train_one_fold(cfg: dict[str, Any]) -> dict[str, Any]:
         "line_angle_error_deg_mean": line_summary["angle_error_deg_mean"],
         "line_rho_error_px_mean": line_summary["rho_error_px_mean"],
         "per_vertebra": line_summary.get("per_vertebra", {}),
+        "per_class": test_metrics.get("per_class", {}),
     }

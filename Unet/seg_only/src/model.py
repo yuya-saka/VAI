@@ -2,6 +2,10 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+
+VERTEBRA_TO_IDX = {'C1': 0, 'C2': 1, 'C3': 2, 'C4': 3, 'C5': 4, 'C6': 5, 'C7': 6}
 
 
 class ResBlock(nn.Module):
@@ -96,13 +100,43 @@ class SegOnlyUNet(nn.Module):
         features: tuple = (24, 48, 96, 192),
         dropout: float = 0.05,
         norm_groups: int = 8,
+        num_vertebra: int = 0,
     ):
         super().__init__()
+        self.num_vertebra = num_vertebra
         self.encoder = Encoder(in_channels, features, dropout=dropout, norm_groups=norm_groups)
         self.seg_decoder = Decoder(features, seg_classes, dropout=dropout, norm_groups=norm_groups)
 
-    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        if self.num_vertebra > 0:
+            self.cond_proj = nn.Conv2d(features[3] + self.num_vertebra, features[3], 1, bias=True)
+            self._init_cond_proj_identity(features[3])
+
+    def _init_cond_proj_identity(self, bottleneck_ch: int) -> None:
+        """条件結合 1x1 Conv を恒等写像初期化する。"""
+        with torch.no_grad():
+            self.cond_proj.weight.zero_()
+            self.cond_proj.bias.zero_()
+            self.cond_proj.weight[:, :bottleneck_ch, 0, 0] = torch.eye(bottleneck_ch)
+
+    def _onehot_map(
+        self,
+        vertebra_idx: torch.Tensor,
+        h: int,
+        w: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """椎体インデックスを空間展開済み one-hot マップへ変換する。"""
+        one_hot = F.one_hot(vertebra_idx, num_classes=self.num_vertebra).to(dtype=dtype, device=device)
+        return one_hot[:, :, None, None].expand(-1, -1, h, w)
+
+    def forward(self, x: torch.Tensor, vertebra_idx: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
         """フォワードパス - セグメンテーションロジットを返す"""
         x1, x2, x3, x4 = self.encoder(x)
+
+        if vertebra_idx is not None and self.num_vertebra > 0:
+            cond = self._onehot_map(vertebra_idx, x4.shape[-2], x4.shape[-1], x4.dtype, x4.device)
+            x4 = self.cond_proj(torch.cat([x4, cond], dim=1))
+
         seg_logits = self.seg_decoder(x4, x3, x2, x1)
         return {'seg_logits': seg_logits}

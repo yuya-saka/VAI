@@ -57,3 +57,32 @@ def test_seg_only_unet_deterministic():
         out2 = model(x)
     assert torch.allclose(out1['seg_logits'], out2['seg_logits'], atol=1e-7, rtol=0.0)
     print('test_seg_only_unet_deterministic: ok')
+
+
+def test_seg_only_unet_vertebra_conditioning_output_shape():
+    """椎体条件入力ありでも出力形状が変わらないことを確認"""
+    model = SegOnlyUNet(num_vertebra=7)
+    x = torch.randn(2, 2, 64, 64)
+    v_idx = torch.tensor([0, 3], dtype=torch.long)
+    outputs = model(x, v_idx)
+    assert outputs['seg_logits'].shape == (2, 5, 64, 64)
+
+
+def test_seg_only_unet_vertebra_conditioning_disabled():
+    """椎体条件無効時は従来どおり forward できることを確認"""
+    model = SegOnlyUNet(num_vertebra=0)
+    x = torch.randn(2, 2, 64, 64)
+    outputs = model(x)
+    assert outputs['seg_logits'].shape == (2, 5, 64, 64)
+
+
+def test_seg_only_unet_vertebra_conditioning_identity_init():
+    """恒等初期化直後は条件有無で出力が一致することを確認"""
+    model = SegOnlyUNet(num_vertebra=7)
+    model.eval()
+    x = torch.randn(2, 2, 64, 64)
+    v_idx = torch.tensor([0, 3], dtype=torch.long)
+    with torch.no_grad():
+        out_cond = model(x, v_idx)
+        out_uncond = model(x)
+    assert torch.allclose(out_cond['seg_logits'], out_uncond['seg_logits'], atol=1e-5)

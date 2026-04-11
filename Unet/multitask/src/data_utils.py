@@ -255,6 +255,8 @@ def create_model_optimizer_scheduler(cfg, device):
     feats = tuple(model_cfg.get('features', [24, 48, 96, 192]))
     dropout = float(model_cfg.get('dropout', 0.05))
     norm_groups = int(model_cfg.get('norm_groups', 8))
+    use_vertebra_conditioning = bool(model_cfg.get('use_vertebra_conditioning', False))
+    num_vertebra = int(model_cfg.get('num_vertebra', 7)) if use_vertebra_conditioning else 0
 
     model = ResUNet(
         in_channels=in_ch,
@@ -263,6 +265,7 @@ def create_model_optimizer_scheduler(cfg, device):
         features=feats,
         dropout=dropout,
         norm_groups=norm_groups,
+        num_vertebra=num_vertebra,
     ).to(device)
 
     lr = float(tr_cfg.get('learning_rate', 2e-4))
