@@ -1,7 +1,7 @@
 # Unet/ 作業サマリー
 
 <!-- ルール: 現在地・次アクションのみ。完了詳細は work-logs/YYYY-MM-DD.md へ。上限60行 -->
-<!-- 最終更新: 2026-04-12 -->
+<!-- 最終更新: 2026-04-14 -->
 
 ## 精度比較（5-fold CV 平均）
 
@@ -25,14 +25,29 @@
 
 - `multitask/` + `seg_only/` 両方に vertebra conditioning 実装済み（config で on/off）
 - `multitask/` に per_class (body/right/left/posterior) Dice/IoU の記録追加済み
-- テスト: multitask 16/16、seg_only 14/14 pass
+- `multitask/` に `decoder_type` 切り替え実装済み（`dual_decoder` / `shared_decoder`）
+- テスト: multitask 19/19、seg_only 14/14 pass
 
-## 次のアクション（優先順）
+## 方針転換（2026-04-14）
 
-1. **seg_only + 椎体条件付け実験**（seg 単体での条件付け効果を確認）
-2. **left クラス悪化の原因調査**（C1・C4 で left が落ちる理由）
-3. **seg loss 遅延導入**（最初 10〜20 epoch は alpha_seg=0）
-4. **line_only checkpoint で encoder 初期化** → seg head だけ立ち上げ → unfreeze
+line heatmap ベースの multitask 改善は打ち止め。**distance map 回帰** を新たな補助タスクとして検討中。
+
+**理由**: heatmap (σ=3.5) は線近傍の数ピクセルにしか勾配信号がなく、seg への情報伝搬が限定的だった。
+
+**distance map 回帰のコンセプト**:
+- 各ピクセルが境界線からどれくらい離れているかを予測
+- 全ピクセルに監視信号 → 距離急変点＝境界 → seg boundary sharpening に直結
+
+**次セッションで設計を詰める**:
+1. 距離の定義（ユークリッド or 符号付き）
+2. タスク構成（`L_seg + β·L_dist`）
+3. GT 生成方法（distance_transform_edt 等）
+
+## 保留タスク
+
+- shared_decoder 実験（コード実装済み・実験未実施。distance map 方針と組み合わせる可能性あり）
+- seg_only + 椎体条件付け実験
+- left クラス悪化の原因調査
 
 ---
 
@@ -47,6 +62,7 @@
 
 | 日付 | 主な内容 |
 |------|---------|
+| [2026-04-14](work-logs/2026-04-14.md) | heatmap multitask 打ち止め・distance map 回帰への方向転換決定 |
 | [2026-04-12](work-logs/2026-04-12.md) | vertebra conditioning 実装（multitask/seg_only）・v2 結果確認・per_class メトリクス追加 |
 | [2026-04-10](work-logs/2026-04-10.md) | multitask vs seg_only 比較・per-image ハードケース分析 |
 | [2026-04-09](work-logs/2026-04-09.md) | seg_only/ プロジェクト新規作成（11/11テスト pass）・background_weight/gamma_dice 設計方針確認 |

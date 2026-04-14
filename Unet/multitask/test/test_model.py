@@ -125,3 +125,33 @@ def test_resunet_vertebra_conditioning_identity_init():
         out_uncond = model(x)
     assert torch.allclose(out_cond['seg_logits'], out_uncond['seg_logits'], atol=1e-5)
     assert torch.allclose(out_cond['line_heatmaps'], out_uncond['line_heatmaps'], atol=1e-5)
+
+
+def test_resunet_shared_decoder_output_shape() -> None:
+    """shared decoder でも出力形状が期待通りであることを確認"""
+    model = ResUNet(decoder_type='shared_decoder')
+    x = torch.randn(2, 2, 64, 64)
+    outputs = model(x)
+    assert outputs['seg_logits'].shape == (2, 5, 64, 64)
+    assert outputs['line_heatmaps'].shape == (2, 4, 64, 64)
+
+
+def test_resunet_shared_decoder_backward() -> None:
+    """shared decoder でも逆伝播の勾配が有限であることを確認"""
+    model = ResUNet(decoder_type='shared_decoder')
+    x = torch.randn(2, 2, 64, 64)
+    outputs = model(x)
+    loss = outputs['seg_logits'].mean() + outputs['line_heatmaps'].mean()
+    loss.backward()
+    grads = [param.grad for param in model.parameters() if param.requires_grad]
+    assert all(grad is not None for grad in grads)
+    assert all(torch.isfinite(grad).all() for grad in grads)
+
+
+def test_resunet_shared_decoder_param_count() -> None:
+    """shared decoder のパラメータ数が実測値の10%範囲内であることを確認"""
+    model = ResUNet(decoder_type='shared_decoder')
+    total_params = sum(param.numel() for param in model.parameters())
+    expected = 1_154_533
+    tolerance = int(expected * 0.10)
+    assert abs(total_params - expected) <= tolerance

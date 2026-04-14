@@ -48,10 +48,14 @@ def evaluate(
     model.eval()
     loss_cfg = cfg.get('loss', {})
     gamma_dice = float(loss_cfg.get('gamma_dice', 0.4))
+    alpha_boundary = float(loss_cfg.get('alpha_boundary', 0.0))
+    lambda_bd = float(loss_cfg.get('lambda_bd', 0.0))
+    boundary_radius = int(loss_cfg.get('boundary_radius', 1))
 
     total_loss_sum = 0.0
     ce_loss_sum = 0.0
     dice_fg_sum = 0.0
+    boundary_dice_sum = 0.0
     n = 0
 
     fg_mdice_sum = 0.0
@@ -78,11 +82,15 @@ def evaluate(
             gt_mask=gt_mask,
             class_weights=class_weights,
             gamma_dice=gamma_dice,
+            alpha_boundary=alpha_boundary,
+            lambda_bd=lambda_bd,
+            boundary_radius=boundary_radius,
         )
 
         total_loss_sum += loss_dict['total'].item()
         ce_loss_sum += loss_dict['ce_loss'].item()
         dice_fg_sum += loss_dict['dice_fg_loss'].item()
+        boundary_dice_sum += loss_dict['boundary_dice_loss'].item()
         n += 1
 
         seg_metrics = compute_seg_fg_metrics(seg_logits, gt_mask)
@@ -108,6 +116,7 @@ def evaluate(
         'val_loss': total_loss_sum / max(1, n),
         'val_ce_loss': ce_loss_sum / max(1, n),
         'val_dice_fg_loss': dice_fg_sum / max(1, n),
+        'val_boundary_dice_loss': boundary_dice_sum / max(1, n),
         'fg_mdice': float(fg_mdice_sum / max(1, sample_count)),
         'fg_miou': float(fg_miou_sum / max(1, sample_count)),
         'miou': float(miou_sum / max(1, sample_count)),
@@ -136,6 +145,9 @@ def run_training_loop(
     es_pat = int(tr_cfg.get('early_stopping_patience', 20))
     grad_clip = float(tr_cfg.get('grad_clip', 1.0))
     gamma_dice = float(loss_cfg.get('gamma_dice', 0.4))
+    alpha_boundary = float(loss_cfg.get('alpha_boundary', 0.0))
+    lambda_bd = float(loss_cfg.get('lambda_bd', 0.0))
+    boundary_radius = int(loss_cfg.get('boundary_radius', 1))
 
     best_val = float('inf')
     no_improve = 0
@@ -162,6 +174,9 @@ def run_training_loop(
                 gt_mask=gt_mask,
                 class_weights=class_weights,
                 gamma_dice=gamma_dice,
+                alpha_boundary=alpha_boundary,
+                lambda_bd=lambda_bd,
+                boundary_radius=boundary_radius,
             )
             loss = loss_dict['total']
 
@@ -179,11 +194,16 @@ def run_training_loop(
 
         cur_lr = opt.param_groups[0]['lr']
         elapsed = int(round(time.time() - t0))
+        bd_dice_part = (
+            f'bd_dice={val_metrics["val_boundary_dice_loss"]:.6f} '
+            if lambda_bd > 0.0 else ''
+        )
         print(
             f'[EPOCH {ep:03d}/{epochs}] '
             f'lr={cur_lr:.2e} '
             f'train_loss={train_loss:.6f} '
             f'val_loss={val_metrics["val_loss"]:.6f} '
+            f'{bd_dice_part}'
             f'fg_mdice={val_metrics["fg_mdice"]:.4f} '
             f'fg_miou={val_metrics["fg_miou"]:.4f} '
             f'miou={val_metrics["miou"]:.4f} '
@@ -197,6 +217,7 @@ def run_training_loop(
                 'val_loss': val_metrics['val_loss'],
                 'val_ce_loss': val_metrics['val_ce_loss'],
                 'val_dice_fg_loss': val_metrics['val_dice_fg_loss'],
+                'val_boundary_dice_loss': val_metrics['val_boundary_dice_loss'],
                 'fg_mdice': val_metrics['fg_mdice'],
                 'fg_miou': val_metrics['fg_miou'],
                 'miou': val_metrics['miou'],

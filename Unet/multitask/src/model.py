@@ -99,6 +99,47 @@ class Decoder(nn.Module):
         return self.head(y)
 
 
+class DecoderTrunk(nn.Module):
+    '''共有デコーダ幹部（低解像度側）'''
+
+    def __init__(self, features: tuple, dropout: float = 0.0, norm_groups: int = 8) -> None:
+        super().__init__()
+        f = features
+        self.up4 = nn.ConvTranspose2d(f[3], f[2], kernel_size=2, stride=2)
+        self.dec4 = ResBlock(f[2] + f[2], f[2], dropout=dropout, norm_groups=norm_groups)
+        self.up3 = nn.ConvTranspose2d(f[2], f[1], kernel_size=2, stride=2)
+        self.dec3 = ResBlock(f[1] + f[1], f[1], dropout=dropout, norm_groups=norm_groups)
+
+    def forward(self, x4: torch.Tensor, x3: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
+        y = self.up4(x4)
+        y = self.dec4(torch.cat([y, x3], dim=1))
+        y = self.up3(y)
+        y = self.dec3(torch.cat([y, x2], dim=1))
+        return y
+
+
+class DecoderBranch(nn.Module):
+    '''タスク別デコーダ枝（高解像度側）'''
+
+    def __init__(
+        self,
+        features: tuple,
+        out_ch: int,
+        dropout: float = 0.0,
+        norm_groups: int = 8,
+    ) -> None:
+        super().__init__()
+        f = features
+        self.up2 = nn.ConvTranspose2d(f[1], f[0], kernel_size=2, stride=2)
+        self.dec2 = ResBlock(f[0] + f[0], f[0], dropout=dropout, norm_groups=norm_groups)
+        self.head = nn.Conv2d(f[0], out_ch, kernel_size=1)
+
+    def forward(self, y2: torch.Tensor, x1: torch.Tensor) -> torch.Tensor:
+        y = self.up2(y2)
+        y = self.dec2(torch.cat([y, x1], dim=1))
+        return self.head(y)
+
+
 class ResUNet(nn.Module):
     '''Multitask ResUNet - Shared Encoder + Dual Decoder
 
@@ -121,12 +162,28 @@ class ResUNet(nn.Module):
         dropout: float = 0.05,
         norm_groups: int = 8,
         num_vertebra: int = 0,
-    ):
+        decoder_type: str = 'dual_decoder',
+    ) -> None:
         super().__init__()
         self.num_vertebra = num_vertebra
+        self.decoder_type = decoder_type
         self.encoder = Encoder(in_channels, features, dropout=dropout, norm_groups=norm_groups)
-        self.seg_decoder = Decoder(features, seg_classes, dropout=dropout, norm_groups=norm_groups)
-        self.line_decoder = Decoder(features, line_channels, dropout=dropout, norm_groups=norm_groups)
+        if self.decoder_type == 'shared_decoder':
+            self.decoder_trunk = DecoderTrunk(features, dropout=dropout, norm_groups=norm_groups)
+            self.seg_branch = DecoderBranch(
+                features, seg_classes, dropout=dropout, norm_groups=norm_groups
+            )
+            self.line_branch = DecoderBranch(
+                features, line_channels, dropout=dropout, norm_groups=norm_groups
+            )
+        elif self.decoder_type == 'dual_decoder':
+            self.seg_decoder = Decoder(features, seg_classes, dropout=dropout, norm_groups=norm_groups)
+            self.line_decoder = Decoder(features, line_channels, dropout=dropout, norm_groups=norm_groups)
+        else:
+            raise ValueError(
+                f'Unsupported decoder_type: {self.decoder_type}. '
+                "Use 'dual_decoder' or 'shared_decoder'."
+            )
 
         if self.num_vertebra > 0:
             self.cond_proj = nn.Conv2d(features[3] + self.num_vertebra, features[3], 1, bias=True)
@@ -158,6 +215,11 @@ class ResUNet(nn.Module):
             cond = self._onehot_map(vertebra_idx, x4.shape[-2], x4.shape[-1], x4.dtype, x4.device)
             x4 = self.cond_proj(torch.cat([x4, cond], dim=1))
 
-        seg_logits = self.seg_decoder(x4, x3, x2, x1)
-        line_heatmaps = self.line_decoder(x4, x3, x2, x1)
+        if self.decoder_type == 'shared_decoder':
+            y2 = self.decoder_trunk(x4, x3, x2)
+            seg_logits = self.seg_branch(y2, x1)
+            line_heatmaps = self.line_branch(y2, x1)
+        else:
+            seg_logits = self.seg_decoder(x4, x3, x2, x1)
+            line_heatmaps = self.line_decoder(x4, x3, x2, x1)
         return {'seg_logits': seg_logits, 'line_heatmaps': line_heatmaps}
