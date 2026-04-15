@@ -28,24 +28,9 @@
 - `multitask/` に `decoder_type` 切り替え実装済み（`dual_decoder` / `shared_decoder`）
 - テスト: multitask 19/19、seg_only 14/14 pass
 
-## 方針転換（2026-04-14）
-
-line heatmap ベースの multitask 改善は打ち止め。**distance map 回帰** を新たな補助タスクとして検討中。
-
-**理由**: heatmap (σ=3.5) は線近傍の数ピクセルにしか勾配信号がなく、seg への情報伝搬が限定的だった。
-
-**distance map 回帰のコンセプト**:
-- 各ピクセルが境界線からどれくらい離れているかを予測
-- 全ピクセルに監視信号 → 距離急変点＝境界 → seg boundary sharpening に直結
-
-**次セッションで設計を詰める**:
-1. 距離の定義（ユークリッド or 符号付き）
-2. タスク構成（`L_seg + β·L_dist`）
-3. GT 生成方法（distance_transform_edt 等）
 
 ## 保留タスク
 
-- shared_decoder 実験（コード実装済み・実験未実施。distance map 方針と組み合わせる可能性あり）
 - seg_only + 椎体条件付け実験
 - left クラス悪化の原因調査
 
