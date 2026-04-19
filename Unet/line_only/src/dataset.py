@@ -120,9 +120,11 @@ def _is_sample_valid_png(sample_dir: Path, vertebra_group: str) -> bool:
 # -------------------------
 def get_transforms(
     phase: str = "train", cfg_aug: dict | None = None
-) -> A.Compose | A.ReplayCompose | None:
+) -> A.ReplayCompose | None:
     """
-    CT（画像）、mask（マスク）、heatmaps（画像として扱う）に同じ幾何変換を適用
+    CT（画像）・mask（マスク）に幾何変換を適用。
+    ヒートマップはポリライン座標変換後に再生成するため、ここでは渡さない。
+    keypoint_params でポリライン頂点を変換し、補間にじみを排除する。
     """
     if phase != "train":
         return None
@@ -130,7 +132,6 @@ def get_transforms(
 
     ts = []
 
-    # 幾何変換
     if cfg_aug.get("rotation", False):
         ts.append(A.Rotate(limit=float(cfg_aug.get("rotation_limit", 20)), p=0.5))
 
@@ -144,17 +145,17 @@ def get_transforms(
                 translate_percent=0.0,
                 rotate=0,
                 p=0.5,
+                interpolation=cv2.INTER_LINEAR,
+                mask_interpolation=cv2.INTER_NEAREST,
                 border_mode=cv2.BORDER_CONSTANT,
                 fill=0.0,
                 fill_mask=0.0,
             )
         )
 
-    # 左右反転
     if cfg_aug.get("horizontal_flip", False):
         ts.append(A.HorizontalFlip(p=float(cfg_aug.get("horizontal_flip_prob", 0.1))))
 
-    # 輝度コントラスト（CTだけに効く想定だが、簡便のためimageに適用）
     if cfg_aug.get("brightness_contrast", False):
         ts.append(
             A.RandomBrightnessContrast(
@@ -164,24 +165,22 @@ def get_transforms(
             )
         )
 
-    # ガウシアンノイズ（CTに効く想定）
     if cfg_aug.get("gaussian_noise", False):
         var_lim = cfg_aug.get("noise_var_limit", [10, 50])
         ts.append(A.GaussNoise(var_limit=tuple(var_lim), p=0.3))
 
-    additional_targets = {
-        "mask": "mask",  # 椎体マスクはnearest補間
-        "gt_mask": "mask",  # 領域ラベルはclass indexなのでnearest補間
-        "hm1": "image",  # ヒートマップはbilinear補間でOK
-        "hm2": "image",
-        "hm3": "image",
-        "hm4": "image",
-    }
-
-    # flip適用の有無を記録する場合はReplayCompose
-    if cfg_aug.get("horizontal_flip", False):
-        return A.ReplayCompose(ts, additional_targets=additional_targets)
-    return A.Compose(ts, additional_targets=additional_targets)
+    # remove_invisible=False: 画像外に出た点を削除しない（ポリライン長を保持するため必須）
+    # line_1 は標準の keypoints 引数、line_2/3/4 は additional_targets で対応
+    return A.ReplayCompose(
+        ts,
+        additional_targets={
+            "gt_mask": "mask",
+            "line_2": "keypoints",
+            "line_3": "keypoints",
+            "line_4": "keypoints",
+        },
+        keypoint_params=A.KeypointParams(format="xy", remove_invisible=False),
+    )
 
 
 # -------------------------
@@ -368,6 +367,16 @@ class PngLineDataset(Dataset):
         label_map = np.array([0, 1, 3, 2, 4], dtype=np.uint8)
         return label_map[gt_mask]
 
+    def _swap_polylines_on_flip(self, polylines: dict) -> dict:
+        """水平反転後にポリライン意味的スワップを行う"""
+        swap_map = self.cfg_aug.get("hflip_channel_swap", None)
+        if swap_map is None:
+            return polylines
+        keys = ["line_1", "line_2", "line_3", "line_4"]
+        idx = [int(v) - 1 for v in swap_map]
+        swapped = [polylines[keys[i]] for i in idx]
+        return dict(zip(keys, swapped))
+
     def _heatmap_from_polyline(self, pts_xy):
         """折れ線からガウシアンヒートマップを生成（距離変換ベース）"""
         H = W = self.image_size
@@ -394,6 +403,8 @@ class PngLineDataset(Dataset):
         return len(self.items)
 
     def __getitem__(self, i: int) -> dict[str, Any]:
+        LINE_KEYS = ("line_1", "line_2", "line_3", "line_4")
+
         it = self.items[i]
 
         ct = np.array(Image.open(it["img_path"]).convert("L"), np.float32) / 255.0
@@ -401,69 +412,66 @@ class PngLineDataset(Dataset):
         gt_mask, has_gt_mask = self._load_gt_mask(it.get("gt_mask_path"))
 
         if ct.shape != (self.image_size, self.image_size):
-            ct = cv2.resize(
-                ct, (self.image_size, self.image_size), interpolation=cv2.INTER_LINEAR
-            )
+            ct = cv2.resize(ct, (self.image_size, self.image_size), interpolation=cv2.INTER_LINEAR)
         if mk.shape != (self.image_size, self.image_size):
-            mk = cv2.resize(
-                mk, (self.image_size, self.image_size), interpolation=cv2.INTER_NEAREST
-            )
+            mk = cv2.resize(mk, (self.image_size, self.image_size), interpolation=cv2.INTER_NEAREST)
 
-        hms = []
-        for k in ["line_1", "line_2", "line_3", "line_4"]:
-            pts = preprocess_polyline(it["lines"][k])
-            hms.append(self._heatmap_from_polyline(pts))
-        hms = np.stack(hms, 0).astype(np.float32)  # (4,H,W)
+        polylines = {
+            key: preprocess_polyline(it["lines"][key])
+            for key in LINE_KEYS
+        }
 
-        # GT直線パラメータ (φ, ρ) を抽出
-        gt_line_params = []
-        for k in ["line_1", "line_2", "line_3", "line_4"]:
-            pts = preprocess_polyline(it["lines"][k])
-            phi, rho = line_losses.extract_gt_line_params(pts, self.image_size)
-            gt_line_params.append([phi, rho])
-        gt_line_params = np.array(gt_line_params, dtype=np.float32)  # (4, 2)
-
-        # オンライン拡張（訓練時のみ）
         if self.transform is not None:
             out = self.transform(
                 image=ct,
                 mask=mk,
                 gt_mask=gt_mask,
-                hm1=hms[0],
-                hm2=hms[1],
-                hm3=hms[2],
-                hm4=hms[3],
+                keypoints=polylines["line_1"],
+                line_2=polylines["line_2"],
+                line_3=polylines["line_3"],
+                line_4=polylines["line_4"],
             )
             ct = out["image"]
             mk = out["mask"]
             gt_mask = out["gt_mask"].astype(np.uint8)
-            hms = np.stack(
-                [out["hm1"], out["hm2"], out["hm3"], out["hm4"]], axis=0
-            ).astype(np.float32)
 
-            # flip時にch入れ替えが必要な定義なら configで指定（例: [2,1,4,3]）
-            if isinstance(self.transform, A.ReplayCompose) and self.cfg_aug.get(
-                "horizontal_flip", False
-            ):
+            polylines = {
+                "line_1": [list(p[:2]) for p in out["keypoints"]],
+                "line_2": [list(p[:2]) for p in out["line_2"]],
+                "line_3": [list(p[:2]) for p in out["line_3"]],
+                "line_4": [list(p[:2]) for p in out["line_4"]],
+            }
+
+            if self.cfg_aug.get("horizontal_flip", False):
                 did_flip = self._did_apply_horizontal_flip(out.get("replay"))
                 if did_flip:
-                    swap_map = self.cfg_aug.get("hflip_channel_swap", None)
-                    if swap_map is not None:
-                        idx = [int(v) - 1 for v in swap_map]
-                        hms = hms[idx]
                     gt_mask = self._swap_gt_mask_left_right(gt_mask)
+                    polylines = self._swap_polylines_on_flip(polylines)
+
+        hms = np.stack(
+            [self._heatmap_from_polyline(polylines[key]) for key in LINE_KEYS],
+            axis=0,
+        ).astype(np.float32)
+
+        gt_line_params = np.array(
+            [
+                line_losses.extract_gt_line_params(polylines[key], self.image_size)
+                for key in LINE_KEYS
+            ],
+            dtype=np.float32,
+        )  # (4, 2)
 
         ct = np.clip(ct, 0.0, 1.0).astype(np.float32)
         mk = np.clip(mk, 0.0, 1.0).astype(np.float32)
         hms = np.clip(hms, 0.0, 1.0).astype(np.float32)
         gt_mask = np.clip(gt_mask, 0, 4).astype(np.uint8)
 
-        x = np.stack([ct, mk], 0).astype(np.float32)  # (2,H,W)
+        x = np.stack([ct, mk], 0).astype(np.float32)
 
         return {
             "image": torch.from_numpy(x),
             "heatmaps": torch.from_numpy(hms),
-            "line_params_gt": torch.from_numpy(gt_line_params),  # (4, 2)
+            "line_params_gt": torch.from_numpy(gt_line_params),
             "gt_region_mask": torch.from_numpy(gt_mask.astype(np.int64)),
             "has_gt_region_mask": torch.tensor(has_gt_mask, dtype=torch.bool),
             "sample": it["sample"],

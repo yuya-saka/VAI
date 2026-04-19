@@ -1,7 +1,7 @@
 # Unet/ 作業サマリー
 
 <!-- ルール: 現在地・次アクションのみ。完了詳細は work-logs/YYYY-MM-DD.md へ。上限60行 -->
-<!-- 最終更新: 2026-04-14 -->
+<!-- 最終更新: 2026-04-15 -->
 
 ## 精度比較（5-fold CV 平均）
 
@@ -29,10 +29,24 @@
 - テスト: multitask 19/19、seg_only 14/14 pass
 
 
+## aug変換修正 実験結果（line_only, 2026-04-15）
+
+| 実験 | peak_dist [px] ↓ | angle_err [°] ↓ | rho_err [px] ↓ |
+|------|:----------------:|:----------------:|:--------------:|
+| aug/sig2.0（旧ベース） | 22.21 | 6.75 | 3.71 |
+| reg/sig3.5 | 20.76 | 6.26 | 3.47 |
+| reg/sig4.0 | 20.68 | 6.14 | 3.54 |
+| **aug変換修正/sig3.5** | 21.45 | **5.87** | **3.20** |
+
+- peak_dist は reg/sig4.0 が最良、angle/rho は aug変換修正 が全実験中最良
+- reg + aug変換修正 の組み合わせが次の候補
+
 ## 保留タスク
 
+- multitask/ で aug 変換修正の実験実施（line_only の改善効果確認）
+- reg + aug変換修正 の組み合わせ実験
+- 評価コードに部位別 angle/rho 記録を追加
 - seg_only + 椎体条件付け実験
-- left クラス悪化の原因調査
 
 ---
 
@@ -47,6 +61,8 @@
 
 | 日付 | 主な内容 |
 |------|---------|
+| [2026-04-16](work-logs/2026-04-16.md) | multitask/ に aug 変換修正を移植（19/19 pass） |
+| [2026-04-15](work-logs/2026-04-15.md) | aug変換修正（ポリライン再生成）実装・line_only 実験比較 |
 | [2026-04-14](work-logs/2026-04-14.md) | heatmap multitask 打ち止め・distance map 回帰への方向転換決定 |
 | [2026-04-12](work-logs/2026-04-12.md) | vertebra conditioning 実装（multitask/seg_only）・v2 結果確認・per_class メトリクス追加 |
 | [2026-04-10](work-logs/2026-04-10.md) | multitask vs seg_only 比較・per-image ハードケース分析 |

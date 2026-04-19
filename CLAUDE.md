@@ -98,6 +98,8 @@ Bash("codex exec ... '1文で答えて'")
 
 ## Tech Stack
 
+<!-- ★ プロジェクトに合わせて編集してください -->
+
 - **Python** / **uv** (pip禁止)
 - **ruff** (lint/format) / **ty** (type check) / **pytest**
 - `poe lint` / `poe test` / `poe all`
@@ -114,9 +116,12 @@ Bash("codex exec ... '1文で答えて'")
 | `.claude/docs/DESIGN.md` | 設計決定の記録 |
 | `.claude/docs/codex/` | **Codex分析結果（実装に反映）** |
 | `.claude/docs/research/` | Gemini調査結果 |
+| `.claude/docs/work-logs/` | **作業ログ（日付.md形式）** |
 | `.claude/logs/cli-tools.jsonl` | Codex/Gemini入出力ログ |
 
 **重要:** `.claude/docs/codex/` のファイルは Claude が読んで実装に反映させます。
+
+**重要:** セッション開始時は `.claude/docs/work-logs/` の最新ログを読んで前回の進捗・未確定事項・次回タスクを把握すること。
 
 ---
 
@@ -124,4 +129,3 @@ Bash("codex exec ... '1文で答えて'")
 
 - **思考・コード**: 英語
 - **ユーザー対話**: 日本語
-
