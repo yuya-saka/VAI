@@ -47,6 +47,8 @@
 - reg + aug変換修正 の組み合わせ実験
 - 評価コードに部位別 angle/rho 記録を追加
 - seg_only + 椎体条件付け実験
+- `compute_perpendicular_distance` Y符号バグ修正（4ファイル共通）
+- 角度誤差 >15° のサンプル可視化で原因特定
 
 ---
 
@@ -61,6 +63,7 @@
 
 | 日付 | 主な内容 |
 |------|---------|
+| [2026-04-20](work-logs/2026-04-20.md) | パイプライン正当性確認・perp_dist Y符号バグ発見・V字型仮説否定 |
 | [2026-04-16](work-logs/2026-04-16.md) | multitask/ に aug 変換修正を移植（19/19 pass） |
 | [2026-04-15](work-logs/2026-04-15.md) | aug変換修正（ポリライン再生成）実装・line_only 実験比較 |
 | [2026-04-14](work-logs/2026-04-14.md) | heatmap multitask 打ち止め・distance map 回帰への方向転換決定 |

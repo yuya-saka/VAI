@@ -88,3 +88,4 @@ scripts/
 *.png
 *.nrrd
 *.pt
+*.csv
