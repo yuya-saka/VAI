@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Line Annotation Tool</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  display: flex; height: 100vh;
+  background: #0d1117; color: #c9d1d9;
+  overflow: hidden; font-size: 13px;
+}
+
+/* Sidebar */
+#sidebar {
+  width: 210px; flex-shrink: 0;
+  background: #161b22;
+  display: flex; flex-direction: column;
+  border-right: 1px solid #30363d;
+}
+#sidebar-header {
+  padding: 8px 10px; font-size: 11px; font-weight: 600;
+  color: #8b949e; border-bottom: 1px solid #30363d;
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
+#filter-bar {
+  display: flex; gap: 3px; padding: 5px 6px;
+  border-bottom: 1px solid #30363d; flex-shrink: 0;
+}
+.filter-btn {
+  flex: 1; padding: 3px 0; font-size: 10px; font-weight: 600;
+  border: 1px solid #30363d; border-radius: 4px; cursor: pointer;
+  background: #21262d; color: #8b949e; transition: all 0.1s;
+}
+.filter-btn:hover { background: #30363d; color: #c9d1d9; }
+.filter-btn.active { background: #1f3a5f; border-color: #388bfd; color: #c9d1d9; }
+#sidebar-count {
+  padding: 3px 10px 4px; font-size: 10px; color: #6e7681;
+  border-bottom: 1px solid #30363d; flex-shrink: 0;
+}
+#sample-list { flex: 1; overflow-y: auto; padding: 4px; }
+.sample-item {
+  padding: 5px 8px; cursor: pointer; border-radius: 5px;
+  margin-bottom: 1px; display: flex; justify-content: space-between;
+  align-items: center; transition: background 0.1s;
+}
+.sample-item:hover { background: #21262d; }
+.sample-item.active { background: #1f3a5f; border-left: 2px solid #388bfd; padding-left: 6px; }
+.sample-name { font-size: 12px; font-weight: 600; }
+.vertebra-name { font-size: 10px; color: #8b949e; }
+.badge {
+  font-size: 10px; padding: 1px 5px; border-radius: 8px;
+  font-weight: 600; white-space: nowrap;
+}
+.badge-done { background: #0d4429; color: #3fb950; }
+.badge-partial { background: #3d2b00; color: #d29922; }
+.badge-none { background: #21262d; color: #6e7681; }
+
+/* Main */
+#main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+/* Toolbar */
+#toolbar {
+  padding: 7px 10px; display: flex; gap: 5px; align-items: center;
+  flex-wrap: wrap; border-bottom: 1px solid #30363d;
+  background: #161b22; flex-shrink: 0;
+}
+.line-btn {
+  padding: 4px 10px; border: 2px solid; border-radius: 5px;
+  cursor: pointer; font-size: 12px; font-weight: 600;
+  transition: all 0.1s; opacity: 0.45; background: transparent;
+}
+.line-btn.active { opacity: 1; }
+#btn-1 { color: #00e5ff; border-color: #00e5ff; }
+#btn-1.active { background: #00e5ff; color: #001a1f; }
+#btn-2 { color: #ff66ff; border-color: #ff66ff; }
+#btn-2.active { background: #ff66ff; color: #1a001a; }
+#btn-3 { color: #00e676; border-color: #00e676; }
+#btn-3.active { background: #00e676; color: #001a0d; }
+#btn-4 { color: #ffee58; border-color: #ffee58; }
+#btn-4.active { background: #ffee58; color: #1a1600; }
+.tool-btn {
+  padding: 4px 10px; background: #21262d; border: 1px solid #30363d;
+  color: #c9d1d9; border-radius: 5px; cursor: pointer; font-size: 12px;
+}
+.tool-btn:hover { background: #30363d; }
+.save-btn { background: #0d4429 !important; color: #3fb950 !important; border-color: #238636 !important; font-weight: 600; }
+.save-btn:hover { background: #238636 !important; }
+#sep { width: 1px; height: 22px; background: #30363d; flex-shrink: 0; }
+label { cursor: pointer; display: flex; align-items: center; gap: 4px; font-size: 12px; }
+#status-msg { margin-left: auto; font-size: 11px; color: #3fb950; min-width: 80px; text-align: right; }
+
+/* Slice nav */
+#slice-nav {
+  padding: 5px 10px; display: flex; gap: 4px; flex-wrap: wrap;
+  border-bottom: 1px solid #30363d; background: #0d1117; flex-shrink: 0;
+  min-height: 34px; align-items: center;
+}
+.no-slices { color: #6e7681; font-size: 11px; }
+.slice-btn {
+  padding: 2px 8px; background: #161b22; border: 1px solid #30363d;
+  color: #8b949e; border-radius: 4px; cursor: pointer; font-size: 11px;
+  transition: all 0.1s;
+}
+.slice-btn:hover { background: #21262d; color: #c9d1d9; }
+.slice-btn.active { border-color: #388bfd; color: #388bfd; }
+.slice-btn.annotated { border-color: #238636; color: #3fb950; }
+
+/* Canvas */
+#canvas-area {
+  flex: 1; display: flex; justify-content: center; align-items: center;
+  background: #010409; overflow: hidden;
+}
+canvas {
+  cursor: crosshair;
+  /* image-rendering: pixelated を外してスムーズ表示 */
+}
+
+/* Info bar */
+#info-bar {
+  padding: 5px 10px; border-top: 1px solid #30363d;
+  background: #161b22; display: flex; gap: 12px; align-items: center;
+  font-size: 11px; color: #6e7681; flex-shrink: 0; flex-wrap: wrap;
+}
+.pt-count {
+  padding: 1px 6px; border-radius: 10px;
+  font-weight: 600; font-size: 11px; border: 1px solid;
+}
+
+/* QC panel */
+#qc-panel {
+  display: none; position: fixed; top: 0; right: 0; bottom: 0;
+  width: 300px; background: #161b22; border-left: 1px solid #30363d;
+  flex-direction: column; z-index: 100; box-shadow: -4px 0 12px #0008;
+}
+#qc-panel.open { display: flex; }
+#qc-header {
+  padding: 10px 12px; font-size: 11px; font-weight: 600; color: #8b949e;
+  border-bottom: 1px solid #30363d; text-transform: uppercase;
+  letter-spacing: 0.08em; display: flex; justify-content: space-between; align-items: center;
+}
+#qc-close { cursor: pointer; color: #6e7681; font-size: 14px; line-height: 1; }
+#qc-close:hover { color: #c9d1d9; }
+#qc-threshold-bar {
+  padding: 6px 10px; border-bottom: 1px solid #30363d;
+  display: flex; align-items: center; gap: 6px; font-size: 11px; color: #8b949e;
+}
+#qc-threshold-bar input { width: 50px; background: #0d1117; border: 1px solid #30363d;
+  color: #c9d1d9; padding: 2px 4px; border-radius: 3px; font-size: 11px; }
+#qc-threshold-bar button { padding: 2px 8px; background: #21262d; border: 1px solid #30363d;
+  color: #c9d1d9; border-radius: 4px; cursor: pointer; font-size: 11px; }
+#qc-threshold-bar button:hover { background: #30363d; }
+#qc-list { flex: 1; overflow-y: auto; padding: 4px; }
+.qc-item {
+  padding: 5px 8px; cursor: pointer; border-radius: 5px; margin-bottom: 2px;
+  border: 1px solid #30363d; transition: background 0.1s;
+}
+.qc-item:hover { background: #21262d; }
+.qc-item.active { background: #1f3a5f; border-color: #388bfd; }
+.qc-sample { font-size: 12px; font-weight: 600; }
+.qc-detail { font-size: 10px; color: #8b949e; margin-top: 2px; }
+.qc-dev { font-size: 11px; font-weight: 600; color: #f85149; float: right; }
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <div id="sidebar-header">サンプル一覧</div>
+  <div id="filter-bar">
+    <button class="filter-btn active" data-filter="all"  onclick="setFilter('all')">全て</button>
+    <button class="filter-btn"        data-filter="todo" onclick="setFilter('todo')">未・途中</button>
+    <button class="filter-btn"        data-filter="done" onclick="setFilter('done')">完了</button>
+  </div>
+  <div id="sidebar-count"></div>
+  <div id="sample-list"><span style="color:#6e7681;padding:8px;display:block">読み込み中...</span></div>
+</div>
+
+<div id="main">
+  <div id="toolbar">
+    <button class="line-btn active" id="btn-1" onclick="setActiveLine(1)">line_1 右縦</button>
+    <button class="line-btn" id="btn-2" onclick="setActiveLine(2)">line_2 右横</button>
+    <button class="line-btn" id="btn-3" onclick="setActiveLine(3)">line_3 左縦</button>
+    <button class="line-btn" id="btn-4" onclick="setActiveLine(4)">line_4 左横</button>
+    <div id="sep"></div>
+    <button class="tool-btn" onclick="undoLastPoint()" title="Ctrl+Z">↩ Undo</button>
+    <button class="tool-btn" onclick="clearActiveLine()">✕ Clear</button>
+    <label><input type="checkbox" id="mask-toggle" checked onchange="renderCanvas()">マスク</label>
+    <button class="tool-btn save-btn" onclick="saveAnnotation()" title="Ctrl+S">💾 Save</button>
+    <button class="tool-btn" onclick="openQcPanel()" style="margin-left:4px">🔍 QC</button>
+    <span id="status-msg"></span>
+  </div>
+
+  <div id="slice-nav">
+    <span id="slice-current" style="font-size:11px;color:#c9d1d9;font-weight:600;margin-right:6px;white-space:nowrap;flex-shrink:0"></span>
+    <div id="slice-btns" style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">
+      <span class="no-slices">サンプルを選択してください</span>
+    </div>
+  </div>
+
+  <div id="canvas-area">
+    <canvas id="canvas" width="448" height="448"></canvas>
+  </div>
+
+  <div id="info-bar">
+    <span id="info-loc">―</span>
+    <span id="info-counts"></span>
+    <span style="margin-left:auto">1〜4: ライン選択 &nbsp;|&nbsp; Ctrl+Z: Undo &nbsp;|&nbsp; Ctrl+S: Save &nbsp;|&nbsp; ←→: スライス移動</span>
+  </div>
+</div>
+
+<div id="qc-panel">
+  <div id="qc-header">
+    <span>QC — 要確認 <span id="qc-count"></span></span>
+    <span id="qc-close" onclick="closeQcPanel()">✕</span>
+  </div>
+  <div id="qc-threshold-bar">
+    閾値:
+    <input type="number" id="qc-threshold" value="20" min="1" max="100" step="1">
+    px
+    <button onclick="loadQc()">更新</button>
+  </div>
+  <div id="qc-list"><span style="color:#6e7681;padding:8px;display:block">読み込み中...</span></div>
+</div>
+
+<script>
+const CANVAS_SIZE = 448;
+const IMG_SIZE = 224;
+const SCALE = CANVAS_SIZE / IMG_SIZE;
+
+const COLORS = {
+  1: { stroke: '#00e5ff', fill: '#001a1f' },  // シアン
+  2: { stroke: '#ff66ff', fill: '#1a001a' },  // マゼンタ
+  3: { stroke: '#00e676', fill: '#001a0d' },  // 緑
+  4: { stroke: '#ffee58', fill: '#1a1600' },  // 黄
+};
+const LINE_KEYS = { 1: 'line_1', 2: 'line_2', 3: 'line_3', 4: 'line_4' };
+
+let samples = [];
+let currentFilter = 'all';
+let currentSample = null;
+let currentVertebra = null;
+let currentSliceId = null;   // ゼロパディング文字列 e.g. "052"
+let activeLine = 1;
+let annotation = {};         // { "52": { line_1: [[x,y],...], ... } }
+let ctImg = null;
+let maskImg = null;
+let maskCanvas = null;       // 赤色化したマスクのオフスクリーンキャンバス
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+// キャンバスを利用可能スペースに合わせてリサイズ
+function resizeCanvas() {
+  const area = document.getElementById('canvas-area');
+  const size = Math.min(area.clientWidth - 20, area.clientHeight - 20, 600);
+  canvas.style.width = size + 'px';
+  canvas.style.height = size + 'px';
+}
+window.addEventListener('resize', resizeCanvas);
+
+// --- 初期化 ---
+async function init() {
+  resizeCanvas();
+  await loadSamples();
+  document.addEventListener('keydown', handleKeydown);
+  canvas.addEventListener('click', handleCanvasClick);
+}
+
+async function loadSamples() {
+  const res = await fetch('/api/samples');
+  samples = await res.json();
+  renderSidebar();
+}
+
+function sampleStatus(s) {
+  if (s.n_annotated === 0) return 'none';
+  if (s.n_annotated >= s.n_slices) return 'done';
+  return 'partial';
+}
+
+function setFilter(f) {
+  currentFilter = f;
+  document.querySelectorAll('.filter-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.filter === f);
+  });
+  renderSidebar();
+}
+
+function renderSidebar() {
+  const listEl = document.getElementById('sample-list');
+  listEl.innerHTML = '';
+
+  const filtered = samples.filter(s => {
+    const st = sampleStatus(s);
+    if (currentFilter === 'todo') return st === 'none' || st === 'partial';
+    if (currentFilter === 'done') return st === 'done';
+    return true;
+  });
+
+  const countEl = document.getElementById('sidebar-count');
+  countEl.textContent = `${filtered.length} / ${samples.length} 件`;
+
+  if (filtered.length === 0) {
+    listEl.innerHTML = '<span style="color:#6e7681;padding:8px;display:block">該当なし</span>';
+    return;
+  }
+
+  filtered.forEach(s => {
+    const idx = samples.indexOf(s);
+    const st = sampleStatus(s);
+    let badgeClass, badgeText;
+    if (st === 'none')      { badgeClass = 'badge-none';    badgeText = '未'; }
+    else if (st === 'done') { badgeClass = 'badge-done';    badgeText = '✓'; }
+    else                    { badgeClass = 'badge-partial'; badgeText = '途中'; }
+
+    const div = document.createElement('div');
+    div.className = 'sample-item';
+    div.dataset.idx = idx;
+    div.innerHTML = `
+      <div>
+        <div class="sample-name">${s.sample}</div>
+        <div class="vertebra-name">${s.vertebra}</div>
+      </div>
+      <span class="badge ${badgeClass}">${badgeText}</span>
+    `;
+    div.addEventListener('click', () => loadVertebra(s.sample, s.vertebra));
+    listEl.appendChild(div);
+  });
+
+}
+
+async function loadVertebra(sample, vertebra) {
+  currentSample = sample;
+  currentVertebra = vertebra;
+
+  // サイドバーのアクティブ状態（data-idx でフィルター後リストに対応）
+  document.querySelectorAll('.sample-item').forEach(el => el.classList.remove('active'));
+  const idx = samples.findIndex(s => s.sample === sample && s.vertebra === vertebra);
+  document.querySelector(`.sample-item[data-idx="${idx}"]`)?.classList.add('active');
+
+  // アノテーション読み込み
+  const res = await fetch(`/api/annotation?sample=${sample}&vertebra=${vertebra}`);
+  annotation = await res.json();
+
+  const info = samples[idx];
+  updateSliceNav(info?.slices || []);
+
+  if (info?.slices?.length > 0) {
+    await loadSlice(info.slices[0]);
+  }
+  document.getElementById('info-loc').textContent = `${sample} / ${vertebra}`;
+}
+
+function sliceKey(sliceId) {
+  // "052" → "52"（lines.json のキー形式に合わせる）
+  return String(parseInt(sliceId, 10));
+}
+
+function updateSliceNav(slices) {
+  const btnsEl = document.getElementById('slice-btns');
+  btnsEl.innerHTML = '';
+  document.getElementById('slice-current').textContent = '';
+
+  if (slices.length === 0) {
+    btnsEl.innerHTML = '<span class="no-slices">スライスなし</span>';
+    return;
+  }
+
+  slices.forEach(sid => {
+    const key = sliceKey(sid);
+    const ann = annotation[key] || {};
+    const allFilled = ['line_1','line_2','line_3','line_4'].every(k => (ann[k] || []).length >= 2);
+
+    const btn = document.createElement('button');
+    btn.className = 'slice-btn' + (allFilled ? ' annotated' : '');
+    btn.textContent = sid;
+    btn.id = `sbtn-${sid}`;
+    btn.addEventListener('click', () => loadSlice(sid));
+    btnsEl.appendChild(btn);
+  });
+}
+
+async function loadSlice(sliceId) {
+  currentSliceId = sliceId;
+
+  document.querySelectorAll('.slice-btn').forEach(el => el.classList.remove('active'));
+  document.getElementById(`sbtn-${sliceId}`)?.classList.add('active');
+
+  const [ct, mask] = await Promise.all([
+    loadImage(`/api/image?sample=${currentSample}&vertebra=${currentVertebra}&slice=${sliceId}&type=ct`),
+    loadImage(`/api/image?sample=${currentSample}&vertebra=${currentVertebra}&slice=${sliceId}&type=mask`),
+  ]);
+  ctImg = ct;
+  maskImg = mask;
+  maskCanvas = mask ? buildMaskOverlay(mask) : null;
+
+  renderCanvas();
+  updateInfoCounts();
+}
+
+function loadImage(url) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => resolve(null);
+    img.src = url;
+  });
+}
+
+function buildMaskOverlay(img) {
+  // マスク画像を赤色 RGBA に変換したオフスクリーンキャンバスを返す
+  const off = document.createElement('canvas');
+  off.width = CANVAS_SIZE;
+  off.height = CANVAS_SIZE;
+  const oc = off.getContext('2d');
+  oc.drawImage(img, 0, 0, CANVAS_SIZE, CANVAS_SIZE);
+  const id = oc.getImageData(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+  const d = id.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const v = d[i];
+    d[i]   = 220;  // R 固定
+    d[i+1] = 0;
+    d[i+2] = 0;
+    d[i+3] = v > 0 ? 100 : 0;  // アルファ ~40%
+  }
+  oc.putImageData(id, 0, 0);
+  return off;
+}
+
+function getCurrentAnnotation() {
+  const key = sliceKey(currentSliceId);
+  if (!annotation[key]) {
+    annotation[key] = { line_1: [], line_2: [], line_3: [], line_4: [] };
+  }
+  return annotation[key];
+}
+
+// --- 描画 ---
+function renderCanvas() {
+  ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+
+  if (ctImg) {
+    ctx.drawImage(ctImg, 0, 0, CANVAS_SIZE, CANVAS_SIZE);
+  } else {
+    ctx.fillStyle = '#010409';
+    ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+  }
+
+  if (maskCanvas && document.getElementById('mask-toggle').checked) {
+    ctx.drawImage(maskCanvas, 0, 0);
+  }
+
+  if (!currentSliceId) return;
+  const ann = getCurrentAnnotation();
+
+  for (let n = 1; n <= 4; n++) {
+    const pts = ann[LINE_KEYS[n]] || [];
+    if (pts.length === 0) continue;
+    const col = COLORS[n];
+    const isActive = n === activeLine;
+    const lw = isActive ? 2.5 : 1.5;
+    const alpha = isActive ? 1.0 : 0.65;
+
+    ctx.globalAlpha = alpha;
+
+    // ライン
+    if (pts.length >= 2) {
+      ctx.beginPath();
+      ctx.strokeStyle = col.stroke;
+      ctx.lineWidth = lw;
+      ctx.moveTo(pts[0][0] * SCALE, pts[0][1] * SCALE);
+      for (let i = 1; i < pts.length; i++) {
+        ctx.lineTo(pts[i][0] * SCALE, pts[i][1] * SCALE);
+      }
+      ctx.stroke();
+    }
+
+    // 点
+    pts.forEach((pt, i) => {
+      const cx = pt[0] * SCALE;
+      const cy = pt[1] * SCALE;
+      const r = isActive ? 5 : 3.5;
+
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fillStyle = col.stroke;
+      ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // アクティブラインの最後の点をハイライト
+      if (isActive && i === pts.length - 1) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, r + 4, 0, Math.PI * 2);
+        ctx.strokeStyle = col.stroke;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+    });
+  }
+
+  ctx.globalAlpha = 1.0;
+}
+
+// --- インタラクション ---
+function handleCanvasClick(e) {
+  if (!currentSliceId) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+
+  const imgX = (e.clientX - rect.left) * scaleX / SCALE;
+  const imgY = (e.clientY - rect.top)  * scaleY / SCALE;
+
+  if (imgX < 0 || imgX >= IMG_SIZE || imgY < 0 || imgY >= IMG_SIZE) return;
+
+  const ann = getCurrentAnnotation();
+  ann[LINE_KEYS[activeLine]].push([imgX, imgY]);
+
+  renderCanvas();
+  updateInfoCounts();
+  updateSliceNavItem(currentSliceId);
+}
+
+function setActiveLine(n) {
+  activeLine = n;
+  for (let i = 1; i <= 4; i++) {
+    document.getElementById(`btn-${i}`).classList.toggle('active', i === n);
+  }
+  renderCanvas();
+}
+
+function undoLastPoint() {
+  if (!currentSliceId) return;
+  const pts = getCurrentAnnotation()[LINE_KEYS[activeLine]];
+  if (pts.length > 0) {
+    pts.pop();
+    renderCanvas();
+    updateInfoCounts();
+    updateSliceNavItem(currentSliceId);
+  }
+}
+
+function clearActiveLine() {
+  if (!currentSliceId) return;
+  getCurrentAnnotation()[LINE_KEYS[activeLine]] = [];
+  renderCanvas();
+  updateInfoCounts();
+  updateSliceNavItem(currentSliceId);
+}
+
+async function saveAnnotation() {
+  if (!currentSample || !currentVertebra) return;
+
+  const statusEl = document.getElementById('status-msg');
+  statusEl.textContent = '保存中…';
+
+  const res = await fetch(`/api/annotation?sample=${currentSample}&vertebra=${currentVertebra}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(annotation),
+  });
+
+  if (res.ok) {
+    statusEl.textContent = '✓ 保存完了';
+    setTimeout(() => { statusEl.textContent = ''; }, 2000);
+    await loadSamples();  // バッジ更新
+  } else {
+    statusEl.textContent = '✗ 保存失敗';
+  }
+}
+
+function updateSliceNavItem(sliceId) {
+  const key = sliceKey(sliceId);
+  const ann = annotation[key] || {};
+  const done = ['line_1','line_2','line_3','line_4'].every(k => (ann[k] || []).length >= 2);
+  const btn = document.getElementById(`sbtn-${sliceId}`);
+  if (btn) {
+    btn.classList.toggle('annotated', done);
+  }
+}
+
+function updateInfoCounts() {
+  if (!currentSliceId) return;
+  const ann = getCurrentAnnotation();
+  const parts = [1,2,3,4].map(n => {
+    const c = COLORS[n];
+    const cnt = (ann[LINE_KEYS[n]] || []).length;
+    return `<span class="pt-count" style="color:${c.stroke};border-color:${c.stroke}">${LINE_KEYS[n]}: ${cnt}pt</span>`;
+  });
+  document.getElementById('info-counts').innerHTML = parts.join(' ');
+
+  // スライスナビの現在番号ラベルを更新
+  const info = samples.find(s => s.sample === currentSample && s.vertebra === currentVertebra);
+  const idx = info ? info.slices.indexOf(currentSliceId) : -1;
+  const total = info ? info.slices.length : '?';
+  const pos = idx >= 0 ? `${idx + 1}/${total}` : '';
+  document.getElementById('slice-current').textContent =
+    pos ? `slice ${currentSliceId}  [${pos}]` : `slice ${currentSliceId}`;
+}
+
+function handleKeydown(e) {
+  if (e.ctrlKey && e.key === 'z') { e.preventDefault(); undoLastPoint(); }
+  if (e.ctrlKey && e.key === 's') { e.preventDefault(); saveAnnotation(); }
+  if (!e.ctrlKey && !e.metaKey) {
+    if (e.key === '1') setActiveLine(1);
+    if (e.key === '2') setActiveLine(2);
+    if (e.key === '3') setActiveLine(3);
+    if (e.key === '4') setActiveLine(4);
+    if (e.key === 'ArrowRight') navigateSlice(1);
+    if (e.key === 'ArrowLeft')  navigateSlice(-1);
+  }
+}
+
+function navigateSlice(delta) {
+  const info = samples.find(s => s.sample === currentSample && s.vertebra === currentVertebra);
+  if (!info || !currentSliceId) return;
+  const idx = info.slices.indexOf(currentSliceId);
+  if (idx < 0) return;
+  const next = idx + delta;
+  if (next >= 0 && next < info.slices.length) {
+    loadSlice(info.slices[next]);
+  }
+}
+
+// --- QC panel ---
+const QC_LINE_COLORS = { line_1:'#00e5ff', line_2:'#ff66ff', line_3:'#00e676', line_4:'#ffee58' };
+let qcItems = [];
+let activeQcIdx = -1;
+
+function openQcPanel() {
+  document.getElementById('qc-panel').classList.add('open');
+  if (qcItems.length === 0) loadQc();
+}
+
+function closeQcPanel() {
+  document.getElementById('qc-panel').classList.remove('open');
+}
+
+async function loadQc() {
+  const threshold = document.getElementById('qc-threshold').value || 10;
+  document.getElementById('qc-list').innerHTML =
+    '<span style="color:#6e7681;padding:8px;display:block">スキャン中…</span>';
+  const res = await fetch(`/api/qc?threshold=${threshold}`);
+  qcItems = await res.json();
+  renderQcList();
+}
+
+function renderQcList() {
+  const listEl = document.getElementById('qc-list');
+  document.getElementById('qc-count').textContent = `(${qcItems.length})`;
+  if (qcItems.length === 0) {
+    listEl.innerHTML = '<span style="color:#3fb950;padding:8px;display:block">問題なし</span>';
+    return;
+  }
+  listEl.innerHTML = '';
+  qcItems.forEach((item, i) => {
+    const col = QC_LINE_COLORS[item.line] || '#c9d1d9';
+    const div = document.createElement('div');
+    div.className = 'qc-item' + (i === activeQcIdx ? ' active' : '');
+    div.innerHTML = `
+      <span class="qc-dev">${item.deviation}px</span>
+      <div class="qc-sample">${item.sample} / ${item.vertebra}</div>
+      <div class="qc-detail">
+        slice <b>${item.slice}</b> &nbsp;
+        <span style="color:${col};font-weight:600">${item.line}</span>
+        &nbsp; ${item.n_pts}点
+      </div>`;
+    div.addEventListener('click', () => jumpToQcItem(i));
+    listEl.appendChild(div);
+  });
+}
+
+async function jumpToQcItem(i) {
+  activeQcIdx = i;
+  renderQcList();
+  const item = qcItems[i];
+  // 必要なら椎体をロード
+  if (currentSample !== item.sample || currentVertebra !== item.vertebra) {
+    await loadVertebra(item.sample, item.vertebra);
+  }
+  // スライスIDをゼロパディング形式に変換
+  const info = samples.find(s => s.sample === item.sample && s.vertebra === item.vertebra);
+  const sid = info?.slices.find(s => String(parseInt(s, 10)) === String(item.slice));
+  if (sid) await loadSlice(sid);
+  // 該当ラインをアクティブに
+  const lineNum = parseInt(item.line.replace('line_', ''));
+  setActiveLine(lineNum);
+}
+
+init();
+</script>
+</body>
+</html>
