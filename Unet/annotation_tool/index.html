@@ -106,6 +106,7 @@ label { cursor: pointer; display: flex; align-items: center; gap: 4px; font-size
 .slice-btn:hover { background: #21262d; color: #c9d1d9; }
 .slice-btn.active { border-color: #388bfd; color: #388bfd; }
 .slice-btn.annotated { border-color: #238636; color: #3fb950; }
+.slice-btn.region-ready { box-shadow: inset 0 -2px #a371f7; }
 
 /* Canvas */
 #canvas-area {
@@ -161,6 +162,42 @@ canvas {
 .qc-sample { font-size: 12px; font-weight: 600; }
 .qc-detail { font-size: 10px; color: #8b949e; margin-top: 2px; }
 .qc-dev { font-size: 11px; font-weight: 600; color: #f85149; float: right; }
+
+/* Region mask panel */
+#region-panel {
+  display: none; position: fixed; top: 0; right: 0; bottom: 0;
+  width: 360px; background: #161b22; border-left: 1px solid #30363d;
+  flex-direction: column; z-index: 110; box-shadow: -4px 0 12px #0008;
+}
+#region-panel.open { display: flex; }
+#region-header {
+  padding: 10px 12px; font-size: 11px; font-weight: 600; color: #8b949e;
+  border-bottom: 1px solid #30363d; text-transform: uppercase;
+  letter-spacing: 0.08em; display: flex; justify-content: space-between; align-items: center;
+}
+#region-close { cursor: pointer; color: #6e7681; font-size: 14px; }
+#region-summary {
+  padding: 8px 10px; border-bottom: 1px solid #30363d;
+  display: flex; gap: 6px; flex-wrap: wrap;
+}
+.region-summary-badge { padding: 3px 7px; border-radius: 10px; font-size: 10px; font-weight: 600; }
+.region-status-ready { background: #0d4429; color: #3fb950; }
+.region-status-outdated { background: #3d2b00; color: #d29922; }
+.region-status-missing { background: #490f14; color: #f85149; }
+#region-filter-bar {
+  padding: 6px 10px; border-bottom: 1px solid #30363d;
+  display: flex; gap: 4px;
+}
+#region-list { flex: 1; overflow-y: auto; padding: 4px; }
+.region-item {
+  padding: 6px 8px; cursor: pointer; border-radius: 5px; margin-bottom: 2px;
+  border: 1px solid #30363d; transition: background 0.1s;
+}
+.region-item:hover { background: #21262d; }
+.region-item.active { background: #1f3a5f; border-color: #388bfd; }
+.region-item-title { font-size: 12px; font-weight: 600; }
+.region-item-detail { font-size: 10px; color: #8b949e; margin-top: 2px; }
+.region-state { float: right; font-size: 10px; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -186,8 +223,10 @@ canvas {
     <button class="tool-btn" onclick="undoLastPoint()" title="Ctrl+Z">↩ Undo</button>
     <button class="tool-btn" onclick="clearActiveLine()">✕ Clear</button>
     <label><input type="checkbox" id="mask-toggle" checked onchange="renderCanvas()">マスク</label>
+    <label><input type="checkbox" id="region-toggle" onchange="renderCanvas()">領域分割</label>
     <button class="tool-btn save-btn" onclick="saveAnnotation()" title="Ctrl+S">💾 Save</button>
     <button class="tool-btn" onclick="openQcPanel()" style="margin-left:4px">🔍 QC</button>
+    <button class="tool-btn" onclick="openRegionPanel()">🗺 領域mask一覧</button>
     <span id="status-msg"></span>
   </div>
 
@@ -223,6 +262,20 @@ canvas {
   <div id="qc-list"><span style="color:#6e7681;padding:8px;display:block">読み込み中...</span></div>
 </div>
 
+<div id="region-panel">
+  <div id="region-header">
+    <span>領域mask生成状況</span>
+    <span id="region-close" onclick="closeRegionPanel()">✕</span>
+  </div>
+  <div id="region-summary"></div>
+  <div id="region-filter-bar">
+    <button class="filter-btn active" data-region-filter="all" onclick="setRegionFilter('all')">全て</button>
+    <button class="filter-btn" data-region-filter="problem" onclick="setRegionFilter('problem')">要再生成</button>
+    <button class="filter-btn" data-region-filter="ready" onclick="setRegionFilter('ready')">生成済み</button>
+  </div>
+  <div id="region-list"><span style="color:#6e7681;padding:8px;display:block">読み込み中...</span></div>
+</div>
+
 <script>
 const CANVAS_SIZE = 448;
 const IMG_SIZE = 224;
@@ -246,6 +299,7 @@ let annotation = {};         // { "52": { line_1: [[x,y],...], ... } }
 let ctImg = null;
 let maskImg = null;
 let maskCanvas = null;       // 赤色化したマスクのオフスクリーンキャンバス
+let regionImg = null;
 
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
@@ -372,8 +426,16 @@ function updateSliceNav(slices) {
     const ann = annotation[key] || {};
     const allFilled = ['line_1','line_2','line_3','line_4'].every(k => (ann[k] || []).length >= 2);
 
+    const regionReady = regionItems.some(
+      item => item.sample === currentSample
+        && item.vertebra === currentVertebra
+        && item.slice === sid
+        && item.status === 'ready'
+    );
     const btn = document.createElement('button');
-    btn.className = 'slice-btn' + (allFilled ? ' annotated' : '');
+    btn.className = 'slice-btn'
+      + (allFilled ? ' annotated' : '')
+      + (regionReady ? ' region-ready' : '');
     btn.textContent = sid;
     btn.id = `sbtn-${sid}`;
     btn.addEventListener('click', () => loadSlice(sid));
@@ -387,12 +449,14 @@ async function loadSlice(sliceId) {
   document.querySelectorAll('.slice-btn').forEach(el => el.classList.remove('active'));
   document.getElementById(`sbtn-${sliceId}`)?.classList.add('active');
 
-  const [ct, mask] = await Promise.all([
+  const [ct, mask, region] = await Promise.all([
     loadImage(`/api/image?sample=${currentSample}&vertebra=${currentVertebra}&slice=${sliceId}&type=ct`),
     loadImage(`/api/image?sample=${currentSample}&vertebra=${currentVertebra}&slice=${sliceId}&type=mask`),
+    loadImage(`/api/image?sample=${currentSample}&vertebra=${currentVertebra}&slice=${sliceId}&type=region`),
   ]);
   ctImg = ct;
   maskImg = mask;
+  regionImg = region;
   maskCanvas = mask ? buildMaskOverlay(mask) : null;
 
   renderCanvas();
@@ -449,6 +513,9 @@ function renderCanvas() {
 
   if (maskCanvas && document.getElementById('mask-toggle').checked) {
     ctx.drawImage(maskCanvas, 0, 0);
+  }
+  if (regionImg && document.getElementById('region-toggle').checked) {
+    ctx.drawImage(regionImg, 0, 0, CANVAS_SIZE, CANVAS_SIZE);
   }
 
   if (!currentSliceId) return;
@@ -689,6 +756,102 @@ async function jumpToQcItem(i) {
   // 該当ラインをアクティブに
   const lineNum = parseInt(item.line.replace('line_', ''));
   setActiveLine(lineNum);
+}
+
+// --- Region mask panel ---
+let regionItems = [];
+let regionCounts = { ready: 0, outdated: 0, missing: 0 };
+let currentRegionFilter = 'all';
+
+function openRegionPanel() {
+  closeQcPanel();
+  document.getElementById('region-panel').classList.add('open');
+  loadRegionStatus();
+}
+
+function closeRegionPanel() {
+  document.getElementById('region-panel').classList.remove('open');
+}
+
+async function loadRegionStatus() {
+  document.getElementById('region-list').innerHTML =
+    '<span style="color:#6e7681;padding:8px;display:block">スキャン中…</span>';
+  const res = await fetch('/api/region-mask-status');
+  const data = await res.json();
+  regionItems = data.items || [];
+  regionCounts = data.counts || { ready: 0, outdated: 0, missing: 0 };
+  renderRegionSummary();
+  renderRegionList();
+  if (currentSample && currentVertebra) {
+    const info = samples.find(s => s.sample === currentSample && s.vertebra === currentVertebra);
+    updateSliceNav(info?.slices || []);
+  }
+}
+
+function renderRegionSummary() {
+  document.getElementById('region-summary').innerHTML = `
+    <span class="region-summary-badge region-status-ready">生成済み ${regionCounts.ready || 0}</span>
+    <span class="region-summary-badge region-status-outdated">要更新 ${regionCounts.outdated || 0}</span>
+    <span class="region-summary-badge region-status-missing">未生成 ${regionCounts.missing || 0}</span>
+  `;
+}
+
+function setRegionFilter(filter) {
+  currentRegionFilter = filter;
+  document.querySelectorAll('[data-region-filter]').forEach(button => {
+    button.classList.toggle('active', button.dataset.regionFilter === filter);
+  });
+  renderRegionList();
+}
+
+function regionStatusLabel(status) {
+  if (status === 'ready') return '生成済み';
+  if (status === 'outdated') return '要更新';
+  return '未生成';
+}
+
+function renderRegionList() {
+  const listEl = document.getElementById('region-list');
+  const filtered = regionItems.filter(item => {
+    if (currentRegionFilter === 'problem') return item.status !== 'ready';
+    if (currentRegionFilter === 'ready') return item.status === 'ready';
+    return true;
+  });
+
+  if (filtered.length === 0) {
+    listEl.innerHTML = '<span style="color:#3fb950;padding:8px;display:block">該当なし</span>';
+    return;
+  }
+
+  listEl.innerHTML = '';
+  filtered.forEach(item => {
+    const div = document.createElement('div');
+    const isActive = currentSample === item.sample
+      && currentVertebra === item.vertebra
+      && currentSliceId === item.slice;
+    div.className = 'region-item' + (isActive ? ' active' : '');
+    div.innerHTML = `
+      <span class="region-state region-status-${item.status}">${regionStatusLabel(item.status)}</span>
+      <div class="region-item-title">${item.sample} / ${item.vertebra}</div>
+      <div class="region-item-detail">
+        slice <b>${item.slice}</b>
+        &nbsp; mask: ${item.has_mask ? '✓' : '✗'}
+        &nbsp; overlay: ${item.has_overlay ? '✓' : '✗'}
+      </div>
+    `;
+    div.addEventListener('click', () => jumpToRegionItem(item));
+    listEl.appendChild(div);
+  });
+}
+
+async function jumpToRegionItem(item) {
+  if (currentSample !== item.sample || currentVertebra !== item.vertebra) {
+    await loadVertebra(item.sample, item.vertebra);
+  }
+  await loadSlice(item.slice);
+  document.getElementById('region-toggle').checked = true;
+  renderCanvas();
+  renderRegionList();
 }
 
 init();

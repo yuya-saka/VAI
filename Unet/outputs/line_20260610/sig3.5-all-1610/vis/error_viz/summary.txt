@@ -1,0 +1,21 @@
+line_records=6440
+slice_records=1610
+folds=fold0, fold1, fold2, fold3, fold4
+
+[angle]
+  mean=5.111
+  p50=3.776
+  p90=10.716
+  p95=13.765
+
+[rho]
+  mean=3.227
+  p50=2.504
+  p90=6.772
+  p95=8.649
+
+[perp]
+  mean=11.175
+  p50=8.787
+  p90=22.267
+  p95=28.087

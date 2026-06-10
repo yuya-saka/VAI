@@ -55,6 +55,8 @@ class AnnotationHandler(BaseHTTPRequestHandler):
             self._api_get_annotation(params)
         elif path == "/api/qc":
             self._api_get_qc(params)
+        elif path == "/api/region-mask-status":
+            self._api_get_region_mask_status()
         else:
             self._send_bytes(404, b"Not Found")
 
@@ -113,7 +115,16 @@ class AnnotationHandler(BaseHTTPRequestHandler):
             self._send_bytes(400, b"Missing params")
             return
 
-        subdir = "masks" if img_type == "mask" else "images"
+        subdirs = {
+            "ct": "images",
+            "mask": "masks",
+            "region": "gt_overlays",
+            "gt_mask": "gt_masks",
+        }
+        subdir = subdirs.get(img_type)
+        if subdir is None:
+            self._send_bytes(400, b"Invalid image type")
+            return
         img_path = _dataset_dir / sample / vertebra / subdir / f"slice_{slice_id}.png"
 
         if not img_path.exists():
@@ -168,6 +179,10 @@ class AnnotationHandler(BaseHTTPRequestHandler):
 
         result.sort(key=lambda r: -r["deviation"])
         self._send_json(result)
+
+    def _api_get_region_mask_status(self) -> None:
+        """アノテーション済みスライスごとの領域マスク生成状態を返す。"""
+        self._send_json(_collect_region_mask_status(_dataset_dir))
 
     def _api_post_annotation(self, params: dict) -> None:
         sample = self._param(params, "sample")
@@ -243,6 +258,72 @@ def _max_perp_distance(pts: list) -> float:
         # 端点が同一座標 → 全点の端点からの距離
         return max(((x - x0) ** 2 + (y - y0) ** 2) ** 0.5 for x, y in pts[1:])
     return max(abs(dx * (y0 - y) - dy * (x0 - x)) / length for x, y in pts[1:-1])
+
+
+def _is_complete_annotation(lines: object) -> bool:
+    """4本すべてに2点以上あるアノテーションか判定する。"""
+    if not isinstance(lines, dict):
+        return False
+    return all(
+        isinstance(lines.get(f"line_{line_number}"), list)
+        and len(lines[f"line_{line_number}"]) >= 2
+        for line_number in range(1, 5)
+    )
+
+
+def _collect_region_mask_status(dataset_dir: Path) -> dict[str, object]:
+    """データセット全体の領域マスク生成状態を集計する。"""
+    items: list[dict[str, object]] = []
+
+    for sample_dir in sorted(dataset_dir.iterdir()):
+        if not sample_dir.is_dir() or not sample_dir.name.startswith("sample"):
+            continue
+        for vertebra_dir in sorted(sample_dir.iterdir()):
+            lines_path = vertebra_dir / "lines.json"
+            if not lines_path.exists():
+                continue
+
+            with lines_path.open() as file:
+                data = json.load(file)
+            lines_mtime = lines_path.stat().st_mtime
+
+            for slice_key, lines in data.items():
+                if not _is_complete_annotation(lines):
+                    continue
+
+                slice_id = f"{int(slice_key):03d}"
+                gt_mask_path = vertebra_dir / "gt_masks" / f"slice_{slice_id}.png"
+                gt_overlay_path = vertebra_dir / "gt_overlays" / f"slice_{slice_id}.png"
+                has_mask = gt_mask_path.exists()
+                has_overlay = gt_overlay_path.exists()
+                is_current = (
+                    has_mask
+                    and has_overlay
+                    and gt_mask_path.stat().st_mtime >= lines_mtime
+                    and gt_overlay_path.stat().st_mtime >= lines_mtime
+                )
+
+                if not has_mask or not has_overlay:
+                    status = "missing"
+                elif not is_current:
+                    status = "outdated"
+                else:
+                    status = "ready"
+
+                items.append({
+                    "sample": sample_dir.name,
+                    "vertebra": vertebra_dir.name,
+                    "slice": slice_id,
+                    "status": status,
+                    "has_mask": has_mask,
+                    "has_overlay": has_overlay,
+                })
+
+    counts = {
+        status: sum(1 for item in items if item["status"] == status)
+        for status in ("ready", "outdated", "missing")
+    }
+    return {"counts": counts, "items": items}
 
 
 def _generate_overlays(vert_dir: Path, annotation: dict) -> None:

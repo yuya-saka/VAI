@@ -10,6 +10,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import yaml
+
 # train.py を直接実行した場合でも相対 import が通るよう、
 # Unet/ ディレクトリを sys.path に追加して line_only をパッケージとして認識させる
 _here = Path(__file__).resolve().parent  # line_only/
@@ -17,8 +19,8 @@ _unet = _here.parent                     # Unet/
 if str(_unet) not in sys.path:
     sys.path.insert(0, str(_unet))
 
-from line_only.src.data_utils import load_config, set_seed
-from line_only.src.trainer import train_one_fold
+from line_only.src.data_utils import load_config, set_seed  # noqa: E402
+from line_only.src.trainer import train_one_fold  # noqa: E402
 
 
 def parse_args():
@@ -91,6 +93,29 @@ def save_summary(all_results: dict, output_path: Path):
     return summary
 
 
+def resolve_run_output_dir(cfg: dict) -> Path:
+    """学習成果物を保存する実験ディレクトリを解決する。"""
+    script_dir = Path(__file__).resolve().parent.parent
+    experiment_cfg = cfg.get("experiment", {})
+    phase = experiment_cfg.get("phase")
+    name = experiment_cfg.get("name")
+    if phase and name:
+        return script_dir / "outputs" / str(phase) / str(name)
+
+    checkpoint_dir = cfg.get("training", {}).get("checkpoint_dir", "checkpoints")
+    return script_dir / str(checkpoint_dir)
+
+
+def save_effective_config(cfg: dict, output_dir: Path) -> Path:
+    """CLI上書きを反映した実効configを保存する。"""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "config.yaml"
+    with output_path.open("w", encoding="utf-8") as file:
+        yaml.safe_dump(cfg, file, sort_keys=False, allow_unicode=True)
+    print(f"[INFO] Effective config saved to: {output_path}")
+    return output_path
+
+
 def main():
     args = parse_args()
     cfg = load_config(args.config)
@@ -110,6 +135,8 @@ def main():
         raise RuntimeError("PNG dataset only (use_png: true)")
 
     all_results = {}
+    output_dir = resolve_run_output_dir(cfg)
+    save_effective_config(cfg, output_dir)
 
     for fold in range(args.start_fold, args.end_fold + 1):
         print(f"\n{'=' * 60}")
