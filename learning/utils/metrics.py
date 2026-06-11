@@ -31,11 +31,10 @@ def find_optimal_threshold(
         return 0.5
     precision, recall, thresholds = precision_recall_curve(y_true, y_prob)
     # thresholds は len(precision)-1 要素（最後の precision/recall は除く）
-    f1 = np.where(
-        (precision[:-1] + recall[:-1]) > 0,
-        2 * precision[:-1] * recall[:-1] / (precision[:-1] + recall[:-1]),
-        0.0,
-    )
+    # np.where は両辺を先に評価するため denom=0 の除算が起きる → errstate で抑制
+    denom = precision[:-1] + recall[:-1]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        f1 = np.where(denom > 0, 2 * precision[:-1] * recall[:-1] / denom, 0.0)
     best_idx = int(np.argmax(f1))
     return float(thresholds[best_idx])
 
