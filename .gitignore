@@ -90,3 +90,6 @@ scripts/
 *.pt
 *.csv
 *.pdf
+*.zip
+*.txt
+*.sh

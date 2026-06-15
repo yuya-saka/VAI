@@ -12,14 +12,20 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from sklearn.metrics import average_precision_score, roc_auc_score
 from torch import GradScaler, autocast
 from torch.utils.data import DataLoader
 
-from learning.src.dataset import VERTEBRA_TO_INDEX, FractureDataset
+from learning.src.dataset import VERTEBRA_TO_INDEX
 from learning.src.model import FractureResNet18
 from learning.utils.losses import dmil_center_loss, select_topk
-from learning.utils.sampler import make_weighted_sampler
+from learning.utils.training import (
+    build_data_loaders,
+    build_model,
+    compute_ranking_metrics,
+    lr_scale,
+    make_optimizer,
+    resolve_device,
+)
 
 _LOG_HEADER = (
     f"{'fold':>4} {'epoch':>5} {'loss':>8} {'dmil':>8} {'center':>8} "
@@ -61,51 +67,6 @@ def _append_log(
         f.write(line + "\n")
 
 
-def _make_optimizer(
-    model: FractureResNet18,
-    backbone_lr: float,
-    head_lr: float,
-    weight_decay: float,
-) -> torch.optim.AdamW:
-    """differential LR で AdamW を作成する。"""
-    return torch.optim.AdamW(
-        [
-            {"params": model.backbone_parameters(), "lr": backbone_lr},
-            {"params": model.head_parameters(), "lr": head_lr},
-        ],
-        weight_decay=weight_decay,
-    )
-
-
-def _make_model(cfg: dict, device: torch.device) -> FractureResNet18:
-    """設定からモデルを構築する。"""
-    tc = cfg["training"]
-    backbone_name = tc.get("backbone", "resnet18")
-    if backbone_name != "resnet18":
-        raise ValueError(f"未対応の backbone: {backbone_name}")
-    conditioning = tc.get("vertebra_conditioning", "one_hot")
-    if conditioning != "one_hot":
-        raise ValueError(f"未対応の vertebra_conditioning: {conditioning}")
-
-    return FractureResNet18(
-        dropout=tc.get("dropout", 0.2),
-        pretrained=tc.get("pretrained", True),
-        freeze_batch_norm=tc.get("freeze_batch_norm", True),
-    ).to(device)
-
-
-def _lr_scale(epoch: int, warmup_epochs: int) -> float:
-    """
-    LR スケジュール: warmup 後は constant。
-
-    epoch 0〜warmup_epochs-1: 0.2→1.0 線形
-    epoch warmup_epochs 以降: 1.0
-    """
-    if epoch < warmup_epochs:
-        return 0.2 + 0.8 * (epoch / max(1, warmup_epochs - 1))
-    return 1.0
-
-
 def _beta_warmup(epoch: int, warmup_epochs: int = 3) -> float:
     """center loss の beta warmup スケール (0→1 線形、warmup_epochs で完了)。"""
     if warmup_epochs <= 0:
@@ -144,41 +105,19 @@ def train_one_fold(
     tc = cfg["training"]
     dc = cfg["data"]
 
-    device_id = tc.get("gpu_id", 0)
-    device = torch.device(f"cuda:{device_id}" if torch.cuda.is_available() else "cpu")
-
+    device = resolve_device(tc.get("gpu_id", 0))
     aug_cfg = cfg.get("augmentation", {})
-    prefetch = tc.get("prefetch_to_ram", True)
-
-    # データセット・DataLoader
-    train_ds = FractureDataset(train_bags, training=True, aug_cfg=aug_cfg, prefetch_to_ram=prefetch)
-    val_ds = FractureDataset(val_bags, training=False, prefetch_to_ram=prefetch)
-
-    train_labels = [b["label"] for b in train_bags]
-    sampler = make_weighted_sampler(train_labels)
-
-    # DataLoader は bag 単位 (batch_size=1)
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=1,
-        sampler=sampler,
-        num_workers=tc.get("num_workers", 4),
-        pin_memory=True,
-        collate_fn=_collate_fn,
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=1,
-        shuffle=False,
-        num_workers=tc.get("num_workers", 4),
-        pin_memory=True,
-        collate_fn=_collate_fn,
+    train_loader, val_loader = build_data_loaders(
+        train_bags,
+        val_bags,
+        tc,
+        aug_cfg,
     )
 
     # モデル・オプティマイザ
-    model = _make_model(cfg, device)
+    model = build_model(tc, device, default_dropout=0.2)
 
-    optimizer = _make_optimizer(
+    optimizer = make_optimizer(
         model,
         backbone_lr=tc.get("backbone_lr", 5e-5),
         head_lr=tc.get("head_lr", 2e-4),
@@ -186,7 +125,7 @@ def train_one_fold(
     )
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
-        lr_lambda=lambda ep: _lr_scale(ep, tc.get("warmup_epochs", 2)),
+        lr_lambda=lambda ep: lr_scale(ep, tc.get("warmup_epochs", 2)),
     )
     scaler = GradScaler()
 
@@ -267,13 +206,18 @@ def train_one_fold(
 
         # --- 検証 ---
         val_probs_ep, val_labels_ep, val_loss = _run_val(
-            model, val_loader, device,
-            beta=beta, topk_mode=topk_mode, alpha=alpha,
+            model,
+            val_loader,
+            device,
+            beta=beta,
+            topk_mode=topk_mode,
+            alpha=alpha,
         )
 
-        has_both_classes = len(set(val_labels_ep)) > 1
-        val_auprc = float(average_precision_score(val_labels_ep, val_probs_ep)) if has_both_classes else 0.0
-        val_auroc = float(roc_auc_score(val_labels_ep, val_probs_ep)) if has_both_classes else 0.0
+        val_auprc, val_auroc = compute_ranking_metrics(
+            val_labels_ep,
+            val_probs_ep,
+        )
 
         elapsed = time.time() - epoch_start
         is_best = val_auprc > best_auprc
@@ -289,11 +233,19 @@ def train_one_fold(
 
         # ファイルへ追記
         _append_log(
-            log_path, fold, epoch,
-            avg_train_loss, avg_dmil, avg_center,
-            val_loss, val_auprc, val_auroc,
-            backbone_lr_now, head_lr_now,
-            elapsed, is_best,
+            log_path,
+            fold,
+            epoch,
+            avg_train_loss,
+            avg_dmil,
+            avg_center,
+            val_loss,
+            val_auprc,
+            val_auroc,
+            backbone_lr_now,
+            head_lr_now,
+            elapsed,
+            is_best,
         )
 
         if is_best:
@@ -313,8 +265,12 @@ def train_one_fold(
     # 最良モデルで val を再評価（OOF 予測取得）
     model.load_state_dict(torch.load(fold_dir / "best_model.pt", weights_only=True))
     val_probs, val_labels_final, _ = _run_val(
-        model, val_loader, device,
-        beta=beta, topk_mode=topk_mode, alpha=alpha,
+        model,
+        val_loader,
+        device,
+        beta=beta,
+        topk_mode=topk_mode,
+        alpha=alpha,
     )
 
     val_samples = [b["sample"] for b in val_bags]
@@ -355,9 +311,12 @@ def _run_val(
             with autocast(device_type=device.type, dtype=torch.float16):
                 logits = model(stacks, vertebra_index)  # [t]
                 loss, _ = dmil_center_loss(
-                    [logits], labels_t,
-                    beta=beta, beta_warmup=1.0,
-                    topk_mode=topk_mode, alpha=alpha,
+                    [logits],
+                    labels_t,
+                    beta=beta,
+                    beta_warmup=1.0,
+                    topk_mode=topk_mode,
+                    alpha=alpha,
                 )
             total_loss += loss.item()
 
@@ -369,10 +328,3 @@ def _run_val(
 
     avg_val_loss = total_loss / max(1, len(val_loader))
     return probs, labels, avg_val_loss
-
-
-def _collate_fn(batch: list) -> tuple:
-    """bag の stacks を [1, t, 3, H, W] でまとめる custom collate。"""
-    stacks_list, labels, samples, vertebrae = zip(*batch, strict=True)
-    # stacks は bag ごとに t が異なるため、リストのまま返す
-    return list(stacks_list), list(labels), list(samples), list(vertebrae)

@@ -12,15 +12,21 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from sklearn.metrics import average_precision_score, roc_auc_score
 from torch import GradScaler, autocast
 from torch.utils.data import DataLoader
 
-from learning.src.dataset import VERTEBRA_TO_INDEX, FractureDataset
-from learning.src.model import FractureResNet18
 from learning.bagonly_src.losses import batch_bag_mean_loss
-from learning.utils.metrics import find_optimal_threshold, _prf_at_threshold
-from learning.utils.sampler import make_weighted_sampler
+from learning.src.dataset import VERTEBRA_TO_INDEX
+from learning.src.model import FractureResNet18
+from learning.utils.metrics import _prf_at_threshold, find_optimal_threshold
+from learning.utils.training import (
+    build_data_loaders,
+    build_model,
+    compute_ranking_metrics,
+    lr_scale,
+    make_optimizer,
+    resolve_device,
+)
 
 _LOG_HEADER = (
     f"{'fold':>4} {'epoch':>5} {'loss':>8} "
@@ -64,35 +70,6 @@ def _append_log(
         f.write(line + "\n")
 
 
-def _make_optimizer(
-    model: FractureResNet18,
-    backbone_lr: float,
-    head_lr: float,
-    weight_decay: float,
-) -> torch.optim.AdamW:
-    """differential LR で AdamW を作成する。"""
-    return torch.optim.AdamW(
-        [
-            {"params": model.backbone_parameters(), "lr": backbone_lr},
-            {"params": model.head_parameters(), "lr": head_lr},
-        ],
-        weight_decay=weight_decay,
-    )
-
-
-def _lr_scale(epoch: int, warmup_epochs: int) -> float:
-    """LR スケジュール: warmup 後は constant。"""
-    if epoch < warmup_epochs:
-        return 0.2 + 0.8 * (epoch / max(1, warmup_epochs - 1))
-    return 1.0
-
-
-def _collate_fn(batch: list) -> tuple:
-    """bag の stacks を [1, t, 3, H, W] でまとめる custom collate。"""
-    stacks_list, labels, samples, vertebrae = zip(*batch, strict=True)
-    return list(stacks_list), list(labels), list(samples), list(vertebrae)
-
-
 def train_one_fold(
     cfg: dict,
     train_bags: list[dict],
@@ -114,42 +91,17 @@ def train_one_fold(
         {fold, val_samples, val_vertebrae, val_labels, val_probs, best_auprc, best_epoch}
     """
     tc = cfg["training"]
-    device_id = tc.get("gpu_id", 0)
-    device = torch.device(f"cuda:{device_id}" if torch.cuda.is_available() else "cpu")
-
+    device = resolve_device(tc.get("gpu_id", 0))
     aug_cfg = cfg.get("augmentation", {})
-    prefetch = tc.get("prefetch_to_ram", True)
-
-    train_ds = FractureDataset(train_bags, training=True, aug_cfg=aug_cfg, prefetch_to_ram=prefetch)
-    val_ds = FractureDataset(val_bags, training=False, prefetch_to_ram=prefetch)
-
-    train_labels = [b["label"] for b in train_bags]
-    sampler = make_weighted_sampler(train_labels)
-
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=1,
-        sampler=sampler,
-        num_workers=tc.get("num_workers", 4),
-        pin_memory=True,
-        collate_fn=_collate_fn,
+    train_loader, val_loader = build_data_loaders(
+        train_bags,
+        val_bags,
+        tc,
+        aug_cfg,
     )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=1,
-        shuffle=False,
-        num_workers=tc.get("num_workers", 4),
-        pin_memory=True,
-        collate_fn=_collate_fn,
-    )
+    model = build_model(tc, device, default_dropout=0.3)
 
-    model = FractureResNet18(
-        dropout=tc.get("dropout", 0.3),
-        pretrained=tc.get("pretrained", True),
-        freeze_batch_norm=tc.get("freeze_batch_norm", True),
-    ).to(device)
-
-    optimizer = _make_optimizer(
+    optimizer = make_optimizer(
         model,
         backbone_lr=tc.get("backbone_lr", 5e-5),
         head_lr=tc.get("head_lr", 2e-4),
@@ -157,7 +109,7 @@ def train_one_fold(
     )
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
-        lr_lambda=lambda ep: _lr_scale(ep, tc.get("warmup_epochs", 2)),
+        lr_lambda=lambda ep: lr_scale(ep, tc.get("warmup_epochs", 2)),
     )
     scaler = GradScaler()
 
@@ -217,9 +169,10 @@ def train_one_fold(
 
         y_true_np = np.array(val_labels_ep)
         y_prob_np = np.array(val_probs_ep)
-        has_both_classes = len(set(val_labels_ep)) > 1
-        val_auprc = float(average_precision_score(y_true_np, y_prob_np)) if has_both_classes else 0.0
-        val_auroc = float(roc_auc_score(y_true_np, y_prob_np)) if has_both_classes else 0.0
+        val_auprc, val_auroc = compute_ranking_metrics(
+            val_labels_ep,
+            val_probs_ep,
+        )
         opt_thr = find_optimal_threshold(y_true_np, y_prob_np)
         val_f1 = _prf_at_threshold(y_true_np, y_prob_np, opt_thr)["f1"]
 
@@ -235,10 +188,19 @@ def train_one_fold(
             f"{elapsed:.0f}s{'  ← best' if is_best else ''}"
         )
         _append_log(
-            log_path, fold, epoch,
-            avg_train_loss, val_loss, val_auprc, val_auroc,
-            val_f1, opt_thr,
-            backbone_lr_now, head_lr_now, elapsed, is_best,
+            log_path,
+            fold,
+            epoch,
+            avg_train_loss,
+            val_loss,
+            val_auprc,
+            val_auroc,
+            val_f1,
+            opt_thr,
+            backbone_lr_now,
+            head_lr_now,
+            elapsed,
+            is_best,
         )
 
         if is_best:

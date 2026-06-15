@@ -1,4 +1,4 @@
-"""座標系修正後の動作確認（1サンプルテスト）"""
+"""座標系修正後の動作を1サンプルで確認する。"""
 import sys
 from pathlib import Path
 
@@ -8,8 +8,8 @@ import yaml
 # プロジェクトルートをパスに追加
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from Unet.line_only.src.trainer import predict_lines_and_eval_test
 from Unet.line_only.src.data_utils import create_data_loaders, get_model
+from Unet.line_only.src.trainer import predict_lines_and_eval_test
 
 
 def test_one_sample():

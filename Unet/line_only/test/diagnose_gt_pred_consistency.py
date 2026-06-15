@@ -1,11 +1,14 @@
-"""GT抽出と予測抽出の座標系が一致しているか確認"""
+"""GT抽出と予測抽出の座標系が一致しているか診断する。"""
 import json
-import numpy as np
-import torch
 from pathlib import Path
 
-from line_only.utils.losses import extract_gt_line_params, extract_pred_line_params_batch
+import numpy as np
+import torch
 from line_only.heatmap import generate_gaussian_heatmap
+from line_only.utils.losses import (
+    extract_gt_line_params,
+    extract_pred_line_params_batch,
+)
 
 
 def test_with_real_gt():
@@ -63,7 +66,7 @@ def test_with_real_gt():
         if angle_diff < 5:
             print("✓ OK")
         else:
-            print(f"✗ NG (expected < 5°)")
+            print("✗ NG (expected < 5°)")
 
         print()
 

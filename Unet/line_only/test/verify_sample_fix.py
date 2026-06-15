@@ -1,14 +1,15 @@
 """
-修正後のコードで特定サンプルの直線抽出を再評価
+修正後のコードで特定サンプルの直線抽出を再評価する。
 
 sample5_C1_slice029 で観測された40-50度の角度誤差が
 Y軸座標系修正で改善されたか確認
 """
 
-import torch
-import numpy as np
 import sys
 from pathlib import Path
+
+import numpy as np
+import torch
 
 # 親ディレクトリをパスに追加
 sys.path.insert(0, str(Path(__file__).parent.parent))

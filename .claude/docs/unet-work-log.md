@@ -1,7 +1,7 @@
 # Unet/ 作業サマリー
 
 <!-- ルール: 現在地・次アクションのみ。完了詳細は work-logs/YYYY-MM-DD.md へ。上限60行 -->
-<!-- 最終更新: 2026-04-15 -->
+<!-- 最終更新: 2026-06-15 -->
 
 ## 精度比較（5-fold CV 平均）
 
@@ -23,6 +23,12 @@
 
 ## 実装状況
 
+- `line_only/src/trainer.py` を責務分割済み（784行→351行）
+  - `evaluation.py`: validation 指標
+  - `inference.py`: test 推論・直線評価・JSON/画像出力
+  - `example_writer.py`: GT/予測ヒートマップ保存
+  - `experiment.py`: 出力パス・wandb・ログ表示
+- `line_only/test/` は全36テスト pass
 - `multitask/` + `seg_only/` 両方に vertebra conditioning 実装済み（config で on/off）
 - `multitask/` に per_class (body/right/left/posterior) Dice/IoU の記録追加済み
 - `multitask/` に `decoder_type` 切り替え実装済み（`dual_decoder` / `shared_decoder`）
@@ -55,7 +61,7 @@
 ## コード構成
 
 実行: `uv run python Unet/multitask/train.py --config Unet/multitask/config/config.yaml`
-テスト: `uv run pytest Unet/multitask/test/ Unet/seg_only/test/ -v`（30/30 pass）
+テスト: `uv run pytest -o pythonpath=Unet Unet/line_only/test -v`（36/36 pass）
 
 ---
 
@@ -63,6 +69,7 @@
 
 | 日付 | 主な内容 |
 |------|---------|
+| [2026-06-15](work-logs/2026-06-15.md) | line_only trainer 責務分割・公開API互換維持・テスト収集整理 |
 | [2026-04-20](work-logs/2026-04-20.md) | パイプライン正当性確認・perp_dist Y符号バグ発見・V字型仮説否定 |
 | [2026-04-16](work-logs/2026-04-16.md) | multitask/ に aug 変換修正を移植（19/19 pass） |
 | [2026-04-15](work-logs/2026-04-15.md) | aug変換修正（ポリライン再生成）実装・line_only 実験比較 |
