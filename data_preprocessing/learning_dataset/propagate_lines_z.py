@@ -21,19 +21,19 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from Unet.preprocessing.convert_to_png import (  # noqa: E402
+from data_preprocessing.segmentation_dataset.convert_to_png import (  # noqa: E402
     apply_window,
     center_crop,
     load_vertebra_data,
 )
-from Unet.preprocessing.generate_region_mask import (  # noqa: E402
+from data_preprocessing.segmentation_dataset.generate_region_mask import (  # noqa: E402
     FittedLine,
     fit_tls_line,
     generate_region_mask,
     preprocess_polyline,
     validate_region_mask,
 )
-from Unet.preprocessing.preprocess_all import build_overlay_image  # noqa: E402
+from data_preprocessing.segmentation_dataset.preprocess_all import build_overlay_image  # noqa: E402
 
 LINE_KEYS = ("line_1", "line_2", "line_3", "line_4")
 TARGET_SIZE = 224
@@ -889,10 +889,10 @@ def main() -> None:
     parser.add_argument("--vertebra", help="例: C3")
     parser.add_argument("--all", action="store_true", help="全症例・全椎骨を処理する")
     parser.add_argument("--skip_existing", action="store_true")
-    parser.add_argument("--source_root", type=Path, default=ROOT_DIR / "annotation_data")
-    parser.add_argument("--anchor_root", type=Path, default=ROOT_DIR / "dataset")
-    parser.add_argument("--fallback_source_root", type=Path, default=ROOT_DIR / "predata_simple")
-    parser.add_argument("--output_root", type=Path, default=ROOT_DIR / "dataset_zprop")
+    parser.add_argument("--source_root", type=Path, default=ROOT_DIR / "data" / "annotation_data")
+    parser.add_argument("--anchor_root", type=Path, default=ROOT_DIR / "data" / "dataset")
+    parser.add_argument("--fallback_source_root", type=Path, default=ROOT_DIR / "data" / "predata_simple")
+    parser.add_argument("--output_root", type=Path, default=ROOT_DIR / "data" / "dataset_zprop")
     parser.add_argument("--trend_anchors", type=int, default=DEFAULT_TREND_ANCHORS)
     parser.add_argument("--confidence_decay_mm", type=float, default=DEFAULT_CONFIDENCE_DECAY_MM)
     parser.add_argument("--min_mask_area", type=int, default=MIN_MASK_AREA)

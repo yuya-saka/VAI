@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from Unet.preprocessing.propagate_lines_z import (
+from data_preprocessing.learning_dataset.propagate_lines_z import (
     MaskGeometry,
     align_polyline_direction,
     collect_vertebra_pairs,

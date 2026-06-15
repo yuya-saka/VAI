@@ -3,31 +3,32 @@
 頸椎CTの全前処理をここに集約。**用途別にサブフォルダを分割**している。
 DICOM（生データ）から、学習用の2Dデータセットまでを一本のパイプラインで生成する。
 
-> RSNAデータ（`rsna_data/`）は外部Kaggleデータセットで、**本パイプラインの対象外**（別系統）。
+> 頸椎データの実体は全て **`data/` 配下**に集約されている（`data/dicom_data/`, `data/segmentations/`, `data/dataset/` …）。
+> RSNAデータ（`data/rsna_data/`）は外部Kaggleデータセットで、**本パイプラインの対象外**（別系統）。
 
 ---
 
 ## パイプライン全体図
 
 ```
-data/sampleX/dicom/  (生DICOM・入力)
+data/dicom_data/sampleX/dicom/  (生DICOM・入力)
         │  ① dicom_to_nifti/
         ▼
    NIfTI + nifti_list.csv
         │  ② volume_prep/
-        ├──────────────► segmentations/      (椎体C1-C7マスク / TotalSegmentator)
-        ├──────────────► fracture_labels/     (骨折GTボリューム)
+        ├──────────────► data/segmentations/   (椎体C1-C7マスク / TotalSegmentator)
+        ├──────────────► data/fracture_labels/  (骨折GTボリューム)
         ▼
-   predata_simple/  (椎体ごと固定サイズcrop・中間)
+   data/predata_simple/  (椎体ごと固定サイズcrop・中間)
         │  auto_tilt + add_fracture_labels
         ▼
-   annotation_data/ (傾き補正 + ランドマーク + fracture.nii.gz・中間)
+   data/annotation_data/ (傾き補正 + ランドマーク + fracture.nii.gz・中間)
         │
-        ├─ ③ segmentation_dataset/ ─► dataset/        ──► 領域分割・直線検出モデル
-        │                                                  (Unet/{line_only,multitask,seg_only,seg_sdf})
+        ├─ ③ segmentation_dataset/ ─► data/dataset/        ──► 領域分割・直線検出モデル
+        │                                                       (Unet/{line_only,multitask,seg_only,seg_sdf})
         │
-        └─ ④ learning_dataset/    ─► dataset_zprop/   ──► 骨折検出学習
-                                                           (learning/)
+        └─ ④ learning_dataset/    ─► data/dataset_zprop/   ──► 骨折検出学習
+                                                                (learning/)
 ```
 
 ---
@@ -108,19 +109,19 @@ uv run python data_preprocessing/learning_dataset/propagate_lines_z.py
 
 ---
 
-## データディレクトリ用語集（プロジェクトルート直下）
+## データディレクトリ用語集（全て `data/` 配下に集約）
 
 | ディレクトリ | 内容 | 用途 |
 |---|---|---|
-| `data/` | 生DICOM | **入力** |
-| `segmentations/` | 椎体C1-C7マスク | 中間（②） |
-| `fracture_labels/` | 骨折GTボリューム | 中間（②） |
-| `predata_simple/` | 椎体crop（ct/mask） | 中間（②） |
-| `annotation_data/` | 傾き補正＋ランドマーク＋骨折 | 中間（②） |
-| `dataset/` | 2D PNGスライス＋領域マスク | **領域分割学習** |
-| `dataset_zprop/` | 2D PNG＋z伝播直線 | **骨折検出学習** |
-| `region_mask_evaluation/` | 領域マスク手動補正の評価 | 評価/QA |
-| `rsna_data/` | RSNA 2022 Kaggle | **外部・パイプライン外** |
+| `data/dicom_data/` | 生DICOM（`sampleX/dicom/`） | **入力** |
+| `data/segmentations/` | 椎体C1-C7マスク | 中間（②） |
+| `data/fracture_labels/` | 骨折GTボリューム | 中間（②） |
+| `data/predata_simple/` | 椎体crop（ct/mask） | 中間（②） |
+| `data/annotation_data/` | 傾き補正＋ランドマーク＋骨折 | 中間（②） |
+| `data/dataset/` | 2D PNGスライス＋領域マスク | **領域分割学習** |
+| `data/dataset_zprop/` | 2D PNG＋z伝播直線 | **骨折検出学習** |
+| `data/region_mask_evaluation/` | 領域マスク手動補正の評価 | 評価/QA |
+| `data/rsna_data/` | RSNA 2022 Kaggle | **外部・パイプライン外** |
 
 ---
 
@@ -135,3 +136,4 @@ uv run python data_preprocessing/learning_dataset/propagate_lines_z.py
 ## 履歴
 
 - 2026-06-16: 散在していた前処理（旧 `data_preprocessing/` 直下 ＋ `Unet/preprocessing/`）を本ディレクトリに用途別統合。旧3Dボリューム版（`spine_data`系）は `trash/old_3d_pipeline/` へ退避。
+- 2026-06-16: 散在していた頸椎データdir（旧トップレベルの `dataset/`, `segmentations/`, `dicom_data/` 等9種）を全て `data/` 配下へ集約。学習config・前処理・debug/test の固定rootパス参照を `data/` 経由に更新（相対参照は不変のため非変更）。生DICOMは旧 `data/`（削除済み）→ 再DLで `data/dicom_data/`。

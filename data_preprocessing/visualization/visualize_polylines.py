@@ -18,8 +18,8 @@ import numpy as np
 from matplotlib.lines import Line2D
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
-DATASET_DIR = ROOT_DIR / "dataset"
-OUTPUT_DIR = ROOT_DIR / "Unet" / "preprocessing" / "output" / "phase1_polyline_viz"
+DATASET_DIR = ROOT_DIR / "data" / "dataset"
+OUTPUT_DIR = ROOT_DIR / "data_preprocessing" / "visualization" / "output" / "phase1_polyline_viz"
 MPLCONFIG_DIR = ROOT_DIR / ".tmp" / "matplotlib"
 
 os.environ.setdefault("MPLCONFIGDIR", str(MPLCONFIG_DIR))

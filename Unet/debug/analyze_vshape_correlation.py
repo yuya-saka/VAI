@@ -23,7 +23,7 @@ PRED_PATTERN = str(
     REPO_ROOT
     / "Unet/outputs/multitask_v4(aug修正)/sig3.5-alpha0.07/vis/fold*/test_lines/*_PRED_lines.json"
 )
-DATASET_ROOT = REPO_ROOT / "dataset"
+DATASET_ROOT = REPO_ROOT / "data" / "dataset"
 OUTPUT_DIR = REPO_ROOT / "Unet/debug"
 OUTPUT_PNG = OUTPUT_DIR / "vshape_correlation.png"
 OUTPUT_JSON = OUTPUT_DIR / "vshape_correlation.json"

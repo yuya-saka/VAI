@@ -22,10 +22,10 @@ matplotlib.use("Agg")
 import matplotlib_fontja  # noqa: F401
 import matplotlib.pyplot as plt
 
-from Unet.preprocessing.generate_region_mask import generate_region_mask
+from data_preprocessing.segmentation_dataset.generate_region_mask import generate_region_mask
 
-DATASET_DIR = ROOT_DIR / "dataset"
-OUTPUT_DIR = ROOT_DIR / "Unet" / "preprocessing" / "output" / "region_mask_viz"
+DATASET_DIR = ROOT_DIR / "data" / "dataset"
+OUTPUT_DIR = ROOT_DIR / "data_preprocessing" / "visualization" / "output" / "region_mask_viz"
 
 TARGET_VERTEBRAE = ("C3", "C4", "C5", "C6", "C7")
 LINE_KEYS = ("line_1", "line_2", "line_3", "line_4")

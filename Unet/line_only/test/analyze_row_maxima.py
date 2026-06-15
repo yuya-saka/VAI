@@ -35,7 +35,7 @@ def analyze_row_maxima_from_saved_images():
     cfg = load_config()
     image_size = int(cfg.get("data", {}).get("image_size", 224))
     dataset_root_str = cfg.get("data", {}).get("root_dir", "")
-    dataset_root = Path(dataset_root_str) if dataset_root_str else Path("/mnt/nfs1/home/yamamoto-hiroto/research/VAI/dataset")
+    dataset_root = Path(dataset_root_str) if dataset_root_str else Path("/mnt/nfs1/home/yamamoto-hiroto/research/VAI/data/dataset")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

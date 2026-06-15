@@ -9,13 +9,13 @@ from typing import Any
 import cv2
 import numpy as np
 
-from Unet.preprocessing.generate_region_mask import (
+from data_preprocessing.segmentation_dataset.generate_region_mask import (
     generate_region_mask,
     validate_region_mask,
 )
 
 VERTEBRAE = ["C1", "C2", "C3", "C4", "C5", "C6", "C7"]
-DATASET_ROOT = Path("/mnt/nfs1/home/yamamoto-hiroto/research/VAI/dataset")
+DATASET_ROOT = Path("/mnt/nfs1/home/yamamoto-hiroto/research/VAI/data/dataset")
 BAD_SLICES_OUTPUT = DATASET_ROOT / "bad_slices_all.json"
 
 LINE_KEYS = ("line_1", "line_2", "line_3", "line_4")

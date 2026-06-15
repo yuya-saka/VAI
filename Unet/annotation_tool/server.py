@@ -33,7 +33,7 @@ _LINE_COLORS: dict[str, tuple[int, int, int]] = {
 ROOT_DIR = Path(__file__).resolve().parents[2]
 STATIC_DIR = Path(__file__).resolve().parent
 
-_dataset_dir: Path = ROOT_DIR / "dataset"
+_dataset_dir: Path = ROOT_DIR / "data" / "dataset"
 
 
 class AnnotationHandler(BaseHTTPRequestHandler):

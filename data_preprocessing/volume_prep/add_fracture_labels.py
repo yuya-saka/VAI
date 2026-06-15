@@ -12,9 +12,9 @@ z方向のスライスラベルは:
   slice_labels = (fracture.sum(axis=(0, 1)) > 0).astype(int)
 
 使い方:
-    uv run python Unet/preprocessing/add_fracture_labels.py
-    uv run python Unet/preprocessing/add_fracture_labels.py --sample sample1
-    uv run python Unet/preprocessing/add_fracture_labels.py --overwrite
+    uv run python data_preprocessing/volume_prep/add_fracture_labels.py
+    uv run python data_preprocessing/volume_prep/add_fracture_labels.py --sample sample1
+    uv run python data_preprocessing/volume_prep/add_fracture_labels.py --overwrite
 """
 
 from __future__ import annotations
@@ -33,10 +33,10 @@ from tqdm import tqdm
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 
-ANNOT_DIR = ROOT_DIR / "annotation_data"
-FRACTURE_DIR = ROOT_DIR / "fracture_labels"
-PREDATA_DIR = ROOT_DIR / "predata_simple"
-SEG_DIR = ROOT_DIR / "segmentations"
+ANNOT_DIR = ROOT_DIR / "data" / "annotation_data"
+FRACTURE_DIR = ROOT_DIR / "data" / "fracture_labels"
+PREDATA_DIR = ROOT_DIR / "data" / "predata_simple"
+SEG_DIR = ROOT_DIR / "data" / "segmentations"
 
 # generate_pre.py と同じパラメータ
 OUTPUT_RESOLUTION = 0.4   # mm/voxel

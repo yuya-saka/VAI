@@ -19,13 +19,13 @@ from typing import Any
 import cv2
 import numpy as np
 
-from Unet.preprocessing.generate_region_mask import generate_region_mask
-from Unet.preprocessing.pilot_region_mask import (
+from data_preprocessing.segmentation_dataset.generate_region_mask import generate_region_mask
+from data_preprocessing.segmentation_dataset.pilot_region_mask import (
     collect_valid_slices,
     SliceCandidate,
 )
 
-DATASET_ROOT = Path("/mnt/nfs1/home/yamamoto-hiroto/research/VAI/dataset")
+DATASET_ROOT = Path("/mnt/nfs1/home/yamamoto-hiroto/research/VAI/data/dataset")
 VERTEBRAE = ["C1", "C2", "C3", "C4", "C5", "C6", "C7"]
 
 # 判定閾値

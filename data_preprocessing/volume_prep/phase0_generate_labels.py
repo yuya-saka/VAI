@@ -6,12 +6,12 @@ import nibabel as nib
 # --- 設定 ---
 # スクリプトの場所からプロジェクトルートを特定（実行場所に依存しない）
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 
 # プロジェクトルート基準の絶対パス
 CSV_FILE = os.path.join(PROJECT_ROOT, "nifti_list.csv")
 NIFTI_DIR = os.path.join(PROJECT_ROOT, "nifti_output")
-OUTPUT_DIR = os.path.join(PROJECT_ROOT, "fracture_labels")
+OUTPUT_DIR = os.path.join(PROJECT_ROOT, "data", "fracture_labels")
 
 def parse_z_value(value):
     """

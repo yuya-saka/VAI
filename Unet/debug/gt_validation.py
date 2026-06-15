@@ -21,7 +21,7 @@ import numpy as np
 # -------------------------
 # 定数
 # -------------------------
-DATASET_ROOT = Path("/mnt/nfs1/home/yamamoto-hiroto/research/VAI/dataset")
+DATASET_ROOT = Path("/mnt/nfs1/home/yamamoto-hiroto/research/VAI/data/dataset")
 IMAGE_SIZE = 224
 VERTEBRA_NAMES = ["C1", "C2", "C3", "C4", "C5", "C6", "C7"]
 

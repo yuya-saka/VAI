@@ -7,9 +7,9 @@ predata_simple/ → 代表スライス PNG 抽出スクリプト。
      → 回転補間によるぼけが出ない
 
 使い方:
-    uv run python Unet/preprocessing/extract_slices.py
-    uv run python Unet/preprocessing/extract_slices.py --sample sample10 --n_slices 7
-    uv run python Unet/preprocessing/extract_slices.py --no_tilt  # 傾き補正なし
+    uv run python data_preprocessing/segmentation_dataset/extract_slices.py
+    uv run python data_preprocessing/segmentation_dataset/extract_slices.py --sample sample10 --n_slices 7
+    uv run python data_preprocessing/segmentation_dataset/extract_slices.py --no_tilt  # 傾き補正なし
 """
 
 from __future__ import annotations
@@ -232,12 +232,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--input_dir",
-        default=str(ROOT_DIR / "predata_simple"),
+        default=str(ROOT_DIR / "data" / "predata_simple"),
         help="入力ディレクトリ（デフォルト: predata_simple）",
     )
     parser.add_argument(
         "--output_dir",
-        default=str(ROOT_DIR / "dataset"),
+        default=str(ROOT_DIR / "data" / "dataset"),
         help="出力ディレクトリ（デフォルト: dataset）",
     )
     parser.add_argument(

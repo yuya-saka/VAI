@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 import numpy as np
 
-dataset_root = Path("/mnt/nfs1/home/yamamoto-hiroto/research/VAI/dataset")
+dataset_root = Path("/mnt/nfs1/home/yamamoto-hiroto/research/VAI/data/dataset")
 sample = "sample22"
 vertebra = "C1"
 

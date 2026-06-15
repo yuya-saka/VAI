@@ -14,7 +14,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-DATASET_ROOT = Path("/mnt/nfs1/home/yamamoto-hiroto/research/VAI/dataset")
+DATASET_ROOT = Path("/mnt/nfs1/home/yamamoto-hiroto/research/VAI/data/dataset")
 OUTPUT_DIR = Path("Unet/debug/gt_validation_results/flagged_vis")
 IMAGE_SIZE = 224
 

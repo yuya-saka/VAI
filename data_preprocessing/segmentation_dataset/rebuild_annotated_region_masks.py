@@ -10,11 +10,11 @@ from typing import Any
 import cv2
 import numpy as np
 
-from Unet.preprocessing.generate_region_mask import (
+from data_preprocessing.segmentation_dataset.generate_region_mask import (
     generate_region_mask,
     validate_region_mask,
 )
-from Unet.preprocessing.preprocess_all import (
+from data_preprocessing.segmentation_dataset.preprocess_all import (
     LINE_KEYS,
     REGION_COLORS_BGR,
     build_overlay_image,
@@ -23,8 +23,8 @@ from Unet.preprocessing.preprocess_all import (
 )
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
-DEFAULT_SOURCE_ROOT = ROOT_DIR / "dataset"
-DEFAULT_OUTPUT_ROOT = ROOT_DIR / "region_mask_evaluation" / "annotated_local_correction"
+DEFAULT_SOURCE_ROOT = ROOT_DIR / "data" / "dataset"
+DEFAULT_OUTPUT_ROOT = ROOT_DIR / "data" / "region_mask_evaluation" / "annotated_local_correction"
 CLASS_NAMES = ("body", "right_foramen", "left_foramen", "posterior")
 REVIEW_LIMIT = 100
 

@@ -43,7 +43,7 @@ def analyze_gt_heatmap():
     """GTヒートマップの分布を分析"""
 
     # sample22_C1_slice038 のGT線をロード
-    dataset_root = Path("/mnt/nfs1/home/yamamoto-hiroto/research/VAI/dataset")
+    dataset_root = Path("/mnt/nfs1/home/yamamoto-hiroto/research/VAI/data/dataset")
     sample = "sample22"
     vertebra = "C1"
     slice_idx = 38

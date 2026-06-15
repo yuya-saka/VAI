@@ -61,6 +61,7 @@ logs/
 
 
 # project
+data/
 dataset/
 dataset_past/
 segmentations/

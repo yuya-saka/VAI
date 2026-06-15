@@ -10,12 +10,12 @@ import argparse
 # 1. 設定・定数定義
 # ==========================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 
 CSV_FILE = os.path.join(PROJECT_ROOT, "nifti_list.csv")
 NIFTI_DIR = os.path.join(PROJECT_ROOT, "nifti_output")
-SEG_DIR = os.path.join(PROJECT_ROOT, "segmentations")
-OUTPUT_DIR = os.path.join(PROJECT_ROOT, "predata_simple")  # 出力先
+SEG_DIR = os.path.join(PROJECT_ROOT, "data", "segmentations")
+OUTPUT_DIR = os.path.join(PROJECT_ROOT, "data", "predata_simple")  # 出力先
 
 VERTEBRAE = ["C1", "C2", "C3", "C4", "C5", "C6", "C7"]
 

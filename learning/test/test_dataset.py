@@ -131,7 +131,7 @@ class TestCollectBagsSmoke:
     def test_returns_nonempty_list(self):
         """dataset_zprop が存在すれば bag が収集できる。"""
         root = Path(__file__).resolve().parents[2]
-        zprop_dir = root / "dataset_zprop"
+        zprop_dir = root / "data" / "dataset_zprop"
         if not zprop_dir.exists():
             pytest.skip("dataset_zprop が存在しない")
 
@@ -141,7 +141,7 @@ class TestCollectBagsSmoke:
     def test_bag_fields(self):
         """各 bag が必須フィールドを持つ。"""
         root = Path(__file__).resolve().parents[2]
-        zprop_dir = root / "dataset_zprop"
+        zprop_dir = root / "data" / "dataset_zprop"
         if not zprop_dir.exists():
             pytest.skip("dataset_zprop が存在しない")
 
@@ -157,7 +157,7 @@ class TestCollectBagsSmoke:
     def test_label_counts(self):
         """陽性 bag が存在する。"""
         root = Path(__file__).resolve().parents[2]
-        zprop_dir = root / "dataset_zprop"
+        zprop_dir = root / "data" / "dataset_zprop"
         if not zprop_dir.exists():
             pytest.skip("dataset_zprop が存在しない")
 

@@ -9,12 +9,12 @@ from typing import Any
 
 import cv2
 
-from Unet.preprocessing.generate_region_mask import (
+from data_preprocessing.segmentation_dataset.generate_region_mask import (
     generate_region_mask,
     validate_region_mask,
 )
 
-DATASET_ROOT = Path("/mnt/nfs1/home/yamamoto-hiroto/research/VAI/dataset")
+DATASET_ROOT = Path("/mnt/nfs1/home/yamamoto-hiroto/research/VAI/data/dataset")
 VERTEBRAE = ["C3", "C4", "C5", "C6", "C7"]
 SAMPLE_SIZE = 100
 RANDOM_SEED = 42

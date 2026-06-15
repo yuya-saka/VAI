@@ -22,8 +22,8 @@ matplotlib.use("Agg")
 import matplotlib_fontja  # noqa: F401
 import matplotlib.pyplot as plt
 
-DATASET_DIR = ROOT_DIR / "dataset"
-OUTPUT_DIR = ROOT_DIR / "Unet" / "preprocessing" / "output" / "gt_mask_viz"
+DATASET_DIR = ROOT_DIR / "data" / "dataset"
+OUTPUT_DIR = ROOT_DIR / "data_preprocessing" / "visualization" / "output" / "gt_mask_viz"
 
 TARGET_VERTEBRAE = ("C1", "C2", "C3", "C4", "C5", "C6", "C7")
 LINE_KEYS = ("line_1", "line_2", "line_3", "line_4")

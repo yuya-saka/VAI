@@ -14,7 +14,7 @@ from line_only.utils.losses import (
 def test_with_real_gt():
     """実際のGT polylineからヒートマップを生成し、角度を比較"""
     # Sample GT lines.json から1つ取得
-    dataset_root = Path("/mnt/nfs1/home/yamamoto-hiroto/research/VAI/dataset")
+    dataset_root = Path("/mnt/nfs1/home/yamamoto-hiroto/research/VAI/data/dataset")
     sample_dir = dataset_root / "sample5" / "C2"
     lines_json = sample_dir / "lines.json"
 
