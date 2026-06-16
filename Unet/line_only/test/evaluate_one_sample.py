@@ -15,7 +15,7 @@ from Unet.line_only.src.trainer import predict_lines_and_eval_test
 def test_one_sample():
     """1サンプルだけ評価して角度誤差を確認"""
     # Config読み込み
-    cfg_path = Path("Unet/config/config.yaml")
+    cfg_path = Path("Unet/line_only/config/config.yaml")
     with open(cfg_path) as f:
         cfg = yaml.safe_load(f)
 

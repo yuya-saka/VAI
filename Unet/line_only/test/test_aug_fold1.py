@@ -85,7 +85,7 @@ def run_fold1(aug_name: str, patch_fn=None) -> dict:
     戻り値:
         train_one_fold の結果辞書
     """
-    cfg = load_config("config/config.yaml")
+    cfg = load_config()
 
     # fold1 固定
     cfg["data"]["test_fold"] = 1

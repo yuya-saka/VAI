@@ -39,11 +39,11 @@ def seed_worker(worker_id):
 # -------------------------
 # 設定ファイル読み込み
 # -------------------------
-def load_config(cfg_path="config/config.yaml"):
+def load_config(cfg_path: str | None = None):
     """YAML設定ファイルを読み込む"""
+    if cfg_path is None:
+        cfg_path = str(Path(__file__).parent.parent / "config" / "config.yaml")
     p = Path(cfg_path)
-    if not p.exists():
-        p = Path("Unet") / cfg_path
     if not p.exists():
         raise FileNotFoundError(f"config not found: {cfg_path}")
     with open(p) as f:

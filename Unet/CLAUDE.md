@@ -33,7 +33,7 @@ line_only/
 ```
 
 ```bash
-uv run python Unet/line_only/train.py --config Unet/config/config.yaml
+uv run python Unet/line_only/train.py --config Unet/line_only/config/config.yaml
 uv run pytest Unet/line_only/test/ -v
 ```
 

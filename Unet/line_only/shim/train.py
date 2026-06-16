@@ -21,7 +21,7 @@ from line_only.train_heat import (
 def parse_args():
     parser = argparse.ArgumentParser(description="5-Fold CV 全自動実行")
     parser.add_argument(
-        "--config", default="config/config.yaml", help="設定ファイルパス"
+        "--config", default="Unet/line_only/config/config.yaml", help="設定ファイルパス"
     )
     parser.add_argument(
         "--gpu_id", type=int, default=None, help="使用するGPU ID（configを上書き）"

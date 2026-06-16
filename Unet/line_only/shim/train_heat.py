@@ -54,10 +54,10 @@ def seed_worker(worker_id):
 # -------------------------
 # 設定ファイル読み込み / データ分割
 # -------------------------
-def load_config(cfg_path="config/config.yaml"):
+def load_config(cfg_path: str | None = None):
+    if cfg_path is None:
+        cfg_path = str(Path(__file__).parent.parent / "config" / "config.yaml")
     p = Path(cfg_path)
-    if not p.exists():
-        p = Path("Unet") / cfg_path
     if not p.exists():
         raise FileNotFoundError(f"config not found: {cfg_path}")
     with open(p) as f:
@@ -1135,7 +1135,7 @@ def train_one_fold(cfg):
 
 
 def main():
-    cfg = load_config("config/config.yaml")
+    cfg = load_config()
     seed = int(cfg.get("data", {}).get("random_seed", 42))
     set_seed(seed)
 

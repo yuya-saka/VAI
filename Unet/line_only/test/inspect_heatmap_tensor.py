@@ -44,7 +44,7 @@ def load_model_and_data():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # 設定ファイルをロード
-    config_path = unet_dir / "config" / "config.yaml"
+    config_path = unet_dir / "line_only" / "config" / "config.yaml"
     with open(config_path) as f:
         cfg = yaml.safe_load(f)
 

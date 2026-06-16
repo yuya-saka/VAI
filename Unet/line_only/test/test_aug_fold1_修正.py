@@ -117,7 +117,7 @@ def run_fold1(aug_name: str, patch_fn=None) -> dict:
         patch_fn: get_transforms を差し替える関数
                   None = 現行 Affine 実装をそのまま使う
     """
-    cfg = load_config("config/config.yaml")
+    cfg = load_config()
 
     # fold1 固定
     cfg["data"]["test_fold"] = 1

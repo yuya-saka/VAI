@@ -155,7 +155,8 @@ def run_training_loop(
     confidence_gate_low = float(loss_config.get("confidence_gate_low", 0.3))
     confidence_gate_high = float(loss_config.get("confidence_gate_high", 0.6))
 
-    best_value = float("inf")
+    best_peak_dist = float("inf")
+    best_val_loss = float("inf")
     no_improvement_count = 0
 
     for epoch in range(1, epochs + 1):
@@ -213,26 +214,35 @@ def run_training_loop(
                 warmup_weight,
             )
 
-        if val_metrics["val_loss_mse"] < best_value - 1e-8:
-            best_value = val_metrics["val_loss_mse"]
-            no_improvement_count = 0
+        # ベストエポック選択: peak_dist_mean（ピーク位置精度）で判定
+        if val_metrics["peak_dist_mean"] < best_peak_dist - 1e-8:
+            best_peak_dist = val_metrics["peak_dist_mean"]
             torch.save(
                 {"model": model.state_dict(), "cfg": cfg, "val": val_metrics},
                 best_path,
             )
-            print(f"  [SAVE] best -> {best_path} (val_mse={best_value:.6f})")
-            if wandb_enabled and _wandb is not None:
-                update_best_summary(_wandb, epoch, best_value, val_metrics)
-            continue
-
-        no_improvement_count += 1
-        if no_improvement_count >= early_stopping_patience:
             print(
-                "[EARLY STOP] "
-                f"no improvement for {early_stopping_patience} epochs. "
-                f"best_val={best_value:.6f}"
+                f"  [SAVE] best -> {best_path} "
+                f"(peak_dist={best_peak_dist:.4f}px, "
+                f"val_mse={val_metrics['val_loss_mse']:.6f})"
             )
-            break
+            if wandb_enabled and _wandb is not None:
+                update_best_summary(_wandb, epoch, best_peak_dist, val_metrics)
+
+        # Early stopping: val_loss_mse で判定
+        if val_metrics["val_loss_mse"] < best_val_loss - 1e-8:
+            best_val_loss = val_metrics["val_loss_mse"]
+            no_improvement_count = 0
+        else:
+            no_improvement_count += 1
+            if no_improvement_count >= early_stopping_patience:
+                print(
+                    "[EARLY STOP] "
+                    f"no improvement for {early_stopping_patience} epochs. "
+                    f"best_val_loss={best_val_loss:.6f}, "
+                    f"best_peak_dist={best_peak_dist:.4f}px"
+                )
+                break
 
 
 def train_one_fold(cfg: dict[str, Any]) -> dict[str, Any]:
