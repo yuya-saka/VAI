@@ -37,10 +37,12 @@ class _ConstantHeatmapModel(nn.Module):
         images: torch.Tensor,
         vertebra_indices: torch.Tensor,
     ) -> torch.Tensor:
-        """一定値の4チャンネルヒートマップを返す。"""
+        """中央行を強調した4チャンネルヒートマップを返す（異方性→confidence > 0）。"""
         del vertebra_indices
-        batch_size, _, height, width = images.shape
-        return self.logit.expand(batch_size, 4, height, width)
+        B, _, H, W = images.shape
+        stripe = torch.zeros(B, 4, H, W, device=images.device)
+        stripe[:, :, H // 2, :] = 3.0
+        return self.logit + stripe
 
 
 def test_trainer_reexports_public_functions() -> None:
@@ -69,6 +71,7 @@ def test_run_training_loop_saves_best_checkpoint(tmp_path: Path) -> None:
         "image": torch.zeros(1, 2, 8, 8),
         "heatmaps": torch.zeros(1, 4, 8, 8),
         "vertebra": ["C1"],
+        "line_params_gt": torch.zeros(1, 4, 2),
     }
     checkpoint_path = tmp_path / "best.pt"
 

@@ -99,6 +99,13 @@ def _append_metrics(
     values["perp"].append(perpendicular_distance)
 
 
+def _outlier_rate(errors: list[float], thresh: float) -> float:
+    """閾値を超える割合を返す。"""
+    if not errors:
+        return float("nan")
+    return float(sum(e > thresh for e in errors) / len(errors))
+
+
 def _summarize(
     saved_count: int,
     angle_errors: list[float],
@@ -107,8 +114,10 @@ def _summarize(
     per_channel: dict[int, MetricLists],
     per_vertebra: dict[str, MetricLists],
     line_extend_ratio: float,
-    heatmap_threshold: float,
+    heatmap_threshold: line_losses.ThresholdSpec,
     output_dir: Path,
+    outlier_angle_thresh: float = 10.0,
+    outlier_rho_thresh: float = 8.0,
 ) -> dict[str, Any]:
     """推論結果を全体・直線別・椎体別に集約する。"""
     return {
@@ -116,6 +125,8 @@ def _summarize(
         "angle_error_deg_mean": _mean_valid(angle_errors),
         "rho_error_px_mean": _mean_valid(rho_errors),
         "perpendicular_dist_px_mean": _mean_valid(perpendicular_distances),
+        "outlier_angle_rate": _outlier_rate(angle_errors, outlier_angle_thresh),
+        "outlier_rho_rate": _outlier_rate(rho_errors, outlier_rho_thresh),
         "per_channel": {
             f"line_{channel}": {
                 "angle_error_deg_mean": _mean_valid(values["angle"]),
@@ -141,7 +152,7 @@ def _summarize(
             for vertebra, values in per_vertebra.items()
         },
         "line_extend_ratio": float(line_extend_ratio),
-        "heatmap_threshold_ref": float(heatmap_threshold),
+        "heatmap_threshold_ref": heatmap_threshold,
         "out_dir": str(output_dir),
     }
 
@@ -162,7 +173,7 @@ def predict_lines_and_eval_test(
 
     evaluation_config = cfg.get("evaluation", {})
     line_extend_ratio = float(evaluation_config.get("line_extend_ratio", 1.10))
-    heatmap_threshold = float(evaluation_config.get("heatmap_threshold", 0.15))
+    heatmap_threshold = evaluation_config.get("heatmap_threshold", 0.15)
     image_size = int(cfg.get("data", {}).get("image_size", 224))
     cache = LinesJsonCache(Path(dataset_root))
 
@@ -214,6 +225,7 @@ def predict_lines_and_eval_test(
                     heatmaps_numpy[batch_index, channel],
                     length_px=length,
                     extend_ratio=line_extend_ratio,
+                    threshold=heatmap_threshold,
                 )
 
                 if np.isnan(gt_phi) or pred_confidence <= 0:
@@ -296,4 +308,6 @@ def predict_lines_and_eval_test(
         line_extend_ratio,
         heatmap_threshold,
         output_dir,
+        outlier_angle_thresh=float(evaluation_config.get("outlier_angle_threshold_deg", 10.0)),
+        outlier_rho_thresh=float(evaluation_config.get("outlier_rho_threshold_px", 8.0)),
     )

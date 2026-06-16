@@ -204,6 +204,30 @@ def test_threshold_effect():
     print(f"✓ Threshold effect: conf {conf_none[0, 0]:.3f} -> {conf_thresh[0, 0]:.3f}")
 
 
+def test_adaptive_threshold_keeps_low_peak_line():
+    """適応閾値が低ピークの線を固定高閾値より安定して抽出できることを確認"""
+    H, W = 224, 224
+
+    y_coords = torch.arange(H, dtype=torch.float32).unsqueeze(1)
+    clean_signal = torch.exp(-((y_coords - 112) ** 2) / (2 * 3.0**2))
+    clean_signal = clean_signal.expand(H, W) * 0.4
+    noise = torch.rand(H, W) * 0.08
+    heatmap = torch.clamp(clean_signal + noise, 0, 1).unsqueeze(0).unsqueeze(0)
+
+    pred_fixed, conf_fixed = extract_pred_line_params_batch(heatmap, threshold=0.5)
+    pred_adaptive, conf_adaptive = extract_pred_line_params_batch(
+        heatmap,
+        threshold={"mode": "adaptive", "min": 0.15, "peak_ratio": 0.4},
+    )
+
+    phi_adaptive = pred_adaptive[0, 0, 0].item()
+
+    assert conf_fixed[0, 0] == 0, "固定高閾値では低ピーク線が無効になる想定"
+    assert conf_adaptive[0, 0] > 0.8, "適応閾値では線の異方性が残る想定"
+    assert abs(phi_adaptive - math.pi / 2) < 0.1, \
+        f"水平線の法線角はπ/2付近の想定: fixed={pred_fixed[0, 0, 0].item()}, adaptive={phi_adaptive}"
+
+
 def test_threshold_zero_vs_none():
     """Test that threshold=0.0 and threshold=None behave differently."""
     B, C, H, W = 1, 1, 224, 224

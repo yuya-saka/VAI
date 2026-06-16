@@ -13,6 +13,7 @@ import torch.nn.functional as F
 
 from ..utils import losses as line_losses
 from ..utils import metrics as line_metrics
+from ..utils.metrics import collect_blob_ious
 from .model import VERTEBRA_TO_IDX
 
 Batch = dict[str, Any]
@@ -40,7 +41,9 @@ def evaluate(
     loader: Iterable[Batch],
     device: torch.device,
     image_size: int = 224,
-    heatmap_threshold: float = 0.2,
+    heatmap_threshold: line_losses.ThresholdSpec = 0.2,
+    outlier_angle_thresh: float | None = None,
+    outlier_rho_thresh: float | None = None,
 ) -> dict[str, Any]:
     """モデルのヒートマップ品質と直線幾何誤差を評価する。"""
     model.eval()
@@ -49,6 +52,7 @@ def evaluate(
     peak_dists: list[float] = []
     angle_errors: list[float] = []
     rho_errors: list[float] = []
+    blob_ious: list[float] = []
     per_vertebra = {
         vertebra: {"peak_dists": []}
         for vertebra in ["C1", "C2", "C3", "C4", "C5", "C6", "C7"]
@@ -70,6 +74,7 @@ def evaluate(
 
         pred_numpy = pred_heatmaps.cpu().numpy()
         gt_numpy = gt_heatmaps.cpu().numpy()
+        blob_ious.extend(collect_blob_ious(pred_numpy, gt_numpy))
         for batch_index, vertebra in enumerate(batch["vertebra"]):
             for channel in range(4):
                 distance = peak_dist(
@@ -90,16 +95,11 @@ def evaluate(
             threshold=heatmap_threshold,
         )
         valid_mask = ~torch.isnan(gt_params).any(dim=-1) & (confidence > 0)
-        angle_errors.append(
-            line_metrics.compute_angle_error(pred_params, gt_params, valid_mask)
+        angle_errors.extend(
+            line_metrics.collect_angle_errors(pred_params, gt_params, valid_mask)
         )
-        rho_errors.append(
-            line_metrics.compute_rho_error(
-                pred_params,
-                gt_params,
-                image_size,
-                valid_mask,
-            )
+        rho_errors.extend(
+            line_metrics.collect_rho_errors(pred_params, gt_params, image_size, valid_mask)
         )
 
     per_vertebra_metrics = {
@@ -113,9 +113,18 @@ def evaluate(
     metrics: dict[str, Any] = {
         "val_loss_mse": mse_sum / max(1, batch_count),
         "peak_dist_mean": float(np.nanmean(peak_dists)),
+        "blob_iou": float(np.nanmean(blob_ious)) if blob_ious else float("nan"),
         "per_vertebra": per_vertebra_metrics,
     }
     if angle_errors:
         metrics["angle_error_deg"] = float(np.nanmean(angle_errors))
         metrics["rho_error_px"] = float(np.nanmean(rho_errors))
+        if outlier_angle_thresh is not None:
+            metrics["val_outlier_angle_rate"] = float(
+                np.mean([e > outlier_angle_thresh for e in angle_errors])
+            )
+        if outlier_rho_thresh is not None:
+            metrics["val_outlier_rho_rate"] = float(
+                np.mean([e > outlier_rho_thresh for e in rho_errors])
+            )
     return metrics

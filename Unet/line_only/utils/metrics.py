@@ -2,6 +2,7 @@
 
 import math
 
+import numpy as np
 import torch
 
 
@@ -69,6 +70,60 @@ def compute_rho_error(pred_params, gt_params, image_size, valid_mask):
         err_px = err_px * valid_mask.float()
         return float(err_px.sum() / (valid_mask.sum() + 1e-8))
     return float(err_px.mean())
+
+
+def collect_angle_errors(pred_params, gt_params, valid_mask) -> list[float]:
+    """有効サンプルの角度誤差リスト（度）を返す。"""
+    pred_phi = pred_params[..., 0]
+    gt_phi = gt_params[..., 0]
+    pred_nx = torch.cos(pred_phi)
+    pred_ny = torch.sin(pred_phi)
+    gt_nx = torch.cos(gt_phi)
+    gt_ny = torch.sin(gt_phi)
+    dot_clamped = torch.clamp(torch.abs(pred_nx * gt_nx + pred_ny * gt_ny), 0.0, 1.0)
+    angle_error_deg = torch.rad2deg(torch.acos(dot_clamped))
+    if valid_mask is not None:
+        return angle_error_deg[valid_mask].cpu().tolist()
+    return angle_error_deg.flatten().cpu().tolist()
+
+
+def collect_rho_errors(pred_params, gt_params, image_size, valid_mask) -> list[float]:
+    """有効サンプルの rho 誤差リスト（ピクセル）を返す。"""
+    pred_rho = pred_params[..., 1]
+    gt_rho = gt_params[..., 1]
+    err = torch.minimum(torch.abs(pred_rho - gt_rho), torch.abs(pred_rho + gt_rho))
+    err_px = err * math.sqrt(image_size**2 + image_size**2)
+    if valid_mask is not None:
+        return err_px[valid_mask].cpu().tolist()
+    return err_px.flatten().cpu().tolist()
+
+
+def collect_blob_ious(
+    pred: np.ndarray,
+    gt: np.ndarray,
+    threshold: float = 0.1,
+) -> list[float]:
+    """
+    予測・GTヒートマップを二値化してチャンネルごとの Blob IoU を返す。
+
+    引数:
+        pred: (B, C, H, W) 予測ヒートマップ（sigmoid後）
+        gt:   (B, C, H, W) GT ヒートマップ
+        threshold: 二値化閾値（デフォルト 0.1）
+
+    戻り値:
+        チャンネルごとの IoU リスト
+    """
+    pred_mask = pred >= threshold
+    gt_mask = gt >= threshold
+    ious: list[float] = []
+    B, C = pred.shape[:2]
+    for b in range(B):
+        for c in range(C):
+            intersection = int((pred_mask[b, c] & gt_mask[b, c]).sum())
+            union = int((pred_mask[b, c] | gt_mask[b, c]).sum())
+            ious.append(intersection / union if union > 0 else 1.0)
+    return ious
 
 
 def compute_perpendicular_distance(

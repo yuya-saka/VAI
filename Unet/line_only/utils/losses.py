@@ -1,10 +1,53 @@
 """直線の幾何学的制約のための損失関数とパラメータ抽出"""
 
 import math
+from typing import Any
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+ThresholdSpec = float | str | dict[str, Any] | None
+ADAPTIVE_THRESHOLD_MIN = 0.15
+ADAPTIVE_THRESHOLD_PEAK_RATIO = 0.4
+
+
+def _adaptive_threshold_values(
+    hm: torch.Tensor,
+    min_threshold: float = ADAPTIVE_THRESHOLD_MIN,
+    peak_ratio: float = ADAPTIVE_THRESHOLD_PEAK_RATIO,
+) -> torch.Tensor:
+    """各ヒートマップのピーク値に応じた適応閾値を計算"""
+    peaks = hm.flatten(start_dim=1).amax(dim=1)
+    min_values = torch.full_like(peaks, float(min_threshold))
+    return torch.maximum(min_values, peaks * float(peak_ratio))
+
+
+def _resolve_threshold_values(
+    hm: torch.Tensor,
+    threshold: ThresholdSpec,
+) -> torch.Tensor | None:
+    """固定閾値または適応閾値を各ヒートマップの閾値へ変換"""
+    if threshold is None:
+        return None
+
+    if isinstance(threshold, str):
+        if threshold != "adaptive":
+            raise ValueError(f"Unsupported threshold mode: {threshold}")
+        return _adaptive_threshold_values(hm)
+
+    if isinstance(threshold, dict):
+        mode = threshold.get("mode", "fixed")
+        if mode != "adaptive":
+            value = threshold.get("value")
+            if value is None:
+                return None
+            return torch.full((hm.shape[0],), float(value), device=hm.device, dtype=hm.dtype)
+        min_threshold = float(threshold.get("min", ADAPTIVE_THRESHOLD_MIN))
+        peak_ratio = float(threshold.get("peak_ratio", ADAPTIVE_THRESHOLD_PEAK_RATIO))
+        return _adaptive_threshold_values(hm, min_threshold, peak_ratio)
+
+    return torch.full((hm.shape[0],), float(threshold), device=hm.device, dtype=hm.dtype)
 
 
 # -------------------------
@@ -68,7 +111,7 @@ def extract_gt_line_params(polyline_points, image_size=224):
 # -------------------------
 # 内部ヘルパー: モーメント計算（phi 正規化なし）
 # -------------------------
-def _compute_moments_batch(heatmaps, min_mass=1e-6, threshold=None):
+def _compute_moments_batch(heatmaps, min_mass=1e-6, threshold: ThresholdSpec = None):
     """
     ヒートマップから損失計算・抽出に使う中間変数を一括計算
 
@@ -77,7 +120,9 @@ def _compute_moments_batch(heatmaps, min_mass=1e-6, threshold=None):
     引数:
         heatmaps: (B, C, H, W) sigmoid後の予測ヒートマップ
         min_mass: 有効判定の最小質量閾値
-        threshold: 評価時ノイズ抑制閾値（訓練時は None）
+        threshold: 評価時ノイズ抑制閾値。固定値、"adaptive"、または
+                   {"mode": "adaptive", "min": 0.15, "peak_ratio": 0.4}
+                   を指定できる（訓練時は None）
 
     戻り値（すべて (B, C) 形状）:
         confidence: 異方性比 (lam1-lam2)/(lam1+lam2+eps)、無効時は 0
@@ -98,8 +143,13 @@ def _compute_moments_batch(heatmaps, min_mass=1e-6, threshold=None):
     hm = heatmaps.reshape(N, H, W)
 
     # 評価時ノイズ抑制（勾配は通さない）
-    if threshold is not None:
-        hm = torch.where(hm >= threshold, hm, torch.zeros_like(hm))
+    threshold_values = _resolve_threshold_values(hm, threshold)
+    if threshold_values is not None:
+        hm = torch.where(
+            hm >= threshold_values[:, None, None],
+            hm,
+            torch.zeros_like(hm),
+        )
 
     # 質量: (N,)
     hm_flat = hm.reshape(N, -1)        # (N, H*W)
@@ -159,7 +209,12 @@ def _compute_moments_batch(heatmaps, min_mass=1e-6, threshold=None):
 # -------------------------
 # 予測直線パラメータ抽出（評価・デバッグ用）
 # -------------------------
-def extract_pred_line_params_batch(heatmaps, image_size=224, min_mass=1e-6, threshold=None):
+def extract_pred_line_params_batch(
+    heatmaps,
+    image_size=224,
+    min_mass=1e-6,
+    threshold: ThresholdSpec = None,
+):
     """
     モーメント法を用いて予測ヒートマップから (φ, ρ) を一括抽出
 
@@ -170,14 +225,15 @@ def extract_pred_line_params_batch(heatmaps, image_size=224, min_mass=1e-6, thre
         heatmaps: (B, C, H, W) 予測ヒートマップ（sigmoid後）
         image_size: 画像の次元
         min_mass: ヒートマップ質量の最小閾値
-        threshold: ヒートマップの閾値処理（評価時 0.2 推奨、訓練時 None）
+        threshold: ヒートマップの閾値処理。固定値、"adaptive"、または
+                   {"mode": "adaptive", "min": 0.15, "peak_ratio": 0.4}
+                   を指定できる（訓練時 None）
 
     戻り値:
         pred_params: (B, C, 2) (phi_rad, rho_normalized)（NaN なし、無効時は 0）
         confidence: (B, C) 異方性比 [0,1]（無効時は 0）
     """
     B, C, _, _ = heatmaps.shape
-    device = heatmaps.device
     D = math.sqrt(image_size**2 + image_size**2)
 
     conf, nx, ny, cx, cy, valid = _compute_moments_batch(heatmaps, min_mass, threshold)

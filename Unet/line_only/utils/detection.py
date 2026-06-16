@@ -5,13 +5,48 @@ import math
 from pathlib import Path
 from typing import Any
 
-import cv2
 import numpy as np
+
+ThresholdSpec = float | str | dict[str, Any] | None
+ADAPTIVE_THRESHOLD_MIN = 0.15
+ADAPTIVE_THRESHOLD_PEAK_RATIO = 0.4
 
 
 # -------------------------
 # ヘルパー関数
 # -------------------------
+def _adaptive_threshold_value(
+    hm: np.ndarray,
+    min_threshold: float = ADAPTIVE_THRESHOLD_MIN,
+    peak_ratio: float = ADAPTIVE_THRESHOLD_PEAK_RATIO,
+) -> float:
+    """ピーク値に応じた適応閾値を計算"""
+    peak = float(np.max(hm)) if hm.size > 0 else 0.0
+    return max(float(min_threshold), float(peak_ratio) * peak)
+
+
+def _resolve_threshold_value(hm: np.ndarray, threshold: ThresholdSpec) -> float | None:
+    """固定閾値または適応閾値を実数値へ変換"""
+    if threshold is None:
+        return None
+
+    if isinstance(threshold, str):
+        if threshold != "adaptive":
+            raise ValueError(f"Unsupported threshold mode: {threshold}")
+        return _adaptive_threshold_value(hm)
+
+    if isinstance(threshold, dict):
+        mode = threshold.get("mode", "fixed")
+        if mode != "adaptive":
+            value = threshold.get("value")
+            return None if value is None else float(value)
+        min_threshold = float(threshold.get("min", ADAPTIVE_THRESHOLD_MIN))
+        peak_ratio = float(threshold.get("peak_ratio", ADAPTIVE_THRESHOLD_PEAK_RATIO))
+        return _adaptive_threshold_value(hm, min_threshold, peak_ratio)
+
+    return float(threshold)
+
+
 def polyline_length(pts: list[list[float]] | None) -> float:
     """折れ線の累積長を計算"""
     if pts is None or len(pts) < 2:
@@ -58,7 +93,7 @@ def detect_line_moments(
     min_mass: float = 1e-6,
     clip: bool = True,
     top_p_fallback: float = 0.02,
-    threshold: float | None = 0.2,
+    threshold: ThresholdSpec = 0.2,
 ) -> dict[str, Any] | None:
     """
     ヒートマップから直線を検出（モーメント法）
@@ -68,8 +103,9 @@ def detect_line_moments(
 
     引数:
         hm: (H,W) float [0,1] ガウス分布様のヒートマップ
-        threshold: しきい値。これ未満のピクセルをゼロにして
-                   背景ノイズがモーメント計算に影響するのを防ぐ
+        threshold: しきい値。固定値、"adaptive"、または
+                   {"mode": "adaptive", "min": 0.15, "peak_ratio": 0.4}
+                   を指定できる
 
     戻り値:
       {
@@ -88,8 +124,9 @@ def detect_line_moments(
     H, W = hm.shape
 
     # しきい値適用: 背景ノイズを除去してモーメント計算の精度を向上
-    if threshold is not None:
-        hm = np.where(hm >= threshold, hm, 0.0)
+    threshold_value = _resolve_threshold_value(hm, threshold)
+    if threshold_value is not None:
+        hm = np.where(hm >= threshold_value, hm, 0.0)
 
     M00 = hm.sum()
     if M00 < min_mass:
@@ -170,6 +207,7 @@ def detect_line_moments(
         "mu20": float(mu20),
         "mu02": float(mu02),
         "mu11": float(mu11),
+        "threshold": None if threshold_value is None else float(threshold_value),
     }
 
 

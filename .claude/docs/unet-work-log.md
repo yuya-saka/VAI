@@ -1,7 +1,7 @@
 # Unet/ 作業サマリー
 
 <!-- ルール: 現在地・次アクションのみ。完了詳細は work-logs/YYYY-MM-DD.md へ。上限60行 -->
-<!-- 最終更新: 2026-06-15 -->
+<!-- 最終更新: 2026-06-16 -->
 
 ## 精度比較（5-fold CV 平均）
 
@@ -49,12 +49,11 @@
 
 ## 保留タスク
 
+- **次回**: line_20260616/sig3.5_ALL で全 fold 学習実行・外れ値率推移を wandb 確認
 - multitask/ で aug 変換修正の実験実施（line_only の改善効果確認）
 - reg + aug変換修正 の組み合わせ実験
-- 評価コードに部位別 angle/rho 記録を追加
-- seg_only + 椎体条件付け実験
 - `compute_perpendicular_distance` Y符号バグ修正（4ファイル共通）
-- 角度誤差 >15° のサンプル可視化で原因特定
+- `weight_decay` を 1e-4 に下げるか検討（データ増による正則化緩和）
 
 ---
 
@@ -69,6 +68,7 @@
 
 | 日付 | 主な内容 |
 |------|---------|
+| [2026-06-16](work-logs/2026-06-16.md) | config移動・best epoch→peak_dist_mean・val/test外れ値率追加・LR/BS増量 |
 | [2026-06-15](work-logs/2026-06-15.md) | line_only trainer 責務分割・公開API互換維持・テスト収集整理 |
 | [2026-04-20](work-logs/2026-04-20.md) | パイプライン正当性確認・perp_dist Y符号バグ発見・V字型仮説否定 |
 | [2026-04-16](work-logs/2026-04-16.md) | multitask/ に aug 変換修正を移植（19/19 pass） |

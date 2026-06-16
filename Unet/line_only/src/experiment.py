@@ -60,6 +60,7 @@ def log_wandb_epoch(
         "train_mse": train_stats["loss"],
         "val_mse": val_metrics["val_loss_mse"],
         "peak_dist": val_metrics["peak_dist_mean"],
+        "blob_iou": val_metrics["blob_iou"],
         "warmup_weight": warmup_weight,
     }
     if use_line_loss:
@@ -77,6 +78,13 @@ def log_wandb_epoch(
                 "rho_error_px": val_metrics["rho_error_px"],
             }
         )
+    if "val_outlier_angle_rate" in val_metrics:
+        log_values.update(
+            {
+                "val_outlier_angle_rate": val_metrics["val_outlier_angle_rate"],
+                "val_outlier_rho_rate": val_metrics["val_outlier_rho_rate"],
+            }
+        )
     wandb_module.log(log_values, step=epoch)
 
 
@@ -87,13 +95,11 @@ def update_best_summary(
     val_metrics: dict[str, Any],
 ) -> None:
     """ベスト epoch の指標を wandb summary へ保存する。"""
-    wandb_module.run.summary["best_val_mse"] = best_value
     wandb_module.run.summary["best_epoch"] = epoch
+    wandb_module.run.summary["best_angle_error_deg"] = best_value
+    wandb_module.run.summary["best_val_mse"] = val_metrics["val_loss_mse"]
     wandb_module.run.summary["best_peak_dist"] = val_metrics["peak_dist_mean"]
-    if "angle_error_deg" in val_metrics:
-        wandb_module.run.summary["best_angle_error_deg"] = val_metrics[
-            "angle_error_deg"
-        ]
+    if "rho_error_px" in val_metrics:
         wandb_module.run.summary["best_rho_error_px"] = val_metrics["rho_error_px"]
 
 
@@ -188,6 +194,8 @@ def print_line_summary(line_summary: dict[str, Any]) -> None:
     )
     print(f"  Angle Error:           {line_summary['angle_error_deg_mean']:.2f} deg")
     print(f"  Rho Error:             {line_summary['rho_error_px_mean']:.2f} px")
+    print(f"  Outlier Angle Rate:    {line_summary['outlier_angle_rate']:.1%}")
+    print(f"  Outlier Rho Rate:      {line_summary['outlier_rho_rate']:.1%}")
     print("\n[Per-Channel Breakdown]")
     for line_name, metrics in line_summary["per_channel"].items():
         print(
@@ -214,4 +222,6 @@ def finish_wandb(
     ]
     wandb_module.run.summary["line_angle_error"] = line_summary["angle_error_deg_mean"]
     wandb_module.run.summary["line_rho_error"] = line_summary["rho_error_px_mean"]
+    wandb_module.run.summary["test_outlier_angle_rate"] = line_summary["outlier_angle_rate"]
+    wandb_module.run.summary["test_outlier_rho_rate"] = line_summary["outlier_rho_rate"]
     wandb_module.finish()

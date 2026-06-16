@@ -143,7 +143,9 @@ def run_training_loop(
     early_stopping_patience = int(training_config.get("early_stopping_patience", 20))
     grad_clip = float(training_config.get("grad_clip", 1.0))
     image_size = int(cfg.get("data", {}).get("image_size", 224))
-    heatmap_threshold = float(evaluation_config.get("heatmap_threshold", 0.2))
+    heatmap_threshold = evaluation_config.get("heatmap_threshold", 0.2)
+    outlier_angle_thresh = float(evaluation_config.get("outlier_angle_threshold_deg", 10.0))
+    outlier_rho_thresh = float(evaluation_config.get("outlier_rho_threshold_px", 8.0))
     use_line_loss = bool(loss_config.get("use_line_loss", False))
     lambda_angle = float(
         loss_config.get("lambda_angle", loss_config.get("lambda_theta", 1.0))
@@ -155,7 +157,7 @@ def run_training_loop(
     confidence_gate_low = float(loss_config.get("confidence_gate_low", 0.3))
     confidence_gate_high = float(loss_config.get("confidence_gate_high", 0.6))
 
-    best_peak_dist = float("inf")
+    best_angle_error = float("inf")
     best_val_loss = float("inf")
     no_improvement_count = 0
 
@@ -187,6 +189,8 @@ def run_training_loop(
             device,
             image_size,
             heatmap_threshold,
+            outlier_angle_thresh=outlier_angle_thresh,
+            outlier_rho_thresh=outlier_rho_thresh,
         )
         scheduler.step(val_metrics["val_loss_mse"])
         learning_rate = float(optimizer.param_groups[0]["lr"])
@@ -214,20 +218,21 @@ def run_training_loop(
                 warmup_weight,
             )
 
-        # ベストエポック選択: peak_dist_mean（ピーク位置精度）で判定
-        if val_metrics["peak_dist_mean"] < best_peak_dist - 1e-8:
-            best_peak_dist = val_metrics["peak_dist_mean"]
+        # ベストエポック選択: angle_error_deg（直線角度誤差）で判定
+        current_angle_error = val_metrics.get("angle_error_deg", float("inf"))
+        if current_angle_error < best_angle_error - 1e-8:
+            best_angle_error = current_angle_error
             torch.save(
                 {"model": model.state_dict(), "cfg": cfg, "val": val_metrics},
                 best_path,
             )
             print(
                 f"  [SAVE] best -> {best_path} "
-                f"(peak_dist={best_peak_dist:.4f}px, "
+                f"(angle_error={best_angle_error:.4f}deg, "
                 f"val_mse={val_metrics['val_loss_mse']:.6f})"
             )
             if wandb_enabled and _wandb is not None:
-                update_best_summary(_wandb, epoch, best_peak_dist, val_metrics)
+                update_best_summary(_wandb, epoch, best_angle_error, val_metrics)
 
         # Early stopping: val_loss_mse で判定
         if val_metrics["val_loss_mse"] < best_val_loss - 1e-8:
@@ -240,7 +245,7 @@ def run_training_loop(
                     "[EARLY STOP] "
                     f"no improvement for {early_stopping_patience} epochs. "
                     f"best_val_loss={best_val_loss:.6f}, "
-                    f"best_peak_dist={best_peak_dist:.4f}px"
+                    f"best_angle_error={best_angle_error:.4f}deg"
                 )
                 break
 
@@ -251,7 +256,7 @@ def train_one_fold(cfg: dict[str, Any]) -> dict[str, Any]:
     training_config = cfg.get("training", {})
     evaluation_config = cfg.get("evaluation", {})
     test_fold = int(data_config.get("test_fold", 0))
-    heatmap_threshold = float(evaluation_config.get("heatmap_threshold", 0.2))
+    heatmap_threshold = evaluation_config.get("heatmap_threshold", 0.2)
 
     (
         train_samples,
@@ -307,12 +312,16 @@ def train_one_fold(cfg: dict[str, Any]) -> dict[str, Any]:
             "(no improvement during training). Using current model state."
         )
 
+    outlier_angle_thresh = float(evaluation_config.get("outlier_angle_threshold_deg", 10.0))
+    outlier_rho_thresh = float(evaluation_config.get("outlier_rho_threshold_px", 8.0))
     test_metrics = evaluate(
         model,
         test_loader,
         device,
         image_size,
         heatmap_threshold,
+        outlier_angle_thresh=outlier_angle_thresh,
+        outlier_rho_thresh=outlier_rho_thresh,
     )
     print(
         f"[TEST] fold={test_fold}  "
