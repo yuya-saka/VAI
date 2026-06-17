@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from scipy import ndimage
 
 ThresholdSpec = float | str | dict[str, Any] | None
 ADAPTIVE_THRESHOLD_MIN = 0.15
@@ -128,6 +129,14 @@ def detect_line_moments(
     if threshold_value is not None:
         hm = np.where(hm >= threshold_value, hm, 0.0)
 
+    # ピークを含む連結成分のみ残す: 離れた過検出がモーメントを支配するのを防ぐ
+    binary = (hm > 0).astype(np.uint8)
+    labeled, n_components = ndimage.label(binary)
+    if n_components > 1:
+        peak_y, peak_x = np.unravel_index(hm.argmax(), hm.shape)
+        main_label = labeled[peak_y, peak_x]
+        hm = hm * (labeled == main_label)
+
     M00 = hm.sum()
     if M00 < min_mass:
         return None
@@ -209,6 +218,84 @@ def detect_line_moments(
         "mu11": float(mu11),
         "threshold": None if threshold_value is None else float(threshold_value),
     }
+
+
+def extract_pred_params_cc_batch(
+    heatmaps: np.ndarray,
+    image_size: int,
+    threshold: ThresholdSpec = None,
+    extend_ratio: float = 1.10,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    CC フィルタ済みのモーメント法で (B, C, 2) の (phi, rho) と (B, C) の confidence を返す
+
+    evaluate() のバリデーションパスで extract_pred_line_params_batch の代わりに使う
+
+    引数:
+        heatmaps: (B, C, H, W) numpy array（sigmoid後）
+        image_size: 画像サイズ
+        threshold: ヒートマップ閾値
+        extend_ratio: detect_line_moments に渡す端点延長率（phi/rho 計算には不使用）
+
+    戻り値:
+        pred_params: (B, C, 2) float32 numpy array (phi_rad, rho_normalized)
+        confidence:  (B, C) float32 numpy array (有効=1.0, 無効=0.0)
+    """
+    B, C, _, _ = heatmaps.shape
+    pred_params = np.zeros((B, C, 2), dtype=np.float32)
+    confidence = np.zeros((B, C), dtype=np.float32)
+    for b in range(B):
+        for c in range(C):
+            result = detect_line_moments(
+                heatmaps[b, c],
+                threshold=threshold,
+                extend_ratio=extend_ratio,
+            )
+            if result is not None:
+                phi, rho = moments_to_phi_rho(result, image_size)
+                pred_params[b, c, 0] = phi
+                pred_params[b, c, 1] = rho
+                confidence[b, c] = 1.0
+    return pred_params, confidence
+
+
+def moments_to_phi_rho(
+    result: dict[str, Any],
+    image_size: int,
+) -> tuple[float, float]:
+    """
+    detect_line_moments の出力から (phi_rad, rho_normalized) を計算する
+
+    extract_gt_line_params と同一の規則を使用:
+        - phi ∈ [0, π): 直線の法線方向角
+        - rho_normalized: 正規化済み符号付き距離
+
+    CC フィルタ済みの重心・角度を使うため、
+    extract_pred_line_params_batch より外れ値耐性が高い
+
+    引数:
+        result: detect_line_moments の戻り値（None でないこと）
+        image_size: 画像サイズ（正方形を仮定）
+
+    戻り値:
+        (phi_rad, rho_normalized)
+    """
+    theta = float(result["angle_rad"])
+    # 直線方向 → 法線ベクトル (90° 反時計回り)
+    nx = -math.sin(theta)
+    ny = math.cos(theta)
+    # phi ∈ [0, π) 正規化
+    if ny < 0 or (ny == 0 and nx < 0):
+        nx, ny = -nx, -ny
+    phi = math.atan2(ny, nx)
+    # 重心: 画像座標系 → 数学座標系
+    center = image_size / 2.0
+    xbar_img, ybar_img = result["centroid"]
+    xbar = xbar_img - center
+    ybar = -(ybar_img - center)
+    rho = nx * xbar + ny * ybar
+    D = math.sqrt(image_size**2 + image_size**2)
+    return float(phi), float(rho / D)
 
 
 # -------------------------

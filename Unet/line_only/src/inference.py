@@ -13,7 +13,7 @@ import torch.nn as nn
 
 from ..utils import losses as line_losses
 from ..utils import metrics as line_metrics
-from ..utils.detection import LinesJsonCache, detect_line_moments, line_extent
+from ..utils.detection import LinesJsonCache, detect_line_moments, line_extent, moments_to_phi_rho
 from ..utils.visualization import draw_heatmap_with_lines, draw_line_comparison
 from .model import VERTEBRA_TO_IDX
 
@@ -188,16 +188,9 @@ def predict_lines_and_eval_test(
         images = batch["image"].to(device).float()
         vertebra_indices = _vertebra_indices(batch, device)
         pred_heatmaps = torch.sigmoid(model(images, vertebra_indices))
-        pred_params, confidence = line_losses.extract_pred_line_params_batch(
-            pred_heatmaps,
-            image_size,
-            threshold=heatmap_threshold,
-        )
 
         images_numpy = images.cpu().numpy()
         heatmaps_numpy = pred_heatmaps.cpu().numpy()
-        params_numpy = pred_params.cpu().numpy()
-        confidence_numpy = confidence.cpu().numpy()
 
         for batch_index in range(heatmaps_numpy.shape[0]):
             sample = batch["sample"][batch_index]
@@ -216,19 +209,18 @@ def predict_lines_and_eval_test(
                     gt_points,
                     image_size,
                 )
-                pred_phi = float(params_numpy[batch_index, channel, 0])
-                pred_rho = float(params_numpy[batch_index, channel, 1])
-                pred_confidence = float(confidence_numpy[batch_index, channel])
                 gt_length = line_extent(gt_points)
                 length = gt_length if gt_length > 1e-6 else None
-                pred_lines[line_name] = detect_line_moments(
+                # CC フィルタ済みの結果をメトリクス・視覚化の両方に使う
+                result = detect_line_moments(
                     heatmaps_numpy[batch_index, channel],
                     length_px=length,
                     extend_ratio=line_extend_ratio,
                     threshold=heatmap_threshold,
                 )
+                pred_lines[line_name] = result
 
-                if np.isnan(gt_phi) or pred_confidence <= 0:
+                if np.isnan(gt_phi) or result is None:
                     sample_metrics[line_name] = {
                         "angle_error_deg": None,
                         "rho_error_px": None,
@@ -236,6 +228,7 @@ def predict_lines_and_eval_test(
                     }
                     continue
 
+                pred_phi, pred_rho = moments_to_phi_rho(result, image_size)
                 angle_error, rho_error, perpendicular_distance = _line_metrics(
                     gt_points,
                     gt_phi,

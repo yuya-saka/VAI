@@ -1,7 +1,25 @@
 # Unet/ 作業サマリー
 
 <!-- ルール: 現在地・次アクションのみ。完了詳細は work-logs/YYYY-MM-DD.md へ。上限60行 -->
-<!-- 最終更新: 2026-06-16 -->
+<!-- 最終更新: 2026-06-17 -->
+
+## line_only 最新結果（line_20260616, sig4.0_ALL）
+
+| 実験 | angle mean | angle p90 | worst | outlier ≥10° |
+|------|:---:|:---:|:---:|:---:|
+| blob追加（CC なし） | 5.076° | 10.52° | 88.79° | 11.3% |
+| CC-metrics（旧ckpt + CC） | 4.804° | 10.193° | 38.65° | 10.5% |
+| **CC適用（新規学習 + CC）** | **4.926°** | **10.45°** | **54.1°** | **10.9%** |
+
+CC フィルタ（連結成分でピーク周辺のみ残す）により外れ値を大幅削減。  
+CC適用 vs CC-metrics の差は training variability によるもの（CC 自体の問題ではない）。
+
+## スライス分析による知見（2026-06-17）
+
+- **同部位に非外れ値スライスが必ず存在**（angle ≥10°・rho ≥8px ともに 100%）
+- スライス選択または ensemble で外れ値を原理的に排除できる
+- 失敗パターン: 特定チャンネルが端スライスで局所崩壊（他チャンネルは正常）
+- 最良スライス選択後: mean 4.93° → **3.39°**、outlier 10.9% → **1.1%**
 
 ## 精度比較（5-fold CV 平均）
 
@@ -47,13 +65,25 @@
 - peak_dist は reg/sig4.0 が最良、angle/rho は aug変換修正 が全実験中最良
 - reg + aug変換修正 の組み合わせが次の候補
 
+## 領域分割評価（2026-06-17, sig4.0_ALL(CC適用)）
+
+予測線 → z 伝播 → 領域マスク → GT との 3D Dice 評価パイプラインを構築。
+
+| | 3D Dice mean | c1 椎体 | c2 右孔 | c3 左孔 | c4 後方 |
+|---|:---:|:---:|:---:|:---:|:---:|
+| 全由来（284 椎骨） | **0.829** | 0.898 | 0.740 | 0.749 | 0.929 |
+| 外挿のみ | 0.798 | 0.887 | 0.683 | 0.700 | 0.920 |
+
+- per-slice Dice (0.750) より 3D Dice (0.829) が高い → 端スライスの GT 極小が原因
+- 椎間孔(c2/c3)低精度 = junction ズレへの敏感さ + GT 自体が小さい（端スライス）
+- 実装: `Unet/line_only/utils/region_eval.py` / `Unet/debug/eval_region_3d.py`
+- 出力: `outputs/…/sig4.0_ALL(CC適用)/region_eval_3d/` (summary.json / details/ / viz/)
+
 ## 保留タスク
 
-- **次回**: line_20260616/sig3.5_ALL で全 fold 学習実行・外れ値率推移を wandb 確認
-- multitask/ で aug 変換修正の実験実施（line_only の改善効果確認）
-- reg + aug変換修正 の組み合わせ実験
+- スライス ensemble / 信頼度ベース選択の実装（M00 を信頼度スコアに使用）
+- multitask/ で aug 変換修正の実験実施
 - `compute_perpendicular_distance` Y符号バグ修正（4ファイル共通）
-- `weight_decay` を 1e-4 に下げるか検討（データ増による正則化緩和）
 
 ---
 
@@ -68,7 +98,8 @@
 
 | 日付 | 主な内容 |
 |------|---------|
-| [2026-06-16](work-logs/2026-06-16.md) | config移動・best epoch→peak_dist_mean・val/test外れ値率追加・LR/BS増量 |
+| [2026-06-17](work-logs/2026-06-17.md) | CC フィルタ実装・全パス統一（val/test）・angle 5.076°→4.804°・worst 88°→38° |
+| [2026-06-16](work-logs/2026-06-16.md) | config移動・best epoch→angle_error_deg・Blob IoU追加・LR/BS増量 |
 | [2026-06-15](work-logs/2026-06-15.md) | line_only trainer 責務分割・公開API互換維持・テスト収集整理 |
 | [2026-04-20](work-logs/2026-04-20.md) | パイプライン正当性確認・perp_dist Y符号バグ発見・V字型仮説否定 |
 | [2026-04-16](work-logs/2026-04-16.md) | multitask/ に aug 変換修正を移植（19/19 pass） |

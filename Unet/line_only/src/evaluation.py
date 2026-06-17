@@ -11,9 +11,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..utils import losses as line_losses
 from ..utils import metrics as line_metrics
+from ..utils.detection import extract_pred_params_cc_batch
 from ..utils.metrics import collect_blob_ious
+from ..utils import losses as line_losses
 from .model import VERTEBRA_TO_IDX
 
 Batch = dict[str, Any]
@@ -89,11 +90,14 @@ def evaluate(
             continue
 
         gt_params = gt_params.to(device).float()
-        pred_params, confidence = line_losses.extract_pred_line_params_batch(
-            pred_heatmaps,
+        # CC フィルタ済みの numpy パスで phi/rho を抽出
+        pred_params_np, confidence_np = extract_pred_params_cc_batch(
+            pred_numpy,
             image_size,
             threshold=heatmap_threshold,
         )
+        pred_params = torch.from_numpy(pred_params_np).to(device)
+        confidence = torch.from_numpy(confidence_np).to(device)
         valid_mask = ~torch.isnan(gt_params).any(dim=-1) & (confidence > 0)
         angle_errors.extend(
             line_metrics.collect_angle_errors(pred_params, gt_params, valid_mask)

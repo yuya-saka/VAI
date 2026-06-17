@@ -123,17 +123,23 @@ def resolve_output_dir(exp_dir: Path, output_dir: Path | None) -> Path:
 
 
 def discover_test_line_dirs(exp_dir: Path) -> list[tuple[str, Path]]:
-    """test_lines ディレクトリを fold 単位で探索する"""
+    """test_lines ディレクトリを fold 単位で探索する（test_lines_reeval を優先）"""
     candidates: list[tuple[str, Path]] = []
 
     vis_dir = exp_dir / "vis"
     if vis_dir.exists():
-        for fold_dir in sorted(vis_dir.glob("fold*/test_lines")):
+        for fold_dir in sorted(vis_dir.glob("fold*/test_lines_reeval")):
             candidates.append((fold_dir.parent.name, fold_dir))
+        if not candidates:
+            for fold_dir in sorted(vis_dir.glob("fold*/test_lines")):
+                candidates.append((fold_dir.parent.name, fold_dir))
 
     if not candidates and exp_dir.name == "vis":
-        for fold_dir in sorted(exp_dir.glob("fold*/test_lines")):
+        for fold_dir in sorted(exp_dir.glob("fold*/test_lines_reeval")):
             candidates.append((fold_dir.parent.name, fold_dir))
+        if not candidates:
+            for fold_dir in sorted(exp_dir.glob("fold*/test_lines")):
+                candidates.append((fold_dir.parent.name, fold_dir))
 
     if not candidates and exp_dir.name == "test_lines":
         candidates.append((exp_dir.parent.name, exp_dir))
