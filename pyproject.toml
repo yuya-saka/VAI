@@ -21,6 +21,7 @@ dependencies = [
     "tqdm>=4.67.3",
     "scikit-learn>=1.9.0",
     "pydicom>=3.0.2",
+    "totalsegmentator>=2.14.0",
 ]
 
 [project.optional-dependencies]
