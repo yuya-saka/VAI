@@ -5,8 +5,9 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, cast
+from typing import Any, Final, cast
 
+import nibabel as nib
 import numpy as np
 import numpy.typing as npt
 import pydicom
@@ -215,9 +216,7 @@ def load_dicom_series(
             atol=spacing_tolerance,
             rtol=0.0,
         ):
-            raise GeometryValidationError(
-                f"Inconsistent pixel spacing: {record.path}"
-            )
+            raise GeometryValidationError(f"Inconsistent pixel spacing: {record.path}")
         if (record.rows, record.columns) != (first.rows, first.columns):
             raise GeometryValidationError(
                 f"Inconsistent image dimensions: {record.path}"
@@ -228,10 +227,7 @@ def load_dicom_series(
         key=lambda record: float(np.dot(record.image_position, normal)),
     )
     projected_positions = np.asarray(
-        [
-            float(np.dot(record.image_position, normal))
-            for record in ordered_records
-        ],
+        [float(np.dot(record.image_position, normal)) for record in ordered_records],
         dtype=np.float64,
     )
     slice_spacing, spacing_deviations = _slice_spacing(projected_positions)
@@ -265,6 +261,79 @@ def load_dicom_series(
     )
 
 
+def load_approximate_dicom_series_from_nifti(
+    study_directory: Path,
+    reference_nifti_path: Path,
+) -> DicomSeriesGeometry:
+    """Build regularized geometry from a repaired NIfTI affine."""
+    if not reference_nifti_path.is_file():
+        raise FileNotFoundError(f"Reference NIfTI not found: {reference_nifti_path}")
+    paths = sorted(
+        path
+        for path in study_directory.iterdir()
+        if path.is_file() and path != reference_nifti_path
+    )
+    records = tuple(_read_header(path) for path in paths)
+    if not records:
+        raise GeometryValidationError("DICOM directory contains no files")
+
+    image: Any = nib.load(reference_nifti_path)
+    shape = tuple(int(value) for value in image.shape)
+    if len(shape) != 3:
+        raise GeometryValidationError("Reference NIfTI must be three-dimensional")
+    first = records[0]
+    expected_shape = (first.columns, first.rows, len(records))
+    if shape != expected_shape:
+        raise GeometryValidationError(
+            f"Reference NIfTI shape {shape} does not match {expected_shape}"
+        )
+
+    ras_to_lps_4 = np.diag((-1.0, -1.0, 1.0, 1.0))
+    affine_lps = ras_to_lps_4 @ np.asarray(image.affine, dtype=np.float64)
+    row_vector = affine_lps[:3, 0]
+    column_vector = affine_lps[:3, 1]
+    slice_vector = affine_lps[:3, 2]
+    row_spacing = float(np.linalg.norm(column_vector))
+    column_spacing = float(np.linalg.norm(row_vector))
+    slice_spacing = float(np.linalg.norm(slice_vector))
+    if min(row_spacing, column_spacing, slice_spacing) <= 0.0:
+        raise GeometryValidationError("Reference NIfTI affine has a zero axis")
+
+    row_direction = row_vector / column_spacing
+    column_direction = column_vector / row_spacing
+    slice_normal = slice_vector / slice_spacing
+    ordered_records = sorted(
+        records,
+        key=lambda record: float(np.dot(record.image_position, slice_normal)),
+    )
+    origin = affine_lps[:3, 3]
+    slices = tuple(
+        DicomSliceMetadata(
+            path=record.path,
+            sop_instance_uid=record.sop_instance_uid,
+            series_instance_uid=record.series_instance_uid,
+            instance_number=record.instance_number,
+            image_position=_vector3_tuple(origin + index * slice_vector),
+            slice_position_mm=float(
+                np.dot(origin + index * slice_vector, slice_normal)
+            ),
+        )
+        for index, record in enumerate(ordered_records)
+    )
+    return DicomSeriesGeometry(
+        series_instance_uid=first.series_instance_uid,
+        slices=slices,
+        row_direction=_vector3_tuple(row_direction),
+        column_direction=_vector3_tuple(column_direction),
+        slice_normal=_vector3_tuple(slice_normal),
+        pixel_spacing=(row_spacing, column_spacing),
+        slice_spacing_mm=slice_spacing,
+        rows=first.rows,
+        columns=first.columns,
+        spacing_deviations_mm=(0.0,) * (len(slices) - 1),
+    )
+
+
 def _read_header(path: Path) -> _HeaderRecord:
     try:
         dataset = pydicom.dcmread(
@@ -289,9 +358,7 @@ def _read_header(path: Path) -> _HeaderRecord:
             _float_tuple(dataset.PixelSpacing, 2),
         )
         instance_number = (
-            int(dataset.InstanceNumber)
-            if "InstanceNumber" in dataset
-            else None
+            int(dataset.InstanceNumber) if "InstanceNumber" in dataset else None
         )
         return _HeaderRecord(
             path=path,
@@ -383,7 +450,5 @@ def _interpolate_with_extrapolation(
     source_low = source[indices]
     source_high = source[indices + 1]
     fractions = (flat_values - source_low) / (source_high - source_low)
-    interpolated = target[indices] + fractions * (
-        target[indices + 1] - target[indices]
-    )
+    interpolated = target[indices] + fractions * (target[indices + 1] - target[indices])
     return interpolated.reshape(values_array.shape)

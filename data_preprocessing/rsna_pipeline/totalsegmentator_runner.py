@@ -16,7 +16,7 @@ import traceback
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Final, Literal
+from typing import Any, Final, Literal
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
@@ -213,6 +213,46 @@ def convert_dicom_to_temporary_nifti(
 ) -> None:
     """Convert one validated DICOM series to a temporary NIfTI with dcm2niix."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    command = _dcm2niix_command(study_directory, output_path)
+    _run_dcm2niix(command, output_path)
+
+    if output_path.is_file():
+        return
+
+    candidates = _conversion_candidates(output_path)
+    if len(candidates) > 1:
+        for candidate in candidates:
+            candidate.unlink()
+        merge_command = _dcm2niix_command(
+            study_directory,
+            output_path,
+            force_merge=True,
+        )
+        _run_dcm2niix(merge_command, output_path)
+        if output_path.is_file():
+            _repair_missing_slice_axis(output_path, study_directory)
+            return
+        candidates = _conversion_candidates(output_path)
+
+    if len(candidates) != 1:
+        raise SegmentationError(
+            f"dcm2niix produced {len(candidates)} candidate NIfTI files"
+        )
+    candidate = candidates[0]
+    if candidate.suffix == ".gz":
+        candidate.replace(output_path)
+        return
+    with candidate.open("rb") as source, gzip.open(output_path, "wb") as destination:
+        shutil.copyfileobj(source, destination)
+    candidate.unlink()
+
+
+def _dcm2niix_command(
+    study_directory: Path,
+    output_path: Path,
+    *,
+    force_merge: bool = False,
+) -> list[str]:
     command = [
         "dcm2niix",
         "-z",
@@ -225,6 +265,12 @@ def convert_dicom_to_temporary_nifti(
         str(output_path.parent),
         str(study_directory),
     ]
+    if force_merge:
+        command[1:1] = ["-m", "y"]
+    return command
+
+
+def _run_dcm2niix(command: list[str], output_path: Path) -> None:
     result = subprocess.run(
         command,
         capture_output=True,
@@ -232,29 +278,79 @@ def convert_dicom_to_temporary_nifti(
         timeout=DEFAULT_CONVERSION_TIMEOUT_SECONDS,
         check=False,
     )
-    if result.returncode != 0:
+    if result.returncode != 0 and not _conversion_candidates(output_path):
         error_message = result.stderr.strip() or result.stdout.strip()
         raise SegmentationError(
             f"dcm2niix failed with code {result.returncode}: "
             f"{error_message[-500:]}"
         )
 
-    if output_path.is_file():
-        return
+
+def _conversion_candidates(output_path: Path) -> list[Path]:
     output_prefix = output_path.name.removesuffix(".nii.gz")
     candidates = sorted(output_path.parent.glob(f"{output_prefix}*.nii.gz"))
     candidates.extend(sorted(output_path.parent.glob(f"{output_prefix}*.nii")))
-    if len(candidates) != 1:
-        raise SegmentationError(
-            f"dcm2niix produced {len(candidates)} candidate NIfTI files"
-        )
-    candidate = candidates[0]
-    if candidate.suffix == ".gz":
-        candidate.replace(output_path)
+    return candidates
+
+
+def _repair_missing_slice_axis(
+    nifti_path: Path,
+    study_directory: Path,
+) -> None:
+    import nibabel as nib
+    import numpy as np
+    import pydicom
+
+    image: Any = nib.load(nifti_path)
+    affine = np.asarray(image.affine, dtype=np.float64)
+    if np.linalg.norm(affine[:3, 2]) > 1e-6:
         return
-    with candidate.open("rb") as source, gzip.open(output_path, "wb") as destination:
-        shutil.copyfileobj(source, destination)
-    candidate.unlink()
+
+    positions = []
+    for dicom_path in study_directory.iterdir():
+        if not dicom_path.is_file():
+            continue
+        dataset = pydicom.dcmread(
+            dicom_path,
+            stop_before_pixels=True,
+            specific_tags=["ImagePositionPatient"],
+        )
+        positions.append(
+            np.asarray(dataset.ImagePositionPatient, dtype=np.float64)
+        )
+    if len(positions) != image.shape[2]:
+        raise SegmentationError(
+            "Cannot repair slice axis: DICOM and NIfTI slice counts differ"
+        )
+
+    position_array = np.stack(positions)
+    centered = position_array - position_array.mean(axis=0)
+    _, _, principal_axes = np.linalg.svd(centered, full_matrices=False)
+    principal_axis = principal_axes[0]
+    projections = position_array @ principal_axis
+    endpoint_indices = (int(np.argmin(projections)), int(np.argmax(projections)))
+    endpoints = position_array[list(endpoint_indices)]
+    endpoint_ras = endpoints * np.array([-1.0, -1.0, 1.0])
+    start_index = int(
+        np.argmin(np.linalg.norm(endpoint_ras - affine[:3, 3], axis=1))
+    )
+    end_index = 1 - start_index
+    slice_vector = (
+        endpoint_ras[end_index] - endpoint_ras[start_index]
+    ) / (image.shape[2] - 1)
+    if np.linalg.norm(slice_vector) <= 1e-6:
+        raise SegmentationError("Cannot repair zero-length slice axis")
+
+    repaired_affine = affine.copy()
+    repaired_affine[:3, 2] = slice_vector
+    repaired_image = nib.Nifti1Image(  # type: ignore[no-untyped-call]
+        np.asanyarray(image.dataobj),
+        repaired_affine,
+        image.header,
+    )
+    repaired_image.set_qform(repaired_affine, code=1)  # type: ignore[no-untyped-call]
+    repaired_image.set_sform(repaired_affine, code=1)  # type: ignore[no-untyped-call]
+    nib.save(repaired_image, nifti_path)
 
 
 def run_totalsegmentator(
