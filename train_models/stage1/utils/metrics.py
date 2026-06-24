@@ -145,6 +145,7 @@ def compute_level_metrics(
     y_true: NDArray,
     y_prob: NDArray,
     levels: NDArray,
+    threshold: float = 0.5,
 ) -> dict[str, dict]:
     """
     椎体レベル別の評価指標を計算する。
@@ -155,6 +156,7 @@ def compute_level_metrics(
         y_true: shape [N] の 0/1 ラベル
         y_prob: shape [N] の予測確率
         levels: shape [N] の椎体レベル文字列 ('C1'〜'C7')
+        threshold: 分類閾値（デフォルト 0.5）
 
     Returns:
         レベル名をキー、{n_pos, n_total, auroc, auprc, precision, recall, f1} を値とする dict
@@ -170,7 +172,7 @@ def compute_level_metrics(
         if mask.sum() == 0:
             continue
         yt, yp = y_true[mask], y_prob[mask]
-        prf = _prf_at_threshold(yt, yp, threshold=0.5)
+        prf = _prf_at_threshold(yt, yp, threshold=threshold)
         result[lv] = {
             "n_pos": int(yt.sum()),
             "n_total": int(mask.sum()),

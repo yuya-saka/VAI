@@ -7,14 +7,17 @@ from __future__ import annotations
 import random
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pandas as pd
 import torch
 import yaml
-from sklearn.model_selection import StratifiedGroupKFold
+import torch.distributed as dist
+from sklearn.model_selection import StratifiedGroupKFold, StratifiedShuffleSplit
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
-from .dataset import RSNAFractureDataset, get_train_transforms, get_valid_transforms
+from .dataset import RSNAFractureDataset, get_train_transforms
 
 VERTEBRAE = ["C1", "C2", "C3", "C4", "C5", "C6", "C7"]
 
@@ -28,8 +31,8 @@ def set_seed(seed: int = 42) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
 
 
 def seed_worker(worker_id: int) -> None:
@@ -37,6 +40,8 @@ def seed_worker(worker_id: int) -> None:
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
     random.seed(worker_seed)
+    cv2.setNumThreads(0)
+    torch.set_num_threads(1)
 
 
 # -------------------------
@@ -143,6 +148,59 @@ def collect_items(dataset_dir: Path, csv_path: Path) -> list[dict]:
 
 
 # -------------------------
+# Held-out Test 分離
+# -------------------------
+def split_test_holdout(
+    items: list[dict],
+    test_size: float = 0.2,
+    seed: int = 42,
+) -> tuple[list[dict], list[dict]]:
+    """
+    Study単位で test_size 割合を held-out test set として分離する。
+
+    この test set は学習・early stopping・モデル選択に一切使用しない。
+    stratify: study-level fracture label（患者レベルの骨折有無）
+
+    Args:
+        items: collect_items() の出力
+        test_size: テストセットの割合（デフォルト 0.2 = 20%）
+        seed: 乱数シード（固定して再現性を確保）
+
+    Returns:
+        (train_val_items, test_items)
+    """
+    study_label: dict[str, int] = {}
+    for item in items:
+        uid = item["study_uid"]
+        if uid not in study_label:
+            study_label[uid] = 0
+        study_label[uid] = max(study_label[uid], item["label"])
+
+    study_uids = np.array(list(study_label.keys()))
+    labels = np.array([study_label[uid] for uid in study_uids])
+
+    splitter = StratifiedShuffleSplit(
+        n_splits=1, test_size=test_size, random_state=seed
+    )
+    train_val_idx, test_idx = next(splitter.split(study_uids, labels))
+
+    train_val_uids = set(study_uids[train_val_idx])
+    test_uids = set(study_uids[test_idx])
+
+    train_val_items = [it for it in items if it["study_uid"] in train_val_uids]
+    test_items = [it for it in items if it["study_uid"] in test_uids]
+
+    n_tv_pos = sum(it["label"] for it in train_val_items)
+    n_test_pos = sum(it["label"] for it in test_items)
+    print(
+        f"[HOLDOUT] train_val={len(train_val_items)} (陽性={n_tv_pos})  "
+        f"test={len(test_items)} (陽性={n_test_pos})"
+    )
+
+    return train_val_items, test_items
+
+
+# -------------------------
 # K-Fold CV 分割
 # -------------------------
 def split_items_cv(
@@ -177,9 +235,7 @@ def split_items_cv(
     study_uids = list(study_label.keys())
     labels = np.array([study_label[uid] for uid in study_uids])
 
-    splitter = StratifiedGroupKFold(
-        n_splits=n_splits, shuffle=True, random_state=seed
-    )
+    splitter = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
     splits = list(splitter.split(study_uids, labels, groups=study_uids))
     train_idx, val_idx = splits[val_fold]
 
@@ -227,29 +283,48 @@ def create_data_loaders(
     p_rand_order = float(tr_cfg.get("p_rand_order", 0.2))
     batch_size = int(tr_cfg.get("batch_size", 8))
     num_workers = int(tr_cfg.get("num_workers", 4))
+    persistent_workers = bool(tr_cfg.get("persistent_workers", True))
+    prefetch_factor = int(tr_cfg.get("prefetch_factor", 4))
 
     train_transform = get_train_transforms(aug_cfg)
-    valid_transform = get_valid_transforms()
 
     train_ds = RSNAFractureDataset(
         train_items, mode="train", transform=train_transform, p_rand_order=p_rand_order
     )
     val_ds = RSNAFractureDataset(
-        val_items, mode="valid", transform=valid_transform, p_rand_order=0.0
+        val_items, mode="valid", transform=None, p_rand_order=0.0
     )
 
     g = torch.Generator()
     g.manual_seed(seed)
 
+    # DDP時はDistributedSamplerを使用（shuffle=FalseはSampler側で制御）
+    if dist.is_initialized():
+        train_sampler: DistributedSampler | None = DistributedSampler(
+            train_ds,
+            num_replicas=dist.get_world_size(),
+            rank=dist.get_rank(),
+            shuffle=True,
+            drop_last=True,
+        )
+    else:
+        train_sampler = None
+
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
         num_workers=num_workers,
         pin_memory=True,
         worker_init_fn=seed_worker,
         generator=g,
-        drop_last=True,
+        drop_last=(train_sampler is None),
+        **_worker_loader_options(
+            num_workers,
+            persistent_workers=persistent_workers,
+            prefetch_factor=prefetch_factor,
+        ),
     )
     val_loader = DataLoader(
         val_ds,
@@ -259,17 +334,64 @@ def create_data_loaders(
         pin_memory=True,
         worker_init_fn=seed_worker,
         generator=g,
+        **_worker_loader_options(
+            num_workers,
+            persistent_workers=persistent_workers,
+            prefetch_factor=prefetch_factor,
+        ),
     )
 
     return train_loader, val_loader
 
 
+def create_eval_data_loader(items: list[dict], cfg: dict) -> DataLoader:
+    """Create a shared optimized DataLoader for validation-style inference."""
+    tr_cfg = cfg.get("training", {})
+    batch_size = int(tr_cfg.get("batch_size", 8))
+    num_workers = int(tr_cfg.get("num_workers", 4))
+    persistent_workers = bool(tr_cfg.get("persistent_workers", True))
+    prefetch_factor = int(tr_cfg.get("prefetch_factor", 4))
+
+    dataset = RSNAFractureDataset(
+        items,
+        mode="valid",
+        transform=None,
+        p_rand_order=0.0,
+    )
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+        worker_init_fn=seed_worker,
+        **_worker_loader_options(
+            num_workers,
+            persistent_workers=persistent_workers,
+            prefetch_factor=prefetch_factor,
+        ),
+    )
+
+
+def _worker_loader_options(
+    num_workers: int,
+    *,
+    persistent_workers: bool,
+    prefetch_factor: int,
+) -> dict[str, bool | int]:
+    """Return DataLoader options that are valid only with worker processes."""
+    if num_workers == 0:
+        return {}
+    return {
+        "persistent_workers": persistent_workers,
+        "prefetch_factor": prefetch_factor,
+    }
+
+
 # -------------------------
 # モデル・オプティマイザ・スケジューラ作成
 # -------------------------
-def create_model_optimizer_scheduler(
-    cfg: dict, device: torch.device
-) -> tuple:
+def create_model_optimizer_scheduler(cfg: dict, device: torch.device) -> tuple:
     """
     モデル、最適化器、学習率スケジューラーを作成する。
 

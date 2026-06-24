@@ -9,7 +9,6 @@ ct.npy (15, 5, 224, 224) + vertebra_mask.npy (15, 224, 224)
 from __future__ import annotations
 
 import random
-from pathlib import Path
 
 import albumentations as A
 import cv2
@@ -30,20 +29,24 @@ def get_train_transforms(aug_cfg: dict) -> A.Compose:
     image_size = 224
     cutout_size = int(image_size * float(aug_cfg.get("cutout_ratio", 0.5)))
     border_mode = int(aug_cfg.get("ssr_border_mode", cv2.BORDER_REFLECT_101))
+    shift_limit = float(aug_cfg.get("shift_limit", 0.3))
+    scale_limit = float(aug_cfg.get("scale_limit", 0.3))
+    rotate_limit = float(aug_cfg.get("rotate_limit", 45))
 
     return A.Compose(
         [
             A.HorizontalFlip(p=float(aug_cfg.get("horizontal_flip_p", 0.5))),
             A.VerticalFlip(p=float(aug_cfg.get("vertical_flip_p", 0.5))),
             A.Transpose(p=float(aug_cfg.get("transpose_p", 0.5))),
-            A.RandomBrightness(
-                limit=float(aug_cfg.get("brightness_limit", 0.1)),
+            A.RandomBrightnessContrast(
+                brightness_limit=float(aug_cfg.get("brightness_limit", 0.1)),
+                contrast_limit=0.0,
                 p=float(aug_cfg.get("brightness_p", 0.7)),
             ),
-            A.ShiftScaleRotate(
-                shift_limit=float(aug_cfg.get("shift_limit", 0.3)),
-                scale_limit=float(aug_cfg.get("scale_limit", 0.3)),
-                rotate_limit=int(aug_cfg.get("rotate_limit", 45)),
+            A.Affine(
+                translate_percent=(-shift_limit, shift_limit),
+                scale=(1.0 - scale_limit, 1.0 + scale_limit),
+                rotate=(-rotate_limit, rotate_limit),
                 border_mode=border_mode,
                 p=float(aug_cfg.get("ssr_p", 0.7)),
             ),
@@ -52,7 +55,9 @@ def get_train_transforms(aug_cfg: dict) -> A.Compose:
                     A.MotionBlur(blur_limit=3),
                     A.MedianBlur(blur_limit=3),
                     A.GaussianBlur(blur_limit=3),
-                    A.GaussNoise(var_limit=(3.0, 9.0)),
+                    A.GaussNoise(
+                        std_range=(np.sqrt(3.0) / 255.0, np.sqrt(9.0) / 255.0)
+                    ),
                 ],
                 p=float(aug_cfg.get("blur_noise_p", 0.5)),
             ),
@@ -64,9 +69,9 @@ def get_train_transforms(aug_cfg: dict) -> A.Compose:
                 p=float(aug_cfg.get("distortion_p", 0.5)),
             ),
             A.CoarseDropout(
-                max_holes=1,
-                max_height=cutout_size,
-                max_width=cutout_size,
+                num_holes_range=(1, 1),
+                hole_height_range=(cutout_size, cutout_size),
+                hole_width_range=(cutout_size, cutout_size),
                 p=float(aug_cfg.get("cutout_p", 0.5)),
             ),
         ]
@@ -84,7 +89,8 @@ class RSNAFractureDataset(Dataset):
 
     ct.npy (15, 5, 224, 224) uint8 と
     vertebra_mask.npy (15, 224, 224) uint8 を読み込み、
-    per-sliceでaugmentationを適用して (15, 6, 224, 224) float32 を返す。
+    per-sliceでaugmentationを適用して (15, 6, 224, 224) uint8 を返す。
+    float32変換と0-1正規化はGPU転送後にtrainer側で行う。
 
     Args:
         items: 各要素が
@@ -114,36 +120,32 @@ class RSNAFractureDataset(Dataset):
         item = self.items[idx]
         label = int(item["label"])
 
-        ct = np.load(item["ct_path"])      # (15, 5, 224, 224) uint8
-        mask = np.load(item["mask_path"])  # (15, 224, 224) uint8
+        ct = np.load(item["ct_path"], allow_pickle=False)
+        mask = np.load(item["mask_path"], allow_pickle=False)
 
         n_slices = ct.shape[0]
-        images = np.zeros((n_slices, 6, 224, 224), dtype=np.float32)
+        if self.transform is None:
+            images = np.concatenate([ct, mask[:, np.newaxis]], axis=1)
+        else:
+            images = np.empty((n_slices, 6, 224, 224), dtype=np.uint8)
 
-        for s in range(n_slices):
-            ct_slice = ct[s].transpose(1, 2, 0)  # (224, 224, 5) uint8
-            mask_slice = mask[s]                   # (224, 224) uint8
+            for s in range(n_slices):
+                ct_slice = ct[s].transpose(1, 2, 0)
+                mask_slice = mask[s]
 
-            if self.transform is not None:
                 augmented = self.transform(image=ct_slice, mask=mask_slice)
-                ct_aug = augmented["image"]        # (224, 224, 5) uint8
-                mask_aug = augmented["mask"]       # (224, 224) uint8
-            else:
-                ct_aug = ct_slice
-                mask_aug = mask_slice
+                ct_aug = augmented["image"]
+                mask_aug = augmented["mask"]
 
-            # CT 5ch + mask 1ch を結合して (224, 224, 6) → (6, 224, 224)
-            combined = np.concatenate(
-                [ct_aug, mask_aug[:, :, np.newaxis]], axis=2
-            )  # (224, 224, 6) uint8
-            images[s] = combined.transpose(2, 0, 1).astype(np.float32) / 255.0
+                combined = np.concatenate([ct_aug, mask_aug[:, :, np.newaxis]], axis=2)
+                images[s] = combined.transpose(2, 0, 1)
 
         # スライス順序ランダム化（train時のみ）
         if self.mode == "train" and random.random() < self.p_rand_order:
             indices = np.random.permutation(n_slices)
             images = images[indices]
 
-        images_t = torch.from_numpy(images)                   # (15, 6, 224, 224)
+        images_t = torch.from_numpy(images)
         labels_t = torch.full((n_slices,), label, dtype=torch.float32)  # (15,) 全同値
 
         return images_t, labels_t
