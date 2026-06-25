@@ -8,7 +8,6 @@ timm backbone (EfficientNetV2-S) + BiLSTM + per-slice head。
 from __future__ import annotations
 
 import timm
-import torch
 import torch.nn as nn
 from torch import Tensor
 
@@ -31,6 +30,7 @@ class TimmModel(nn.Module):
         lstm_hidden: LSTM隠れ層サイズ
         lstm_layers: LSTM積み重ね層数
         out_dim: 出力次元（1 = binary fracture logit）
+        use_patient_head: patient-level 補助headを有効化するか
         pretrained: ImageNet事前学習重みを使用するか
     """
 
@@ -45,11 +45,13 @@ class TimmModel(nn.Module):
         lstm_hidden: int = 256,
         lstm_layers: int = 2,
         out_dim: int = 1,
+        use_patient_head: bool = False,
         pretrained: bool = True,
     ) -> None:
         super().__init__()
         self.n_slices = n_slices
         self.in_chans = in_chans
+        self.use_patient_head = use_patient_head
 
         # timm backbone: 最終分類層をIdentityに置換して特徴量を取得
         self.encoder = timm.create_model(
@@ -85,6 +87,22 @@ class TimmModel(nn.Module):
             nn.LeakyReLU(0.1),
             nn.Linear(lstm_hidden, out_dim),
         )
+        if use_patient_head:
+            self.patient_lstm = nn.LSTM(
+                hdim,
+                lstm_hidden,
+                num_layers=lstm_layers,
+                dropout=lstm_drop,
+                bidirectional=True,
+                batch_first=True,
+            )
+            self.patient_head = nn.Sequential(
+                nn.Linear(lstm_hidden * 2, lstm_hidden),
+                nn.BatchNorm1d(lstm_hidden),
+                nn.Dropout(drop_rate_last),
+                nn.LeakyReLU(0.1),
+                nn.Linear(lstm_hidden, 1),
+            )
 
     @staticmethod
     def _get_feature_dim(backbone: str) -> int:
@@ -104,23 +122,31 @@ class TimmModel(nn.Module):
         # 未知モデルはダミーforwardで取得
         return 1280
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor) -> Tensor | tuple[Tensor, Tensor]:
         """
         Args:
             x: shape (bs, n_slices, in_chans, H, W)
 
         Returns:
             per-slice logits: shape (bs, n_slices)
+            use_patient_head=True の場合は (per-slice logits, patient logits)
         """
         bs = x.shape[0]
         # 全スライスをバッチ次元に展開して一括処理
         x = x.view(bs * self.n_slices, self.in_chans, x.shape[-2], x.shape[-1])
         feat = self.encoder(x)                          # (bs*n_slices, hdim)
         feat = feat.view(bs, self.n_slices, -1)         # (bs, n_slices, hdim)
-        feat, _ = self.lstm(feat)                       # (bs, n_slices, lstm_hidden*2)
-        feat = feat.contiguous().view(bs * self.n_slices, -1)  # (bs*n_slices, lstm_hidden*2)
-        feat = self.head(feat)                          # (bs*n_slices, 1)
-        return feat.view(bs, self.n_slices).contiguous()  # (bs, n_slices)
+        slice_feat, _ = self.lstm(feat)                 # (bs, n_slices, lstm_hidden*2)
+        slice_feat = slice_feat.contiguous().view(bs * self.n_slices, -1)
+        slice_logits = self.head(slice_feat)            # (bs*n_slices, 1)
+        slice_logits = slice_logits.view(bs, self.n_slices).contiguous()
+
+        if not self.use_patient_head:
+            return slice_logits
+
+        patient_feat, _ = self.patient_lstm(feat)
+        patient_logits = self.patient_head(patient_feat[:, 0]).view(bs)
+        return slice_logits, patient_logits
 
     def backbone_parameters(self) -> list[nn.Parameter]:
         """encoder (timm backbone) のパラメータ。differential LR用。"""
@@ -128,4 +154,8 @@ class TimmModel(nn.Module):
 
     def head_parameters(self) -> list[nn.Parameter]:
         """LSTM + 分類headのパラメータ。differential LR用。"""
-        return list(self.lstm.parameters()) + list(self.head.parameters())
+        params = list(self.lstm.parameters()) + list(self.head.parameters())
+        if self.use_patient_head:
+            params += list(self.patient_lstm.parameters())
+            params += list(self.patient_head.parameters())
+        return params

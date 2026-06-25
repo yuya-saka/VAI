@@ -11,8 +11,8 @@ import cv2
 import numpy as np
 import pandas as pd
 import torch
-import yaml
 import torch.distributed as dist
+import yaml
 from sklearn.model_selection import StratifiedGroupKFold, StratifiedShuffleSplit
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
@@ -113,6 +113,9 @@ def collect_items(dataset_dir: Path, csv_path: Path) -> list[dict]:
     for _, row in df.iterrows():
         study_uid = str(row["StudyInstanceUID"])
         study_dir = dataset_dir / study_uid
+        patient_label = int(row["patient_overall"]) if "patient_overall" in df.columns else int(
+            max(row[vertebra] for vertebra in VERTEBRAE)
+        )
 
         if not study_dir.exists():
             missing_studies += 1
@@ -131,6 +134,7 @@ def collect_items(dataset_dir: Path, csv_path: Path) -> list[dict]:
                     "study_uid": study_uid,
                     "vertebra": vertebra,
                     "label": label,
+                    "patient_label": patient_label,
                     "ct_path": ct_path,
                     "mask_path": mask_path,
                 }
@@ -276,11 +280,13 @@ def create_data_loaders(
         (train_loader, val_loader)
     """
     data_cfg = cfg.get("data", {})
+    model_cfg = cfg.get("model", {})
     tr_cfg = cfg.get("training", {})
     aug_cfg = cfg.get("augmentation", {})
 
     seed = int(data_cfg.get("random_seed", 42))
     p_rand_order = float(tr_cfg.get("p_rand_order", 0.2))
+    include_patient_label = bool(model_cfg.get("use_patient_head", False))
     batch_size = int(tr_cfg.get("batch_size", 8))
     num_workers = int(tr_cfg.get("num_workers", 4))
     persistent_workers = bool(tr_cfg.get("persistent_workers", True))
@@ -289,10 +295,18 @@ def create_data_loaders(
     train_transform = get_train_transforms(aug_cfg)
 
     train_ds = RSNAFractureDataset(
-        train_items, mode="train", transform=train_transform, p_rand_order=p_rand_order
+        train_items,
+        mode="train",
+        transform=train_transform,
+        p_rand_order=p_rand_order,
+        include_patient_label=include_patient_label,
     )
     val_ds = RSNAFractureDataset(
-        val_items, mode="valid", transform=None, p_rand_order=0.0
+        val_items,
+        mode="valid",
+        transform=None,
+        p_rand_order=0.0,
+        include_patient_label=include_patient_label,
     )
 
     g = torch.Generator()
@@ -346,7 +360,9 @@ def create_data_loaders(
 
 def create_eval_data_loader(items: list[dict], cfg: dict) -> DataLoader:
     """Create a shared optimized DataLoader for validation-style inference."""
+    model_cfg = cfg.get("model", {})
     tr_cfg = cfg.get("training", {})
+    include_patient_label = bool(model_cfg.get("use_patient_head", False))
     batch_size = int(tr_cfg.get("batch_size", 8))
     num_workers = int(tr_cfg.get("num_workers", 4))
     persistent_workers = bool(tr_cfg.get("persistent_workers", True))
@@ -357,6 +373,7 @@ def create_eval_data_loader(items: list[dict], cfg: dict) -> DataLoader:
         mode="valid",
         transform=None,
         p_rand_order=0.0,
+        include_patient_label=include_patient_label,
     )
     return DataLoader(
         dataset,
@@ -416,6 +433,7 @@ def create_model_optimizer_scheduler(cfg: dict, device: torch.device) -> tuple:
         lstm_hidden=int(model_cfg.get("lstm_hidden", 256)),
         lstm_layers=int(model_cfg.get("lstm_layers", 2)),
         out_dim=int(model_cfg.get("out_dim", 1)),
+        use_patient_head=bool(model_cfg.get("use_patient_head", False)),
         pretrained=bool(model_cfg.get("pretrained", True)),
     ).to(device)
 

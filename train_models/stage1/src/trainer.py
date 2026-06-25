@@ -18,7 +18,7 @@ from torch.amp import GradScaler, autocast
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-from utils.losses import criterion, mixup
+from utils.losses import criterion
 
 from .evaluation import compute_epoch_metrics
 from .experiment import (
@@ -41,6 +41,71 @@ def _prepare_images(images: torch.Tensor, device: torch.device) -> torch.Tensor:
     ).div_(255.0)
 
 
+def _unpack_batch(
+    batch: tuple,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, list[str], list[str]]:
+    """Support batches with optional patient labels and optional metadata."""
+    if len(batch) == 2:
+        images, labels = batch
+        return images, labels, None, [""] * images.shape[0], [""] * images.shape[0]
+    if len(batch) == 3:
+        images, labels, patient_labels = batch
+        return images, labels, patient_labels, [""] * images.shape[0], [""] * images.shape[0]
+    if len(batch) == 4:
+        images, labels, study_uids, vertebrae = batch
+        return images, labels, None, list(study_uids), list(vertebrae)
+    if len(batch) == 5:
+        images, labels, patient_labels, study_uids, vertebrae = batch
+        return images, labels, patient_labels, list(study_uids), list(vertebrae)
+    raise ValueError(f"Unsupported batch format: len={len(batch)}")
+
+
+def _split_model_output(output: torch.Tensor | tuple[torch.Tensor, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Return slice logits and optional patient logits from model output."""
+    if isinstance(output, tuple):
+        return output[0], output[1]
+    return output, None
+
+
+def _compute_loss(
+    slice_logits: torch.Tensor,
+    labels: torch.Tensor,
+    patient_logits: torch.Tensor | None,
+    patient_labels: torch.Tensor | None,
+    positive_weight: float,
+    slice_loss_weight: float,
+    patient_loss_weight: float,
+) -> torch.Tensor:
+    """Compute weighted slice loss plus optional patient-level auxiliary loss."""
+    slice_loss = criterion(slice_logits, labels, positive_weight)
+    if patient_logits is None or patient_labels is None or patient_loss_weight <= 0.0:
+        return slice_loss
+
+    patient_loss = criterion(patient_logits, patient_labels, positive_weight)
+    total_weight = slice_loss_weight + patient_loss_weight
+    return (slice_loss * slice_loss_weight + patient_loss * patient_loss_weight) / total_weight
+
+
+def _mixup_batch(
+    images: torch.Tensor,
+    labels: torch.Tensor,
+    patient_labels: torch.Tensor | None,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor | None,
+    torch.Tensor | None,
+    float,
+]:
+    """Apply one shared mixup permutation to slice and patient labels."""
+    indices = torch.randperm(images.size(0), device=images.device)
+    lam = float(np.random.uniform(0.0, 1.0))
+    mixed_images = images * lam + images[indices] * (1.0 - lam)
+    mixed_patient_labels = patient_labels[indices] if patient_labels is not None else None
+    return mixed_images, labels, labels[indices], patient_labels, mixed_patient_labels, lam
+
+
 def _train_epoch(
     model: nn.Module,
     loader: DataLoader,
@@ -49,6 +114,8 @@ def _train_epoch(
     device: torch.device,
     p_mixup: float,
     positive_weight: float,
+    slice_loss_weight: float,
+    patient_loss_weight: float,
     use_amp: bool,
 ) -> float:
     """
@@ -64,22 +131,49 @@ def _train_epoch(
 
     is_main = not dist.is_initialized() or dist.get_rank() == 0
     progress = tqdm(loader, desc="train", leave=False, dynamic_ncols=True, disable=not is_main)
-    for images, labels in progress:
+    for batch in progress:
+        images, labels, patient_labels, _, _ = _unpack_batch(batch)
         images = _prepare_images(images, device)
         labels = labels.to(device, non_blocking=True)  # (bs, 15)
+        if patient_labels is not None:
+            patient_labels = patient_labels.to(device, non_blocking=True)
 
         # mixup
         if p_mixup > 0.0 and torch.rand(1).item() < p_mixup:
-            images, labels_a, labels_b, lam = mixup(images, labels)
+            images, labels_a, labels_b, patient_labels_a, patient_labels_b, lam = _mixup_batch(
+                images, labels, patient_labels
+            )
             with autocast(device_type=device.type, enabled=amp_enabled):
-                logits = model(images)  # (bs, 15)
-                loss = lam * criterion(logits, labels_a, positive_weight) + (
-                    1 - lam
-                ) * criterion(logits, labels_b, positive_weight)
+                slice_logits, patient_logits = _split_model_output(model(images))
+                loss = lam * _compute_loss(
+                    slice_logits,
+                    labels_a,
+                    patient_logits,
+                    patient_labels_a,
+                    positive_weight,
+                    slice_loss_weight,
+                    patient_loss_weight,
+                ) + (1 - lam) * _compute_loss(
+                    slice_logits,
+                    labels_b,
+                    patient_logits,
+                    patient_labels_b,
+                    positive_weight,
+                    slice_loss_weight,
+                    patient_loss_weight,
+                )
         else:
             with autocast(device_type=device.type, enabled=amp_enabled):
-                logits = model(images)
-                loss = criterion(logits, labels, positive_weight)
+                slice_logits, patient_logits = _split_model_output(model(images))
+                loss = _compute_loss(
+                    slice_logits,
+                    labels,
+                    patient_logits,
+                    patient_labels,
+                    positive_weight,
+                    slice_loss_weight,
+                    patient_loss_weight,
+                )
 
         optimizer.zero_grad(set_to_none=True)
         scaler.scale(loss).backward()
@@ -99,6 +193,8 @@ def _validate(
     loader: DataLoader,
     device: torch.device,
     positive_weight: float,
+    slice_loss_weight: float,
+    patient_loss_weight: float,
     use_amp: bool,
 ) -> tuple[float, dict]:
     """
@@ -122,19 +218,23 @@ def _validate(
     is_main = not dist.is_initialized() or dist.get_rank() == 0
     progress = tqdm(loader, desc="valid", leave=False, dynamic_ncols=True, disable=not is_main)
     for batch in progress:
-        if len(batch) == 2:
-            images, labels = batch
-            study_uids_b = [""] * images.shape[0]
-            vertebrae_b = [""] * images.shape[0]
-        else:
-            images, labels, study_uids_b, vertebrae_b = batch
-
+        images, labels, patient_labels, study_uids_b, vertebrae_b = _unpack_batch(batch)
         images = _prepare_images(images, device)
         labels = labels.to(device, non_blocking=True)
+        if patient_labels is not None:
+            patient_labels = patient_labels.to(device, non_blocking=True)
 
         with autocast(device_type=device.type, enabled=amp_enabled):
-            logits = model(images)
-            loss = criterion(logits, labels, positive_weight)
+            logits, patient_logits = _split_model_output(model(images))
+            loss = _compute_loss(
+                logits,
+                labels,
+                patient_logits,
+                patient_labels,
+                positive_weight,
+                slice_loss_weight,
+                patient_loss_weight,
+            )
 
         total_loss += loss.item()
         n_batches += 1
@@ -188,6 +288,8 @@ def run_training_loop(
     epochs = int(tr_cfg.get("epochs", 75))
     p_mixup = float(tr_cfg.get("p_mixup", 0.5))
     positive_weight = float(tr_cfg.get("positive_weight", 2.0))
+    slice_loss_weight = float(tr_cfg.get("slice_loss_weight", 15.0))
+    patient_loss_weight = float(tr_cfg.get("patient_loss_weight", 1.0))
     patience = int(tr_cfg.get("early_stopping_patience", 15))
     use_amp = bool(tr_cfg.get("use_amp", True))
 
@@ -219,10 +321,18 @@ def run_training_loop(
             device,
             p_mixup,
             positive_weight,
+            slice_loss_weight,
+            patient_loss_weight,
             use_amp,
         )
         val_loss, metrics = _validate(
-            model, val_loader, device, positive_weight, use_amp
+            model,
+            val_loader,
+            device,
+            positive_weight,
+            slice_loss_weight,
+            patient_loss_weight,
+            use_amp,
         )
         scheduler.step()
 
@@ -416,10 +526,11 @@ def _collect_oof_predictions(
     all_probs: list[float] = []
     amp_enabled = use_amp and device.type == "cuda"
 
-    for images, _ in loader:
+    for batch in loader:
+        images, _, _, _, _ = _unpack_batch(batch)
         images = _prepare_images(images, device)
         with autocast(device_type=device.type, enabled=amp_enabled):
-            logits = model(images)
+            logits, _ = _split_model_output(model(images))
         probs = torch.sigmoid(logits).mean(dim=1).cpu().numpy().tolist()
         all_probs.extend(probs)
 
@@ -475,10 +586,11 @@ def predict_on_items(
         model.eval()
 
         fold_probs: list[float] = []
-        for images, _ in loader:
+        for batch in loader:
+            images, _, _, _, _ = _unpack_batch(batch)
             images = _prepare_images(images, device)
             with autocast(device_type=device.type, enabled=amp_enabled):
-                logits = model(images)
+                logits, _ = _split_model_output(model(images))
             probs = torch.sigmoid(logits).mean(dim=1).cpu().numpy().tolist()
             fold_probs.extend(probs)
 
@@ -518,5 +630,6 @@ def _extract_model_kwargs(cfg: dict) -> dict:
         "lstm_hidden": int(model_cfg.get("lstm_hidden", 256)),
         "lstm_layers": int(model_cfg.get("lstm_layers", 2)),
         "out_dim": int(model_cfg.get("out_dim", 1)),
+        "use_patient_head": bool(model_cfg.get("use_patient_head", False)),
         "pretrained": False,  # 推論時は不要
     }

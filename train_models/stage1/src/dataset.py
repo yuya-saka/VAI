@@ -99,6 +99,7 @@ class RSNAFractureDataset(Dataset):
         mode: "train" | "valid"
         transform: albumentations Compose（CT(image) + mask同期用）
         p_rand_order: スライス順序ランダム化確率（train時のみ有効）
+        include_patient_label: patient-level 補助ラベルを返すか
     """
 
     def __init__(
@@ -107,18 +108,21 @@ class RSNAFractureDataset(Dataset):
         mode: str = "train",
         transform: A.Compose | None = None,
         p_rand_order: float = 0.2,
+        include_patient_label: bool = False,
     ) -> None:
         self.items = items
         self.mode = mode
         self.transform = transform
         self.p_rand_order = p_rand_order
+        self.include_patient_label = include_patient_label
 
     def __len__(self) -> int:
         return len(self.items)
 
-    def __getitem__(self, idx: int) -> tuple[Tensor, Tensor]:
+    def __getitem__(self, idx: int) -> tuple[Tensor, Tensor] | tuple[Tensor, Tensor, Tensor]:
         item = self.items[idx]
         label = int(item["label"])
+        patient_label = int(item.get("patient_label", label))
 
         ct = np.load(item["ct_path"], allow_pickle=False)
         mask = np.load(item["mask_path"], allow_pickle=False)
@@ -147,5 +151,8 @@ class RSNAFractureDataset(Dataset):
 
         images_t = torch.from_numpy(images)
         labels_t = torch.full((n_slices,), label, dtype=torch.float32)  # (15,) 全同値
+        patient_label_t = torch.tensor(patient_label, dtype=torch.float32)
 
+        if self.include_patient_label:
+            return images_t, labels_t, patient_label_t
         return images_t, labels_t
