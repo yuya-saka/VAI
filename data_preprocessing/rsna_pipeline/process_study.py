@@ -38,6 +38,12 @@ from data_preprocessing.rsna_pipeline.orientation import (
     OrientationSearchResult,
     find_best_physical_orientation,
 )
+from data_preprocessing.rsna_pipeline.segmentation_plane_sampling import (
+    SampledSegmentationPlanes,
+    sample_segmentation_planes,
+    segmentation_sampling_metadata,
+    write_study_segmentation_outputs_atomic,
+)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
@@ -67,6 +73,7 @@ class StudyProcessingResult:
     orientations: dict[str, OrientationSearchResult]
     classifier_planes: dict[str, ClassifierPlanePlan]
     sampled_classifier_planes: dict[str, SampledClassifierPlanes]
+    sampled_segmentation_planes: dict[str, SampledSegmentationPlanes]
     metadata_path: Path
     output_directory: Path
 
@@ -78,6 +85,7 @@ def process_study(
     output_directory: Path,
     *,
     bbox_csv_path: Path | None = BOUNDING_BOX_CSV,
+    excluded_levels: frozenset[str] = frozenset(),
 ) -> StudyProcessingResult:
     """Process one study and atomically persist sampled classifier planes."""
     study_id = study_directory.name
@@ -141,6 +149,15 @@ def process_study(
         )
         for level in VERTEBRA_LEVELS
     }
+    sampled_segmentation_planes = {
+        level: sample_segmentation_planes(
+            hu_volume,
+            geometry,
+            processed_masks[level],
+            orientations[level],
+        )
+        for level in VERTEBRA_LEVELS
+    }
     metadata = _study_metadata(
         study_id=study_id,
         study_directory=study_directory,
@@ -150,6 +167,7 @@ def process_study(
         orientations=orientations,
         classifier_planes=classifier_planes,
         sampled_classifier_planes=sampled_classifier_planes,
+        sampled_segmentation_planes=sampled_segmentation_planes,
         bbox_interval_count=len(bbox_centers),
         bbox_csv_path=bbox_csv_path,
         output_directory=output_directory,
@@ -157,7 +175,11 @@ def process_study(
     )
     write_study_classifier_outputs_atomic(
         output_directory,
-        sampled_classifier_planes,
+        {k: v for k, v in sampled_classifier_planes.items() if k not in excluded_levels},
+    )
+    write_study_segmentation_outputs_atomic(
+        output_directory,
+        {k: v for k, v in sampled_segmentation_planes.items() if k not in excluded_levels},
     )
     _write_json_atomic(metadata_path, metadata)
     return StudyProcessingResult(
@@ -167,6 +189,7 @@ def process_study(
         orientations=orientations,
         classifier_planes=classifier_planes,
         sampled_classifier_planes=sampled_classifier_planes,
+        sampled_segmentation_planes=sampled_segmentation_planes,
         metadata_path=metadata_path,
         output_directory=output_directory,
     )
@@ -196,6 +219,7 @@ def _study_metadata(
     orientations: dict[str, OrientationSearchResult],
     classifier_planes: dict[str, ClassifierPlanePlan],
     sampled_classifier_planes: dict[str, SampledClassifierPlanes],
+    sampled_segmentation_planes: dict[str, SampledSegmentationPlanes],
     bbox_interval_count: int,
     bbox_csv_path: Path | None,
     output_directory: Path,
@@ -218,6 +242,7 @@ def _study_metadata(
                 orientations[level],
                 classifier_planes[level],
                 sampled_classifier_planes[level],
+                sampled_segmentation_planes[level],
                 output_directory / level,
             )
             for level in VERTEBRA_LEVELS
@@ -296,6 +321,7 @@ def _vertebra_metadata(
     orientation: OrientationSearchResult,
     classifier_plane_plan: ClassifierPlanePlan,
     sampled_classifier_planes: SampledClassifierPlanes,
+    sampled_segmentation_planes: SampledSegmentationPlanes,
     output_directory: Path,
 ) -> dict[str, object]:
     alignment = processed_mask.dicom_alignment
@@ -328,6 +354,10 @@ def _vertebra_metadata(
         },
         "sampling": sampling_metadata(
             sampled_classifier_planes,
+            output_directory,
+        ),
+        "segmentation_sampling": segmentation_sampling_metadata(
+            sampled_segmentation_planes,
             output_directory,
         ),
         "qc": {

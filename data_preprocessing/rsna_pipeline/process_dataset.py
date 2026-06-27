@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import multiprocessing as mp
 import os
@@ -19,6 +20,7 @@ from data_preprocessing.rsna_pipeline.process_study import (
     BOUNDING_BOX_CSV,
     FRACTURE_DATASET_DIR,
     PIPELINE_VERSION,
+    RSNA_DATA_DIR,
     SEGMENTATION_DIR,
     STUDY_METADATA_DIR,
     TRAIN_IMAGES_DIR,
@@ -28,7 +30,11 @@ from data_preprocessing.rsna_pipeline.process_study import (
 DEFAULT_WORKERS: Final = 8
 EXPECTED_CT_SHAPE: Final = (15, 5, 224, 224)
 EXPECTED_MASK_SHAPE: Final = (15, 224, 224)
+EXPECTED_SEG_CT_SHAPE: Final = (5, 224, 224)
+EXPECTED_SEG_MASK_SHAPE: Final = (5, 224, 224)
 VERTEBRA_LEVELS: Final = tuple(f"C{level}" for level in range(1, 8))
+EXCLUDED_STUDIES_CSV: Final = RSNA_DATA_DIR / "excluded_studies.csv"
+EXCLUDED_LEVELS_CSV: Final = RSNA_DATA_DIR / "excluded_levels.csv"
 
 
 @dataclass(frozen=True)
@@ -40,6 +46,25 @@ class DatasetStudyResult:
     elapsed_seconds: float
     error: str | None = None
     traceback_text: str | None = None
+
+
+def load_excluded_studies(csv_path: Path) -> frozenset[str]:
+    """Return study UIDs listed in the excluded-studies CSV."""
+    if not csv_path.is_file():
+        return frozenset()
+    with csv_path.open(newline="", encoding="utf-8") as file:
+        return frozenset(row["study_uid"] for row in csv.DictReader(file))
+
+
+def load_excluded_levels_by_study(csv_path: Path) -> dict[str, frozenset[str]]:
+    """Return {study_uid: {vertebra, ...}} from the excluded-levels CSV."""
+    if not csv_path.is_file():
+        return {}
+    result: dict[str, list[str]] = {}
+    with csv_path.open(newline="", encoding="utf-8") as file:
+        for row in csv.DictReader(file):
+            result.setdefault(row["study_uid"], []).append(row["vertebra"])
+    return {uid: frozenset(levels) for uid, levels in result.items()}
 
 
 def discover_eligible_studies(
@@ -66,6 +91,7 @@ def is_complete_study_output(
     study_id: str,
     metadata_dir: Path,
     output_dir: Path,
+    excluded_levels: frozenset[str] = frozenset(),
 ) -> bool:
     """Return whether one study has a complete current-version output."""
     metadata_path = metadata_dir / f"{study_id}.json"
@@ -82,6 +108,8 @@ def is_complete_study_output(
 
     study_output = output_dir / study_id
     for level in VERTEBRA_LEVELS:
+        if level in excluded_levels:
+            continue
         level_directory = study_output / level
         if not _valid_array(level_directory / "ct.npy", EXPECTED_CT_SHAPE):
             return False
@@ -91,6 +119,13 @@ def is_complete_study_output(
         ):
             return False
         if not (level_directory / "sampling_qc.json").is_file():
+            return False
+        if not _valid_array(level_directory / "seg_ct.npy", EXPECTED_SEG_CT_SHAPE):
+            return False
+        if not _valid_array(
+            level_directory / "seg_vertebra_mask.npy",
+            EXPECTED_SEG_MASK_SHAPE,
+        ):
             return False
     return True
 
@@ -104,6 +139,8 @@ def process_dataset(
     bbox_csv_path: Path | None,
     workers: int,
     log_path: Path,
+    excluded_studies_csv: Path = EXCLUDED_STUDIES_CSV,
+    excluded_levels_csv: Path = EXCLUDED_LEVELS_CSV,
     limit: int | None = None,
     overwrite: bool = False,
 ) -> tuple[DatasetStudyResult, ...]:
@@ -113,12 +150,22 @@ def process_dataset(
     if limit is not None and limit <= 0:
         raise ValueError("Limit must be positive")
 
+    excluded_studies = load_excluded_studies(excluded_studies_csv)
+    excluded_levels_by_study = load_excluded_levels_by_study(excluded_levels_csv)
+
     eligible = discover_eligible_studies(train_images_dir, segmentation_dir)
+    eligible = tuple(s for s in eligible if s not in excluded_studies)
     selected = eligible[:limit] if limit is not None else eligible
     pending = tuple(
         study_id
         for study_id in selected
-        if overwrite or not is_complete_study_output(study_id, metadata_dir, output_dir)
+        if overwrite
+        or not is_complete_study_output(
+            study_id,
+            metadata_dir,
+            output_dir,
+            excluded_levels_by_study.get(study_id, frozenset()),
+        )
     )
     skipped_count = len(selected) - len(pending)
 
@@ -153,6 +200,7 @@ def process_dataset(
                 metadata_dir,
                 output_dir,
                 bbox_csv_path,
+                excluded_levels_by_study.get(study_id, frozenset()),
             ): study_id
             for study_id in pending
         }
@@ -189,6 +237,7 @@ def _process_one_study(
     metadata_dir: Path,
     output_dir: Path,
     bbox_csv_path: Path | None,
+    excluded_levels: frozenset[str] = frozenset(),
 ) -> DatasetStudyResult:
     started_at = time.monotonic()
     try:
@@ -198,6 +247,7 @@ def _process_one_study(
             metadata_dir / f"{study_id}.json",
             output_dir / study_id,
             bbox_csv_path=bbox_csv_path,
+            excluded_levels=excluded_levels,
         )
     except Exception as error:
         return DatasetStudyResult(
@@ -272,6 +322,16 @@ def main() -> None:
     )
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--excluded-studies-csv",
+        type=Path,
+        default=EXCLUDED_STUDIES_CSV,
+    )
+    parser.add_argument(
+        "--excluded-levels-csv",
+        type=Path,
+        default=EXCLUDED_LEVELS_CSV,
+    )
     arguments = parser.parse_args()
     if arguments.threads_per_worker <= 0:
         raise ValueError("Threads per worker must be positive")
@@ -285,6 +345,8 @@ def main() -> None:
         bbox_csv_path=arguments.bbox_csv,
         workers=arguments.workers,
         log_path=arguments.log_path,
+        excluded_studies_csv=arguments.excluded_studies_csv,
+        excluded_levels_csv=arguments.excluded_levels_csv,
         limit=arguments.limit,
         overwrite=arguments.overwrite,
     )

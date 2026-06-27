@@ -22,6 +22,9 @@ dependencies = [
     "scikit-learn>=1.9.0",
     "pydicom>=3.0.2",
     "totalsegmentator>=2.14.0",
+    "grad-cam>=1.5.5",
+    "marimo>=0.23.10",
+    "ipywidgets>=8.1.7",
 ]
 
 [project.optional-dependencies]
