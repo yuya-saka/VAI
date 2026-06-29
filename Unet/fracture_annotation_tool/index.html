@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>骨折領域アノテーションツール</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  display: flex; height: 100vh;
+  background: #0d1117; color: #c9d1d9;
+  overflow: hidden; font-size: 13px;
+}
+
+/* Sidebar */
+#sidebar {
+  width: 240px; flex-shrink: 0;
+  background: #161b22;
+  display: flex; flex-direction: column;
+  border-right: 1px solid #30363d;
+}
+#sidebar-header {
+  padding: 10px 12px; font-size: 11px; font-weight: 600;
+  color: #8b949e; border-bottom: 1px solid #30363d;
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
+#progress-wrap {
+  padding: 6px 12px 7px; border-bottom: 1px solid #30363d; flex-shrink: 0;
+}
+#progress-text { font-size: 11px; color: #c9d1d9; margin-bottom: 4px; }
+#progress-bar { height: 4px; background: #21262d; border-radius: 2px; overflow: hidden; }
+#progress-fill { height: 100%; background: #238636; transition: width 0.3s; width: 0%; }
+#filter-bar {
+  display: flex; gap: 3px; padding: 5px 8px;
+  border-bottom: 1px solid #30363d; flex-shrink: 0;
+}
+.filter-btn {
+  flex: 1; padding: 3px 0; font-size: 10px; font-weight: 600;
+  border: 1px solid #30363d; border-radius: 4px; cursor: pointer;
+  background: #21262d; color: #8b949e; transition: all 0.1s;
+}
+.filter-btn:hover { background: #30363d; color: #c9d1d9; }
+.filter-btn.active { background: #1f3a5f; border-color: #388bfd; color: #c9d1d9; }
+#sidebar-count {
+  padding: 3px 12px 4px; font-size: 10px; color: #6e7681;
+  border-bottom: 1px solid #30363d; flex-shrink: 0;
+}
+#sample-list { flex: 1; overflow-y: auto; padding: 4px; }
+.sample-item {
+  padding: 5px 8px; cursor: pointer; border-radius: 5px;
+  margin-bottom: 1px; display: flex; justify-content: space-between;
+  align-items: center; transition: background 0.1s;
+}
+.sample-item:hover { background: #21262d; }
+.sample-item.active { background: #1f3a5f; border-left: 2px solid #388bfd; padding-left: 6px; }
+.sample-name { font-size: 12px; font-weight: 600; }
+.level-name { font-size: 10px; color: #8b949e; }
+.badge {
+  font-size: 10px; padding: 1px 5px; border-radius: 8px;
+  font-weight: 600; white-space: nowrap;
+}
+.badge-done { background: #0d4429; color: #3fb950; }
+.badge-none { background: #21262d; color: #6e7681; }
+
+/* Main */
+#main { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+
+#top-bar {
+  padding: 7px 12px; display: flex; align-items: center; gap: 10px;
+  border-bottom: 1px solid #30363d; background: #161b22; flex-shrink: 0;
+}
+#current-title { font-size: 14px; font-weight: 600; flex: 1; }
+#current-pos { font-size: 11px; color: #6e7681; }
+
+/* 15枚グリッド */
+#grid-area {
+  flex: 1; overflow-y: auto; padding: 8px;
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 4px;
+  align-content: start;
+  background: #010409;
+}
+.plane-cell {
+  position: relative; aspect-ratio: 1;
+  background: #0d1117;
+}
+.plane-cell img {
+  width: 100%; height: 100%; object-fit: contain;
+  display: block; background: #000;
+}
+.plane-cell.loading img { opacity: 0.2; }
+.plane-label {
+  position: absolute; top: 3px; left: 3px;
+  font-size: 10px; color: #ffd700; font-weight: 700;
+  text-shadow: 1px 1px 2px #000;
+  pointer-events: none;
+}
+.plane-has-bbox::after {
+  content: "●";
+  position: absolute; top: 3px; right: 5px;
+  font-size: 9px; color: #fff;
+  text-shadow: 0 0 3px #000;
+}
+
+/* ボトムツールバー */
+#toolbar {
+  padding: 9px 12px; display: flex; gap: 8px; align-items: center;
+  border-top: 1px solid #30363d; background: #161b22; flex-shrink: 0;
+  flex-wrap: wrap;
+}
+#legend {
+  display: flex; gap: 5px; align-items: center; flex-shrink: 0;
+}
+.legend-dot { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+.legend-label { font-size: 10px; color: #8b949e; white-space: nowrap; margin-right: 4px; }
+#sep { width: 1px; height: 26px; background: #30363d; flex-shrink: 0; }
+.region-btn {
+  padding: 5px 14px; border: 2px solid; border-radius: 5px;
+  cursor: pointer; font-size: 13px; font-weight: 600;
+  background: transparent; opacity: 0.35; transition: all 0.1s;
+}
+.region-btn:hover { opacity: 0.7; }
+.region-btn.active { opacity: 1; }
+#btn-r1 { color: #6495ED; border-color: #6495ED; }
+#btn-r1.active { background: #6495ED; color: #050c1a; }
+#btn-r2 { color: #32CD32; border-color: #32CD32; }
+#btn-r2.active { background: #32CD32; color: #011a01; }
+#btn-r3 { color: #DC5050; border-color: #DC5050; }
+#btn-r3.active { background: #DC5050; color: #1a0000; }
+#btn-r4 { color: #E8C200; border-color: #E8C200; }
+#btn-r4.active { background: #E8C200; color: #1a1400; }
+.save-btn {
+  padding: 5px 18px; background: #0d4429; color: #3fb950;
+  border: 1px solid #238636; border-radius: 5px; cursor: pointer;
+  font-size: 13px; font-weight: 600;
+}
+.save-btn:hover { background: #238636; }
+#status-msg { font-size: 11px; min-width: 90px; }
+#hint { margin-left: auto; font-size: 10px; color: #4a5568; white-space: nowrap; }
+
+#empty-msg {
+  color: #6e7681; padding: 40px; text-align: center;
+  grid-column: span 5; font-size: 14px;
+}
+.nobbox-icon { font-size: 9px; color: #d29922; margin-right: 2px; }
+#nobbox-badge {
+  padding: 2px 7px; border-radius: 4px; font-size: 11px; font-weight: 600;
+  background: #3d2a00; border: 1px solid #d29922; color: #d29922; display: none;
+}
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <div id="sidebar-header">骨折領域アノテーション</div>
+  <div id="progress-wrap">
+    <div id="progress-text">読み込み中...</div>
+    <div id="progress-bar"><div id="progress-fill"></div></div>
+  </div>
+  <div id="filter-bar">
+    <button class="filter-btn active" data-filter="all" onclick="setFilter('all')">全て</button>
+    <button class="filter-btn" data-filter="todo" onclick="setFilter('todo')">未完了</button>
+    <button class="filter-btn" data-filter="done" onclick="setFilter('done')">完了</button>
+    <button class="filter-btn" data-filter="nobbox" onclick="setFilter('nobbox')">bbox なし</button>
+  </div>
+  <div id="sidebar-count"></div>
+  <div id="sample-list">
+    <span style="color:#6e7681;padding:8px;display:block">読み込み中...</span>
+  </div>
+</div>
+
+<div id="main">
+  <div id="top-bar">
+    <div id="current-title">サンプルを選択してください</div>
+    <span id="nobbox-badge">⚠ bbox なし</span>
+    <div id="current-pos"></div>
+  </div>
+
+  <div id="grid-area">
+    <div id="empty-msg">左のリストから症例を選んでください</div>
+  </div>
+
+  <div id="toolbar">
+    <div id="legend">
+      <div class="legend-dot" style="background:#6495ED"></div>
+      <span class="legend-label">R1 椎体</span>
+      <div class="legend-dot" style="background:#32CD32"></div>
+      <span class="legend-label">R2 右椎間孔</span>
+      <div class="legend-dot" style="background:#DC5050"></div>
+      <span class="legend-label">R3 左椎間孔</span>
+      <div class="legend-dot" style="background:#E8C200"></div>
+      <span class="legend-label">R4 後方要素</span>
+    </div>
+    <div id="sep"></div>
+    <button class="region-btn" id="btn-r1" onclick="toggleRegion(1)">R1 椎体</button>
+    <button class="region-btn" id="btn-r2" onclick="toggleRegion(2)">R2 右椎間孔</button>
+    <button class="region-btn" id="btn-r3" onclick="toggleRegion(3)">R3 左椎間孔</button>
+    <button class="region-btn" id="btn-r4" onclick="toggleRegion(4)">R4 後方要素</button>
+    <div id="sep"></div>
+    <button class="save-btn" onclick="saveAnnotation()">💾 保存</button>
+    <span id="status-msg"></span>
+    <span id="hint">1〜4: 領域切替 &nbsp;|&nbsp; Ctrl+S: 保存 &nbsp;|&nbsp; ←→: 前後移動</span>
+  </div>
+</div>
+
+<script>
+let samples = [];
+let currentFilter = 'all';
+let currentIdx = -1;
+let regions = { region_1: 0, region_2: 0, region_3: 0, region_4: 0 };
+
+async function init() {
+  await loadSamples();
+  document.addEventListener('keydown', handleKeydown);
+}
+
+async function loadSamples() {
+  const res = await fetch('/api/samples');
+  samples = await res.json();
+  renderSidebar();
+  updateProgress();
+}
+
+function updateProgress() {
+  const done = samples.filter(s => s.annotated).length;
+  const total = samples.length;
+  document.getElementById('progress-text').textContent = `${done} / ${total} 件完了`;
+  const pct = total > 0 ? (done / total * 100) : 0;
+  document.getElementById('progress-fill').style.width = pct.toFixed(1) + '%';
+}
+
+function setFilter(f) {
+  currentFilter = f;
+  document.querySelectorAll('.filter-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.filter === f);
+  });
+  renderSidebar();
+}
+
+function getFiltered() {
+  return samples.filter(s => {
+    if (currentFilter === 'todo') return !s.annotated;
+    if (currentFilter === 'done') return s.annotated;
+    if (currentFilter === 'nobbox') return s.has_bbox === false;
+    return true;
+  });
+}
+
+function renderSidebar() {
+  const listEl = document.getElementById('sample-list');
+  listEl.innerHTML = '';
+  const filtered = getFiltered();
+
+  document.getElementById('sidebar-count').textContent =
+    `${filtered.length} / ${samples.length} 件`;
+
+  if (filtered.length === 0) {
+    listEl.innerHTML = '<span style="color:#6e7681;padding:8px;display:block">該当なし</span>';
+    return;
+  }
+
+  filtered.forEach(s => {
+    const globalIdx = samples.indexOf(s);
+    const div = document.createElement('div');
+    div.className = 'sample-item' + (globalIdx === currentIdx ? ' active' : '');
+    div.dataset.idx = globalIdx;
+    div.innerHTML = `
+      <div>
+        <div class="sample-name">${s.has_bbox === false ? '<span class="nobbox-icon">⚠</span>' : ''}${s.short_id}</div>
+        <div class="level-name">${s.level}</div>
+      </div>
+      <span class="badge ${s.annotated ? 'badge-done' : 'badge-none'}">${s.annotated ? '✓' : '未'}</span>
+    `;
+    div.addEventListener('click', () => loadSample(globalIdx));
+    listEl.appendChild(div);
+  });
+
+  // アクティブ行をスクロール表示
+  const activeEl = listEl.querySelector('.sample-item.active');
+  if (activeEl) activeEl.scrollIntoView({ block: 'nearest' });
+}
+
+async function loadSample(idx) {
+  currentIdx = idx;
+  const s = samples[idx];
+  if (!s) return;
+
+  document.getElementById('current-title').textContent = `${s.short_id} / ${s.level}`;
+  document.getElementById('nobbox-badge').style.display = s.has_bbox === false ? 'inline' : 'none';
+  document.getElementById('current-pos').textContent = `[${idx + 1} / ${samples.length}]`;
+
+  document.querySelectorAll('.sample-item').forEach(el => {
+    el.classList.toggle('active', parseInt(el.dataset.idx) === idx);
+  });
+
+  // 画像を先に表示（await前に呼ぶ）
+  regions = { region_1: 0, region_2: 0, region_3: 0, region_4: 0 };
+  updateRegionButtons();
+  renderGrid(s);
+  setStatus('');
+
+  // 非同期でアノテーションを取得してボタン更新
+  try {
+    const annRes = await fetch(
+      `/api/annotation?study=${encodeURIComponent(s.study_id)}&level=${encodeURIComponent(s.level)}`
+    );
+    if (annRes.ok) {
+      const ann = await annRes.json();
+      // 別サンプルに切り替わっていたら無視
+      if (currentIdx !== idx) return;
+      regions = {
+        region_1: ann.region_1 ?? 0,
+        region_2: ann.region_2 ?? 0,
+        region_3: ann.region_3 ?? 0,
+        region_4: ann.region_4 ?? 0,
+      };
+      updateRegionButtons();
+    }
+  } catch (e) {
+    console.error('annotation fetch error:', e);
+  }
+}
+
+function renderGrid(s) {
+  const gridEl = document.getElementById('grid-area');
+  gridEl.innerHTML = '';
+
+  for (let pi = 0; pi < 15; pi++) {
+    const cell = document.createElement('div');
+    cell.className = 'plane-cell loading';
+
+    const url = `/api/image?study=${encodeURIComponent(s.study_id)}&level=${encodeURIComponent(s.level)}&plane=${pi}`;
+    const img = document.createElement('img');
+    img.alt = `plane ${pi}`;
+    img.src = url;
+    img.onload = () => cell.classList.remove('loading');
+    img.onerror = () => cell.classList.remove('loading');
+
+    const label = document.createElement('span');
+    label.className = 'plane-label';
+    label.textContent = `p${pi}`;
+
+    cell.appendChild(img);
+    cell.appendChild(label);
+    gridEl.appendChild(cell);
+  }
+}
+
+function toggleRegion(r) {
+  const key = `region_${r}`;
+  regions[key] = regions[key] ? 0 : 1;
+  updateRegionButtons();
+}
+
+function updateRegionButtons() {
+  for (let r = 1; r <= 4; r++) {
+    document.getElementById(`btn-r${r}`)
+      .classList.toggle('active', !!regions[`region_${r}`]);
+  }
+}
+
+async function saveAnnotation() {
+  if (currentIdx < 0) return;
+  const s = samples[currentIdx];
+
+  setStatus('保存中...', '#6e7681');
+
+  const res = await fetch(
+    `/api/annotation?study=${encodeURIComponent(s.study_id)}&level=${encodeURIComponent(s.level)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(regions),
+    }
+  );
+
+  if (res.ok) {
+    setStatus('✓ 保存完了', '#3fb950');
+    setTimeout(() => setStatus(''), 2500);
+
+    // サンプルリストのキャッシュを更新
+    samples[currentIdx] = { ...samples[currentIdx], annotated: true, regions: { ...regions } };
+    renderSidebar();
+    updateProgress();
+  } else {
+    setStatus('✗ 保存失敗', '#f85149');
+  }
+}
+
+function navigateSample(delta) {
+  const newIdx = currentIdx + delta;
+  if (newIdx >= 0 && newIdx < samples.length) {
+    loadSample(newIdx);
+  }
+}
+
+function setStatus(msg, color = '#3fb950') {
+  const el = document.getElementById('status-msg');
+  el.textContent = msg;
+  el.style.color = color;
+}
+
+function handleKeydown(e) {
+  if (e.ctrlKey && e.key === 's') {
+    e.preventDefault();
+    saveAnnotation();
+    return;
+  }
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  switch (e.key) {
+    case '1': toggleRegion(1); break;
+    case '2': toggleRegion(2); break;
+    case '3': toggleRegion(3); break;
+    case '4': toggleRegion(4); break;
+    case 'ArrowRight': navigateSample(1); break;
+    case 'ArrowLeft':  navigateSample(-1); break;
+  }
+}
+
+init();
+</script>
+</body>
+</html>
