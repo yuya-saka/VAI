@@ -31,9 +31,7 @@ def resolve_output_base(cfg: dict, root: Path) -> Path:
     return base / "default"
 
 
-def resolve_fold_paths(
-    cfg: dict, fold: int, root: Path
-) -> tuple[Path, Path]:
+def resolve_fold_paths(cfg: dict, fold: int, root: Path) -> tuple[Path, Path]:
     """
     fold固有のチェックポイントパスとfoldディレクトリを解決する。
 
@@ -118,6 +116,7 @@ def _get_wandb() -> Any | None:
     """wandb を遅延インポートする。"""
     try:
         import wandb
+
         return wandb
     except ImportError:
         return None
@@ -143,7 +142,7 @@ def initialize_wandb(cfg: dict, fold: int) -> tuple[bool, Any | None]:
         project=wandb_cfg.get("project") or default_project,
         name=wandb_cfg.get("run_name") or f"fold{fold}",
         config=cfg,
-        reinit=True,
+        reinit="finish_previous",
     )
     return True, w
 
