@@ -34,7 +34,9 @@ def region_log_survival(region_logits: Tensor, region_plane_valid: Tensor) -> Te
     """
     with torch.autocast(device_type=region_logits.device.type, enabled=False):
         log_not_region = F.logsigmoid(-region_logits.float())
-        masked = log_not_region * region_plane_valid.to(log_not_region.dtype)
+        masked = torch.where(
+            region_plane_valid, log_not_region, torch.zeros_like(log_not_region)
+        )
         return masked.sum(dim=-1)
 
 

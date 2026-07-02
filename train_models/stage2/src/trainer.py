@@ -34,7 +34,12 @@ from .data_utils import (
     split_items_cv,
 )
 from .evaluation import compute_metrics, compute_region_diagnostics
-from .experiment import append_jsonl, resolve_fold_paths
+from .experiment import (
+    append_jsonl,
+    prune_training_jsonl,
+    resolve_fold_paths,
+    validate_resume_config,
+)
 from .model import STAGE2_ARCHITECTURE_VERSION, Stage2Model, Stage2Output
 
 REGION_NAMES = ("body", "right_foramen", "left_foramen", "posterior")
@@ -116,6 +121,38 @@ def _nonfinite_output_names(output: Stage2Output) -> list[str]:
     ]
 
 
+_SUM_REDUCED_STAT_KEYS = (
+    "loss_sum",
+    "stage1_loss_sum",
+    "region_loss_sum",
+    "batch_count",
+    "gradient_norm_sum",
+    "successful_gradient_steps",
+    "amp_skipped_steps",
+)
+
+
+def _all_reduce_epoch_stats(
+    stats: dict[str, float], device: torch.device
+) -> dict[str, float]:
+    """Sum-reduce per-rank counters and max-reduce the peak gradient norm across ranks."""
+    reduced = dict(stats)
+    sums = torch.tensor(
+        [stats[key] for key in _SUM_REDUCED_STAT_KEYS],
+        dtype=torch.float64,
+        device=device,
+    )
+    dist.all_reduce(sums, op=dist.ReduceOp.SUM)
+    for key, value in zip(_SUM_REDUCED_STAT_KEYS, sums.tolist(), strict=True):
+        reduced[key] = value
+    max_norm = torch.tensor(
+        stats["max_gradient_norm"], dtype=torch.float64, device=device
+    )
+    dist.all_reduce(max_norm, op=dist.ReduceOp.MAX)
+    reduced["max_gradient_norm"] = float(max_norm.item())
+    return reduced
+
+
 def train_epoch(
     model: torch.nn.Module,
     loader: DataLoader,
@@ -135,7 +172,12 @@ def train_epoch(
     mixup_probability = float(training_config.get("p_mixup", 0.2))
     positive_weight = float(training_config.get("positive_weight", 2.0))
     region_loss_weight = float(training_config.get("region_loss_weight", 0.5))
-    gradient_clip_norm = float(training_config.get("gradient_clip_norm", 1.0))
+    raw_gradient_clip_norm = training_config.get("gradient_clip_norm", 1.0)
+    gradient_clip_norm = (
+        float("inf")
+        if raw_gradient_clip_norm is None
+        else float(raw_gradient_clip_norm)
+    )
     max_consecutive_amp_skips = int(training_config.get("max_consecutive_amp_skips", 8))
     total_loss = 0.0
     total_stage1_loss = 0.0
@@ -244,14 +286,27 @@ def train_epoch(
                     "grad": f"{total_gradient_norm / completed_batches:.2f}",
                 }
             )
-    batch_count = max(len(loader), 1)
-    return {
-        "loss": total_loss / batch_count,
-        "stage1_loss": total_stage1_loss / batch_count,
-        "region_loss": total_region_loss / batch_count,
-        "mean_gradient_norm": total_gradient_norm / max(successful_gradient_steps, 1),
+    raw_stats = {
+        "loss_sum": total_loss,
+        "stage1_loss_sum": total_stage1_loss,
+        "region_loss_sum": total_region_loss,
+        "batch_count": float(max(len(loader), 1)),
+        "gradient_norm_sum": total_gradient_norm,
+        "successful_gradient_steps": float(successful_gradient_steps),
         "max_gradient_norm": max_gradient_norm,
         "amp_skipped_steps": float(skipped_amp_steps),
+    }
+    if dist.is_initialized():
+        raw_stats = _all_reduce_epoch_stats(raw_stats, device)
+    batch_count = max(raw_stats["batch_count"], 1.0)
+    successful_steps = max(raw_stats["successful_gradient_steps"], 1.0)
+    return {
+        "loss": raw_stats["loss_sum"] / batch_count,
+        "stage1_loss": raw_stats["stage1_loss_sum"] / batch_count,
+        "region_loss": raw_stats["region_loss_sum"] / batch_count,
+        "mean_gradient_norm": raw_stats["gradient_norm_sum"] / successful_steps,
+        "max_gradient_norm": raw_stats["max_gradient_norm"],
+        "amp_skipped_steps": raw_stats["amp_skipped_steps"],
     }
 
 
@@ -262,7 +317,7 @@ def evaluate(
     device: torch.device,
     config: dict[str, Any],
     description: str = "valid",
-) -> tuple[float, list[dict[str, Any]], dict[str, Any]]:
+) -> tuple[dict[str, float], list[dict[str, Any]], dict[str, Any]]:
     """Evaluate a metadata-bearing loader and return predictions and diagnostics."""
     model.eval()
     training_config = config.get("training", {})
@@ -270,6 +325,8 @@ def evaluate(
     positive_weight = float(training_config.get("positive_weight", 2.0))
     region_loss_weight = float(training_config.get("region_loss_weight", 0.5))
     total_loss = 0.0
+    total_stage1_loss = 0.0
+    total_region_loss = 0.0
     predictions: list[dict[str, Any]] = []
     all_region_logits: list[np.ndarray] = []
     all_region_plane_valid: list[np.ndarray] = []
@@ -287,10 +344,12 @@ def evaluate(
             enabled=use_amp,
         ):
             output = model(images, regions)
-            loss, _ = _loss_for_targets(
+            loss, components = _loss_for_targets(
                 output, targets_device, positive_weight, region_loss_weight
             )
         total_loss += float(loss)
+        total_stage1_loss += float(components["stage1_loss"])
+        total_region_loss += float(components["region_loss"])
         slice_logits = output.slice_logits.float()
         pred_prob = torch.sigmoid(slice_logits).mean(dim=1).cpu().numpy()
 
@@ -348,7 +407,13 @@ def evaluate(
         if all_region_logits
         else {}
     )
-    return total_loss / max(len(loader), 1), predictions, diagnostics
+    batch_count = max(len(loader), 1)
+    val_stats = {
+        "loss": total_loss / batch_count,
+        "stage1_loss": total_stage1_loss / batch_count,
+        "region_loss": total_region_loss / batch_count,
+    }
+    return val_stats, predictions, diagnostics
 
 
 def _metrics_from_predictions(predictions: list[dict[str, Any]]) -> dict[str, Any]:
@@ -360,20 +425,27 @@ def _metrics_from_predictions(predictions: list[dict[str, Any]]) -> dict[str, An
     )
 
 
-def _save_checkpoint(
+def _verify_architecture_version(checkpoint: dict[str, Any], path: Path) -> None:
+    checkpoint_version = checkpoint.get("architecture_version")
+    if checkpoint_version != STAGE2_ARCHITECTURE_VERSION:
+        raise ValueError(
+            f"incompatible Stage2 checkpoint at {path}: "
+            f"architecture_version={checkpoint_version!r}, "
+            f"expected {STAGE2_ARCHITECTURE_VERSION!r}"
+        )
+
+
+def _save_best_model(
     path: Path,
     model: torch.nn.Module,
-    optimizer: torch.optim.Optimizer,
-    scheduler: torch.optim.lr_scheduler.LRScheduler,
     epoch: int,
     best_auroc: float,
     config: dict[str, Any],
 ) -> None:
+    """Save AUROC-best weights for inference; never used to resume training."""
     torch.save(
         {
             "model": _base_model(model).state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
             "epoch": epoch,
             "best_auroc": best_auroc,
             "config": config,
@@ -383,27 +455,53 @@ def _save_checkpoint(
     )
 
 
-def _load_checkpoint(
+def _load_best_model(path: Path, model: torch.nn.Module) -> None:
+    """Load AUROC-best weights for inference."""
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    _verify_architecture_version(checkpoint, path)
+    _base_model(model).load_state_dict(checkpoint["model"])
+
+
+def _save_resume_state(
     path: Path,
     model: torch.nn.Module,
-    optimizer: torch.optim.Optimizer | None = None,
-    scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
-) -> tuple[int, float]:
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
+    next_epoch: int,
+    best_auroc: float,
+    config: dict[str, Any],
+) -> None:
+    """Save full training state for exact continuation, after ``scheduler.step()``."""
+    torch.save(
+        {
+            "model": _base_model(model).state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "next_epoch": next_epoch,
+            "best_auroc": best_auroc,
+            "config": config,
+            "architecture_version": STAGE2_ARCHITECTURE_VERSION,
+        },
+        path,
+    )
+
+
+def _load_resume_state(
+    path: Path,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
+) -> tuple[int, float, dict[str, Any]]:
+    """Restore model/optimizer/scheduler and return (next_epoch, best_auroc, saved_config)."""
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    checkpoint_version = checkpoint.get("architecture_version")
-    if checkpoint_version != STAGE2_ARCHITECTURE_VERSION:
-        raise ValueError(
-            f"incompatible Stage2 checkpoint at {path}: "
-            f"architecture_version={checkpoint_version!r}, "
-            f"expected {STAGE2_ARCHITECTURE_VERSION!r}"
-        )
+    _verify_architecture_version(checkpoint, path)
     _base_model(model).load_state_dict(checkpoint["model"])
-    if optimizer is not None and "optimizer" in checkpoint:
-        optimizer.load_state_dict(checkpoint["optimizer"])
-    if scheduler is not None and "scheduler" in checkpoint:
-        scheduler.load_state_dict(checkpoint["scheduler"])
-    return int(checkpoint.get("epoch", -1)) + 1, float(
-        checkpoint.get("best_auroc", -np.inf)
+    optimizer.load_state_dict(checkpoint["optimizer"])
+    scheduler.load_state_dict(checkpoint["scheduler"])
+    return (
+        int(checkpoint["next_epoch"]),
+        float(checkpoint.get("best_auroc", -np.inf)),
+        checkpoint.get("config", {}),
     )
 
 
@@ -439,16 +537,19 @@ def train_one_fold(
         enabled=amp_enabled and amp_dtype == torch.float16,
         init_scale=float(training_config.get("amp_initial_scale", 4096.0)),
     )
-    best_path, fold_dir = resolve_fold_paths(config, fold, root)
+    best_path, latest_path, fold_dir = resolve_fold_paths(config, fold, root)
     use_wandb, wandb_client = (
         initialize_wandb(config, fold) if is_main else (False, None)
     )
     start_epoch = 0
     best_auroc = -np.inf
-    if resume and best_path.exists():
-        start_epoch, best_auroc = _load_checkpoint(
-            best_path, model, optimizer, scheduler
+    if resume and latest_path.exists():
+        start_epoch, best_auroc, saved_config = _load_resume_state(
+            latest_path, model, optimizer, scheduler
         )
+        validate_resume_config(saved_config, config, start_epoch)
+        if is_main:
+            prune_training_jsonl(fold_dir / "training.jsonl", start_epoch)
     if is_main:
         print(
             f"[INFO] fold={fold} train_items={len(train_items)} "
@@ -466,11 +567,15 @@ def train_one_fold(
             model, train_loader, optimizer, scaler, device, config, epoch, is_main
         )
         train_loss = train_stats["loss"]
-        val_loss, predictions, diagnostics = evaluate(model, val_loader, device, config)
-        metrics = _metrics_from_predictions(predictions)
-        auroc = float(metrics.get("auroc", float("nan")))
-        improved = np.isfinite(auroc) and auroc > best_auroc
+        stop = False
         if is_main:
+            val_stats, predictions, diagnostics = evaluate(
+                model, val_loader, device, config
+            )
+            val_loss = val_stats["loss"]
+            metrics = _metrics_from_predictions(predictions)
+            auroc = float(metrics.get("auroc", float("nan")))
+            improved = np.isfinite(auroc) and auroc > best_auroc
             append_jsonl(
                 fold_dir / "training.jsonl",
                 {
@@ -478,6 +583,7 @@ def train_one_fold(
                     "train_loss": train_loss,
                     "train": train_stats,
                     "val_loss": val_loss,
+                    "val": val_stats,
                     "metrics": metrics,
                     "diagnostics": diagnostics,
                     "learning_rates": [group["lr"] for group in optimizer.param_groups],
@@ -485,15 +591,7 @@ def train_one_fold(
             )
             if improved:
                 best_auroc = auroc
-                _save_checkpoint(
-                    best_path,
-                    model,
-                    optimizer,
-                    scheduler,
-                    epoch,
-                    best_auroc,
-                    config,
-                )
+                _save_best_model(best_path, model, epoch, best_auroc, config)
             if use_wandb and wandb_client is not None:
                 log_wandb_epoch(
                     wandb_client,
@@ -504,8 +602,12 @@ def train_one_fold(
                     metrics,
                 )
         scheduler.step()
-        patience = 0 if improved else patience + 1
-        stop = patience >= int(training_config.get("early_stopping_patience", 15))
+        if is_main:
+            _save_resume_state(
+                latest_path, model, optimizer, scheduler, epoch + 1, best_auroc, config
+            )
+            patience = 0 if improved else patience + 1
+            stop = patience >= int(training_config.get("early_stopping_patience", 15))
         if dist.is_initialized():
             stop_tensor = torch.tensor(int(stop), device=device)
             dist.broadcast(stop_tensor, src=0)
@@ -513,22 +615,25 @@ def train_one_fold(
         if stop:
             break
 
+    if not is_main:
+        return {}, []
     if not best_path.exists():
         raise RuntimeError(f"best checkpoint was not created: {best_path}")
-    _load_checkpoint(best_path, model)
-    val_loss, predictions, diagnostics = evaluate(
+    _load_best_model(best_path, model)
+    val_stats, predictions, diagnostics = evaluate(
         model, val_loader, device, config, description="best"
     )
     metrics = {
         **_metrics_from_predictions(predictions),
-        "val_loss": val_loss,
+        "val_loss": val_stats["loss"],
+        "val_stage1_loss": val_stats["stage1_loss"],
+        "val_region_loss": val_stats["region_loss"],
         "diagnostics": diagnostics,
     }
-    if is_main:
-        with (fold_dir / "metrics.json").open("w", encoding="utf-8") as file:
-            json.dump(metrics, file, ensure_ascii=False, indent=2, allow_nan=True)
-        if use_wandb and wandb_client is not None:
-            finish_wandb(wandb_client, metrics)
+    with (fold_dir / "metrics.json").open("w", encoding="utf-8") as file:
+        json.dump(metrics, file, ensure_ascii=False, indent=2, allow_nan=True)
+    if use_wandb and wandb_client is not None:
+        finish_wandb(wandb_client, metrics)
     return metrics, predictions
 
 
@@ -544,7 +649,7 @@ def predict_ensemble(
     fold_predictions: list[list[dict[str, Any]]] = []
     for model_path in model_paths:
         model, _, _ = create_model_optimizer_scheduler(config, device)
-        _load_checkpoint(model_path, model)
+        _load_best_model(model_path, model)
         _, predictions, _ = evaluate(
             model, loader, device, config, description=model_path.parent.name
         )

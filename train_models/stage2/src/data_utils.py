@@ -42,8 +42,24 @@ def seed_worker(worker_id: int) -> None:
     torch.set_num_threads(1)
 
 
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge ``override`` onto ``base`` without mutating either input."""
+    merged = dict(base)
+    for key, value in override.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def load_config(config_path: str | Path | None = None) -> dict[str, Any]:
-    """Load the Stage2 YAML configuration."""
+    """Load the Stage2 YAML configuration, applying an optional `_base` parent.
+
+    A config may set a top-level ``_base: <filename>`` (resolved relative to
+    its own directory) to inherit from another config; its own keys are then
+    deep-merged on top, so an ablation config only needs to list overrides.
+    """
     path = (
         Path(config_path)
         if config_path is not None
@@ -53,7 +69,11 @@ def load_config(config_path: str | Path | None = None) -> dict[str, Any]:
         raise FileNotFoundError(f"config not found: {path}")
     with path.open(encoding="utf-8") as file:
         config = yaml.safe_load(file)
-    return config
+    base_name = config.pop("_base", None)
+    if base_name is None:
+        return config
+    base_config = load_config(path.parent / str(base_name))
+    return _deep_merge(base_config, config)
 
 
 def save_effective_config(config: dict[str, Any], output_dir: Path) -> Path:
@@ -304,6 +324,7 @@ def create_model_optimizer_scheduler(
         region_layers=int(model_config.get("region_layers", 2)),
         region_dropout=float(model_config.get("region_dropout", 0.3)),
         pretrained=bool(model_config.get("pretrained", True)),
+        force_primary_fp32=bool(training_config.get("force_primary_fp32", True)),
     ).to(device)
     optimizer = torch.optim.AdamW(
         [

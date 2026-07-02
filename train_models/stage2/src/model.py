@@ -93,11 +93,13 @@ class Stage2Model(nn.Module):
         region_layers: int = 2,
         region_dropout: float = 0.3,
         pretrained: bool = True,
+        force_primary_fp32: bool = True,
     ) -> None:
         super().__init__()
         self.n_slices = n_slices
         self.n_regions = n_regions
         self.in_chans = in_chans
+        self.force_primary_fp32 = force_primary_fp32
 
         # Primary path: identical construction to Stage1's TimmModel so that
         # state_dicts are interchangeable between the two encoder/lstm/head triples.
@@ -172,10 +174,11 @@ class Stage2Model(nn.Module):
         )
         feat = self.encoder.forward_head(final_map, pre_logits=True)
         feat = feat.view(batch_size, n_slices, -1)
-        with torch.autocast(device_type=feat.device.type, enabled=False):
-            sequence, _ = self.lstm(feat.float())
-            sequence = sequence.contiguous().view(batch_size * n_slices, -1)
-            slice_logits = self.head(sequence).view(batch_size, n_slices).contiguous()
+        if self.force_primary_fp32:
+            with torch.autocast(device_type=feat.device.type, enabled=False):
+                slice_logits = self._primary_head(feat.float(), batch_size, n_slices)
+        else:
+            slice_logits = self._primary_head(feat, batch_size, n_slices)
 
         if region_masks is None:
             return Stage2Output(slice_logits, None, None, None)
@@ -205,6 +208,12 @@ class Stage2Model(nn.Module):
         return Stage2Output(
             slice_logits, region_logits, region_plane_valid, plane_valid
         )
+
+    def _primary_head(self, feat: Tensor, batch_size: int, n_slices: int) -> Tensor:
+        """Run the Stage1-identical BiLSTM/head on per-plane encoder features."""
+        sequence, _ = self.lstm(feat)
+        sequence = sequence.contiguous().view(batch_size * n_slices, -1)
+        return self.head(sequence).view(batch_size, n_slices).contiguous()
 
     def _pool_regions(
         self,

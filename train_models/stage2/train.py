@@ -30,6 +30,7 @@ from train_models.stage2.src.data_utils import (  # noqa: E402
 )
 from train_models.stage2.src.evaluation import compute_metrics  # noqa: E402
 from train_models.stage2.src.experiment import (  # noqa: E402
+    reject_unresumed_reuse,
     resolve_fold_paths,
     resolve_output_base,
 )
@@ -143,7 +144,8 @@ def _run_training(
     start_fold = int(data_config.get("start_fold", 0))
     end_fold = int(data_config.get("end_fold", 4))
     output_dir = resolve_output_base(config, ROOT)
-    if local_rank == 0:
+    reject_unresumed_reuse(output_dir, resume)
+    if local_rank == 0 and not (resume and (output_dir / "config.yaml").exists()):
         save_effective_config(config, output_dir)
 
     all_oof: list[dict[str, Any]] = []
