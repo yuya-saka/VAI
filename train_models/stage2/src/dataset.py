@@ -161,29 +161,34 @@ class RSNARegionDataset(Dataset):
         vertebra_mask: np.ndarray,
         region_mask: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray]:
-        images = np.empty((ct.shape[0], 6, 224, 224), dtype=np.uint8)
-        regions = np.empty(EXPECTED_MASK_SHAPE, dtype=np.uint8)
-        replay: dict[str, Any] | None = None
+        """Apply one shared spatial transform to all planes at once.
 
-        for plane_index in range(ct.shape[0]):
-            ct_slice = ct[plane_index].transpose(1, 2, 0)
-            kwargs = {
-                "image": ct_slice,
-                "mask": vertebra_mask[plane_index],
-                "region_mask": region_mask[plane_index],
-            }
-            if replay is None:
-                augmented = self.transform(**kwargs)
-                replay = augmented["replay"]
-            else:
-                augmented = A.ReplayCompose.replay(replay, **kwargs)
+        All 15 planes are stacked into the channel axis so Albumentations
+        samples and applies each transform's parameters exactly once instead
+        of once per plane via replay; every plane still receives the same
+        geometry. ``(2, 3, 0, 1)`` is its own inverse, so the same transpose
+        both builds the stack and restores the original axis order.
+        """
+        n_planes, n_ct_channels, height, width = ct.shape
+        image_stack = ct.transpose(2, 3, 0, 1).reshape(
+            height, width, n_planes * n_ct_channels
+        )
+        mask_stack = vertebra_mask.transpose(1, 2, 0)
+        region_stack = region_mask.transpose(1, 2, 0)
 
-            combined = np.concatenate(
-                [augmented["image"], augmented["mask"][..., None]], axis=2
-            )
-            images[plane_index] = combined.transpose(2, 0, 1)
-            regions[plane_index] = augmented["region_mask"]
+        augmented = self.transform(
+            image=image_stack, mask=mask_stack, region_mask=region_stack
+        )
 
-        if replay is not None and replay_applied_horizontal_flip(replay):
+        images = (
+            augmented["image"]
+            .reshape(height, width, n_planes, n_ct_channels)
+            .transpose(2, 3, 0, 1)
+        )
+        vertebra_masks = augmented["mask"].transpose(2, 0, 1)
+        regions = augmented["region_mask"].transpose(2, 0, 1)
+        combined = np.concatenate([images, vertebra_masks[:, None]], axis=1)
+
+        if replay_applied_horizontal_flip(augmented["replay"]):
             regions = remap_regions_after_horizontal_flip(regions)
-        return images, regions
+        return combined, regions

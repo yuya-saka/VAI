@@ -68,6 +68,8 @@ _RESUME_ENV_ONLY_PATHS = frozenset(
         "training.prefetch_factor",
         "data.start_fold",
         "data.end_fold",
+        "data.stage_to_local",
+        "data.stage_root",
     }
 )
 

@@ -530,6 +530,10 @@ def train_one_fold(
         model = DistributedDataParallel(
             model,
             device_ids=[device.index] if device.type == "cuda" else None,
+            # Validation only runs on rank 0 (see `is_main` branches below), so
+            # per-forward buffer broadcasts would desync collective calls
+            # against the other ranks and deadlock NCCL.
+            broadcast_buffers=False,
         )
     amp_enabled, amp_dtype = _amp_settings(config, device)
     scaler = torch.amp.GradScaler(
@@ -570,7 +574,7 @@ def train_one_fold(
         stop = False
         if is_main:
             val_stats, predictions, diagnostics = evaluate(
-                model, val_loader, device, config
+                _base_model(model), val_loader, device, config
             )
             val_loss = val_stats["loss"]
             metrics = _metrics_from_predictions(predictions)
@@ -621,7 +625,7 @@ def train_one_fold(
         raise RuntimeError(f"best checkpoint was not created: {best_path}")
     _load_best_model(best_path, model)
     val_stats, predictions, diagnostics = evaluate(
-        model, val_loader, device, config, description="best"
+        _base_model(model), val_loader, device, config, description="best"
     )
     metrics = {
         **_metrics_from_predictions(predictions),

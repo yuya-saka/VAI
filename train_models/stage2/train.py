@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import socket
 import sys
 import tempfile
@@ -33,6 +34,11 @@ from train_models.stage2.src.experiment import (  # noqa: E402
     reject_unresumed_reuse,
     resolve_fold_paths,
     resolve_output_base,
+)
+from train_models.stage2.src.staging import (  # noqa: E402
+    cleanup_stage,
+    stage_dataset,
+    sweep_stale_stages,
 )
 from train_models.stage2.src.trainer import (  # noqa: E402
     predict_ensemble,
@@ -88,13 +94,14 @@ def _run(
     config: dict[str, Any],
     resume: bool,
     port: int,
+    dataset_root: Path,
 ) -> None:
     if world_size > 1:
         os.environ["MASTER_ADDR"] = "127.0.0.1"
         os.environ["MASTER_PORT"] = str(port)
         dist.init_process_group("nccl", rank=local_rank, world_size=world_size)
     try:
-        _run_training(local_rank, world_size, config, resume)
+        _run_training(local_rank, world_size, config, resume, dataset_root)
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()
@@ -105,6 +112,7 @@ def _run_training(
     world_size: int,
     config: dict[str, Any],
     resume: bool,
+    dataset_root: Path,
 ) -> None:
     training_config = config.get("training", {})
     gpu_ids = list(training_config.get("gpu_ids", [0]))
@@ -123,7 +131,7 @@ def _run_training(
     excluded_levels_path = data_config.get("excluded_levels_path")
     collection_started = time.perf_counter()
     items = collect_items(
-        ROOT / str(data_config["dataset_dir"]),
+        dataset_root,
         ROOT / str(data_config["csv_path"]),
         excluded_studies_path=ROOT / excluded_studies_path
         if excluded_studies_path
@@ -194,6 +202,12 @@ def _run_training(
             )
 
 
+def _raise_on_sigterm(signum: int, frame: Any) -> None:
+    """Convert SIGTERM into a normal Python exception so `finally` blocks still run."""
+    del frame
+    raise SystemExit(f"terminated by signal {signum}")
+
+
 def main() -> None:
     """Launch single-process or multi-GPU Stage2 training."""
     _configure_temp()
@@ -202,16 +216,30 @@ def main() -> None:
     world_size = int(config.get("training", {}).get("n_gpu", 1))
     if world_size > 1 and not torch.cuda.is_available():
         raise RuntimeError("multi-GPU training requires CUDA")
+
+    data_config = config.get("data", {})
+    dataset_root = ROOT / str(data_config["dataset_dir"])
+    stage_dir: Path | None = None
+    if bool(data_config.get("stage_to_local", False)):
+        stage_root = Path(str(data_config.get("stage_root", "/dev/shm")))
+        sweep_stale_stages(stage_root)
+        stage_dir = stage_dataset(dataset_root, stage_root)
+        dataset_root = stage_dir
+        signal.signal(signal.SIGTERM, _raise_on_sigterm)
+
     port = _free_port()
-    if world_size > 1:
-        mp.spawn(
-            _run,
-            args=(world_size, config, args.resume, port),
-            nprocs=world_size,
-            join=True,
-        )
-    else:
-        _run(0, 1, config, args.resume, port)
+    try:
+        if world_size > 1:
+            mp.spawn(
+                _run,
+                args=(world_size, config, args.resume, port, dataset_root),
+                nprocs=world_size,
+                join=True,
+            )
+        else:
+            _run(0, 1, config, args.resume, port, dataset_root)
+    finally:
+        cleanup_stage(stage_dir)
 
 
 if __name__ == "__main__":
