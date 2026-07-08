@@ -7,6 +7,7 @@ AMP + mixup + BCE損失 + early stopping。
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -41,6 +42,23 @@ def _prepare_images(images: torch.Tensor, device: torch.device) -> torch.Tensor:
     ).div_(255.0)
 
 
+def _amp_settings(cfg: dict, device: torch.device) -> tuple[bool, torch.dtype]:
+    """Resolve autocast enablement and dtype with an explicit BF16 safety check."""
+    tr_cfg = cfg.get("training", {})
+    enabled = bool(tr_cfg.get("use_amp", True)) and device.type == "cuda"
+    dtype_name = str(tr_cfg.get("amp_dtype", "bfloat16")).lower()
+    dtype_by_name = {"bfloat16": torch.bfloat16, "float16": torch.float16}
+    if dtype_name not in dtype_by_name:
+        raise ValueError(f"unsupported amp_dtype: {dtype_name}")
+    dtype = dtype_by_name[dtype_name]
+    if enabled and dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
+        raise RuntimeError(
+            "amp_dtype=bfloat16 requires a BF16-capable CUDA device; "
+            "set training.use_amp=false or training.amp_dtype=float16"
+        )
+    return enabled, dtype
+
+
 def _unpack_batch(
     batch: tuple,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, list[str], list[str]]:
@@ -65,6 +83,42 @@ def _split_model_output(output: torch.Tensor | tuple[torch.Tensor, torch.Tensor]
     if isinstance(output, tuple):
         return output[0], output[1]
     return output, None
+
+
+def _nonfinite_gradient_names(model: nn.Module) -> list[str]:
+    """Return parameter names whose gradients contain NaN or infinity."""
+    return [
+        name
+        for name, parameter in model.named_parameters()
+        if parameter.grad is not None and not torch.isfinite(parameter.grad).all()
+    ]
+
+
+def _nonfinite_output_names(
+    slice_logits: torch.Tensor, patient_logits: torch.Tensor | None
+) -> list[str]:
+    """Return model output names containing NaN or infinity."""
+    names = []
+    if not torch.isfinite(slice_logits).all():
+        names.append("slice_logits")
+    if patient_logits is not None and not torch.isfinite(patient_logits).all():
+        names.append("patient_logits")
+    return names
+
+
+def _raise_on_nonfinite_probs(
+    probs: list[float], items: list[dict], context: str
+) -> None:
+    """Raise with offending study/vertebra if any predicted probability is non-finite."""
+    arr = np.asarray(probs, dtype=float)
+    bad = np.flatnonzero(~np.isfinite(arr))
+    if bad.size == 0:
+        return
+    offenders = [f"{items[i]['study_uid']}/{items[i]['vertebra']}" for i in bad[:20]]
+    raise FloatingPointError(
+        f"non-finite prediction probabilities in {context}: "
+        f"{bad.size}/{arr.size} items, e.g. {offenders}"
+    )
 
 
 def _compute_loss(
@@ -116,10 +170,19 @@ def _train_epoch(
     positive_weight: float,
     slice_loss_weight: float,
     patient_loss_weight: float,
-    use_amp: bool,
+    amp_enabled: bool,
+    amp_dtype: torch.dtype,
+    gradient_clip_norm: float,
+    max_consecutive_amp_skips: int,
 ) -> float:
     """
     1 epoch の学習を実行する。
+
+    loss または勾配が非有限になった場合、AMPのinf/nan検出による
+    スキップは`max_consecutive_amp_skips`回まで許容し、それを超えるか
+    forward自体が非有限を出した場合は`FloatingPointError`で即座に停止する
+    （破損した重みで学習を継続し、検証時に原因不明のNaNとして
+    表面化するのを防ぐため）。
 
     Returns:
         epoch平均 training loss
@@ -127,7 +190,7 @@ def _train_epoch(
     model.train()
     total_loss = 0.0
     n_batches = 0
-    amp_enabled = use_amp and device.type == "cuda"
+    consecutive_amp_skips = 0
 
     is_main = not dist.is_initialized() or dist.get_rank() == 0
     progress = tqdm(loader, desc="train", leave=False, dynamic_ncols=True, disable=not is_main)
@@ -143,7 +206,9 @@ def _train_epoch(
             images, labels_a, labels_b, patient_labels_a, patient_labels_b, lam = _mixup_batch(
                 images, labels, patient_labels
             )
-            with autocast(device_type=device.type, enabled=amp_enabled):
+            with autocast(
+                device_type=device.type, dtype=amp_dtype, enabled=amp_enabled
+            ):
                 slice_logits, patient_logits = _split_model_output(model(images))
                 loss = lam * _compute_loss(
                     slice_logits,
@@ -163,7 +228,9 @@ def _train_epoch(
                     patient_loss_weight,
                 )
         else:
-            with autocast(device_type=device.type, enabled=amp_enabled):
+            with autocast(
+                device_type=device.type, dtype=amp_dtype, enabled=amp_enabled
+            ):
                 slice_logits, patient_logits = _split_model_output(model(images))
                 loss = _compute_loss(
                     slice_logits,
@@ -175,10 +242,32 @@ def _train_epoch(
                     patient_loss_weight,
                 )
 
+        if not torch.isfinite(loss):
+            nonfinite_outputs = _nonfinite_output_names(slice_logits, patient_logits)
+            raise FloatingPointError(
+                f"non-finite training loss: {loss.item()} outputs={nonfinite_outputs}"
+            )
+
         optimizer.zero_grad(set_to_none=True)
         scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        gradient_norm = nn.utils.clip_grad_norm_(
+            model.parameters(), max_norm=gradient_clip_norm
+        )
+        if not torch.isfinite(gradient_norm):
+            nonfinite_names = _nonfinite_gradient_names(model)
+            scaler.step(optimizer)
+            scaler.update()
+            consecutive_amp_skips += 1
+            if consecutive_amp_skips > max_consecutive_amp_skips:
+                raise FloatingPointError(
+                    f"non-finite gradients persisted for {consecutive_amp_skips} "
+                    f"AMP steps parameters={nonfinite_names[:20]}"
+                )
+            continue
         scaler.step(optimizer)
         scaler.update()
+        consecutive_amp_skips = 0
 
         total_loss += loss.item()
         n_batches += 1
@@ -195,12 +284,18 @@ def _validate(
     positive_weight: float,
     slice_loss_weight: float,
     patient_loss_weight: float,
-    use_amp: bool,
+    amp_enabled: bool,
+    amp_dtype: torch.dtype,
+    val_items: list[dict],
 ) -> tuple[float, dict]:
     """
     validation を実行して val_loss と epoch metrics を返す。
 
     vertebra-level 確率: sigmoid(logits).mean(dim=1) — 15 スライス平均。
+    非有限な確率が出た場合は`val_items`（loaderと同順）から該当アイテムを
+    特定して`FloatingPointError`で即座に停止する（sklearnのAUROC計算まで
+    伝播させ、原因不明な`ValueError: Input contains NaN`として
+    表面化させないため）。
 
     Returns:
         (val_loss, metrics_dict)
@@ -208,7 +303,7 @@ def _validate(
     model.eval()
     total_loss = 0.0
     n_batches = 0
-    amp_enabled = use_amp and device.type == "cuda"
+    offset = 0
 
     all_labels: list[int] = []
     all_probs: list[float] = []
@@ -224,7 +319,7 @@ def _validate(
         if patient_labels is not None:
             patient_labels = patient_labels.to(device, non_blocking=True)
 
-        with autocast(device_type=device.type, enabled=amp_enabled):
+        with autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
             logits, patient_logits = _split_model_output(model(images))
             loss = _compute_loss(
                 logits,
@@ -241,7 +336,19 @@ def _validate(
         progress.set_postfix(loss=f"{total_loss / n_batches:.4f}")
 
         # vertebra-level 確率: 15 スライスの sigmoid 平均
-        probs = torch.sigmoid(logits).mean(dim=1)  # (bs,)
+        # bf16のままだと numpy 変換 (`.numpy()`) が非対応のため float32 にキャストする
+        probs = torch.sigmoid(logits.float()).mean(dim=1)  # (bs,)
+        if not torch.isfinite(probs).all():
+            bad_local = torch.nonzero(~torch.isfinite(probs), as_tuple=True)[0].tolist()
+            offenders = [
+                f"{val_items[offset + i]['study_uid']}/{val_items[offset + i]['vertebra']}"
+                for i in bad_local[:20]
+            ]
+            raise FloatingPointError(
+                f"non-finite validation probabilities: {len(bad_local)}/{probs.numel()} "
+                f"items in batch, e.g. {offenders}"
+            )
+        offset += probs.shape[0]
         # 椎体ラベルは全スライス同値なので最初のスライスを使う
         item_labels = labels[:, 0]  # (bs,)
 
@@ -265,6 +372,7 @@ def run_training_loop(
     model: nn.Module,
     train_loader: DataLoader,
     val_loader: DataLoader,
+    val_items: list[dict],
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler._LRScheduler,
     cfg: dict,
@@ -291,11 +399,18 @@ def run_training_loop(
     slice_loss_weight = float(tr_cfg.get("slice_loss_weight", 15.0))
     patient_loss_weight = float(tr_cfg.get("patient_loss_weight", 1.0))
     patience = int(tr_cfg.get("early_stopping_patience", 15))
-    use_amp = bool(tr_cfg.get("use_amp", True))
+    amp_enabled, amp_dtype = _amp_settings(cfg, device)
+    raw_gradient_clip_norm = tr_cfg.get("gradient_clip_norm")
+    gradient_clip_norm = (
+        float("inf")
+        if raw_gradient_clip_norm is None
+        else float(raw_gradient_clip_norm)
+    )
+    max_consecutive_amp_skips = int(tr_cfg.get("max_consecutive_amp_skips", 8))
 
     scaler = GradScaler(
         device=device.type,
-        enabled=use_amp and device.type == "cuda",
+        enabled=amp_enabled and amp_dtype == torch.float16,
     )
     write_log_header(log_path, fold)
 
@@ -323,7 +438,10 @@ def run_training_loop(
             positive_weight,
             slice_loss_weight,
             patient_loss_weight,
-            use_amp,
+            amp_enabled,
+            amp_dtype,
+            gradient_clip_norm,
+            max_consecutive_amp_skips,
         )
         val_loss, metrics = _validate(
             model,
@@ -332,7 +450,9 @@ def run_training_loop(
             positive_weight,
             slice_loss_weight,
             patient_loss_weight,
-            use_amp,
+            amp_enabled,
+            amp_dtype,
+            val_items,
         )
         scheduler.step()
 
@@ -436,7 +556,6 @@ def train_one_fold(
     data_cfg = cfg.get("data", {})
     seed = int(data_cfg.get("random_seed", 42))
     positive_weight = float(tr_cfg.get("positive_weight", 2.0))
-    use_amp = bool(tr_cfg.get("use_amp", True))
     gpu_id = int(tr_cfg.get("gpu_id", 0))
     n_folds = int(data_cfg.get("n_folds", 5))
 
@@ -474,6 +593,7 @@ def train_one_fold(
         model,
         train_loader,
         val_loader,
+        val_items,
         optimizer,
         scheduler,
         cfg,
@@ -490,9 +610,7 @@ def train_one_fold(
     ckpt = torch.load(best_model_path, map_location=device)
     model.load_state_dict(ckpt["model"])
 
-    oof_preds = _collect_oof_predictions(
-        model, val_items, cfg, device, positive_weight, use_amp
-    )
+    oof_preds = _collect_oof_predictions(model, val_items, cfg, device, positive_weight)
 
     print(
         f"[FOLD {fold}] 完了 "
@@ -510,7 +628,6 @@ def _collect_oof_predictions(
     cfg: dict,
     device: torch.device,
     positive_weight: float,
-    use_amp: bool,
 ) -> list[dict]:
     """
     best model で val_items を推論し、OOF 予測リストを返す。
@@ -524,15 +641,18 @@ def _collect_oof_predictions(
 
     model.eval()
     all_probs: list[float] = []
-    amp_enabled = use_amp and device.type == "cuda"
+    amp_enabled, amp_dtype = _amp_settings(cfg, device)
 
     for batch in loader:
         images, _, _, _, _ = _unpack_batch(batch)
         images = _prepare_images(images, device)
-        with autocast(device_type=device.type, enabled=amp_enabled):
+        with autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
             logits, _ = _split_model_output(model(images))
-        probs = torch.sigmoid(logits).mean(dim=1).cpu().numpy().tolist()
+        # bf16のままだと numpy 変換 (`.numpy()`) が非対応のため float32 にキャストする
+        probs = torch.sigmoid(logits.float()).mean(dim=1).cpu().numpy().tolist()
         all_probs.extend(probs)
+
+    _raise_on_nonfinite_probs(all_probs, val_items, "OOF prediction")
 
     oof_preds = []
     for item, prob in zip(val_items, all_probs, strict=True):
@@ -571,13 +691,11 @@ def predict_on_items(
     from .data_utils import create_eval_data_loader
     from .model import TimmModel
 
-    tr_cfg = cfg.get("training", {})
-    use_amp = bool(tr_cfg.get("use_amp", True))
     loader = create_eval_data_loader(test_items, cfg)
 
     # 各 fold の予測を蓄積
     all_fold_probs: list[list[float]] = []
-    amp_enabled = use_amp and device.type == "cuda"
+    amp_enabled, amp_dtype = _amp_settings(cfg, device)
 
     for model_path in model_paths:
         ckpt = torch.load(model_path, map_location=device)
@@ -589,11 +707,17 @@ def predict_on_items(
         for batch in loader:
             images, _, _, _, _ = _unpack_batch(batch)
             images = _prepare_images(images, device)
-            with autocast(device_type=device.type, enabled=amp_enabled):
+            with autocast(
+                device_type=device.type, dtype=amp_dtype, enabled=amp_enabled
+            ):
                 logits, _ = _split_model_output(model(images))
-            probs = torch.sigmoid(logits).mean(dim=1).cpu().numpy().tolist()
+            # bf16のままだと numpy 変換 (`.numpy()`) が非対応のため float32 にキャストする
+            probs = torch.sigmoid(logits.float()).mean(dim=1).cpu().numpy().tolist()
             fold_probs.extend(probs)
 
+        _raise_on_nonfinite_probs(
+            fold_probs, test_items, f"test prediction ({model_path.name})"
+        )
         all_fold_probs.append(fold_probs)
         print(f"  推論完了: {model_path.name}")
 
@@ -614,6 +738,70 @@ def predict_on_items(
         )
 
     return test_preds
+
+
+def save_fold_artifacts(
+    cfg: dict, fold: int, fold_metrics: dict, oof_preds: list[dict], root: Path
+) -> None:
+    """1fold分のbest epoch metricsとOOF予測をディスクへ永続化する。
+
+    別プロセス（別セッションでの再開実行など）から
+    `load_or_reconstruct_fold_artifacts` で読み戻せるようにするため。
+    """
+    import pandas as pd
+
+    _, fold_dir = resolve_fold_paths(cfg, fold, root)
+    with (fold_dir / "metrics.json").open("w", encoding="utf-8") as f:
+        json.dump(fold_metrics, f, indent=2, ensure_ascii=False)
+    pd.DataFrame(oof_preds).to_csv(fold_dir / "oof_predictions.csv", index=False)
+
+
+def load_or_reconstruct_fold_artifacts(
+    cfg: dict,
+    fold: int,
+    items: list[dict],
+    root: Path,
+    device: torch.device,
+) -> tuple[dict, list[dict]] | None:
+    """1fold分のmetrics/OOF予測を読み込む。無ければbest_model.ptから再構成する。
+
+    `save_fold_artifacts` 導入前に学習済みのfold（`metrics.json`/
+    `oof_predictions.csv` が存在しない）でも、`best_model.pt` さえ残っていれば
+    そのcheckpointのval_metricsとOOF再推論から復元できる。これにより、
+    5foldのうち一部だけを今回のプロセスで学習した場合でも、既存の学習済みfoldを
+    含めた集計が可能になる（再構成結果は次回のためにディスクへ書き戻す）。
+
+    Returns:
+        (fold_metrics, oof_preds)。そのfoldが一度も学習されていなければNone。
+    """
+    from .data_utils import split_items_cv
+
+    data_cfg = cfg.get("data", {})
+    n_folds = int(data_cfg.get("n_folds", 5))
+    seed = int(data_cfg.get("random_seed", 42))
+
+    best_model_path, fold_dir = resolve_fold_paths(cfg, fold, root)
+    metrics_path = fold_dir / "metrics.json"
+    oof_path = fold_dir / "oof_predictions.csv"
+
+    if metrics_path.exists() and oof_path.exists():
+        import pandas as pd
+
+        with metrics_path.open("r", encoding="utf-8") as f:
+            fold_metrics = json.load(f)
+        oof_preds = pd.read_csv(oof_path).to_dict("records")
+        return fold_metrics, oof_preds
+
+    if not best_model_path.exists():
+        return None
+
+    ckpt = torch.load(best_model_path, map_location=device)
+    fold_metrics = ckpt["val_metrics"]
+    _, val_items = split_items_cv(items, n_splits=n_folds, val_fold=fold, seed=seed)
+    oof_preds = predict_on_items([best_model_path], val_items, cfg, device)
+
+    save_fold_artifacts(cfg, fold, fold_metrics, oof_preds, root)
+    return fold_metrics, oof_preds
 
 
 def _extract_model_kwargs(cfg: dict) -> dict:

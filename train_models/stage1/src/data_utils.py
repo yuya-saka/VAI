@@ -81,9 +81,41 @@ def _resolve_root() -> Path:
 
 
 # -------------------------
+# 除外リスト
+# -------------------------
+def _load_exclusions(
+    studies_path: Path | None,
+    levels_path: Path | None,
+) -> tuple[set[str], set[tuple[str, str]]]:
+    """excluded_studies.csv / excluded_levels.csv が存在すれば読み込む。"""
+    excluded_studies: set[str] = set()
+    excluded_levels: set[tuple[str, str]] = set()
+    if studies_path is not None and studies_path.exists():
+        df = pd.read_csv(studies_path)
+        excluded_studies = set(df["study_uid"].astype(str))
+        print(f"[INFO] excluded_studies={len(excluded_studies)}")
+    if levels_path is not None and levels_path.exists():
+        df = pd.read_csv(levels_path)
+        excluded_levels = set(
+            zip(
+                df["study_uid"].astype(str),
+                df["vertebra"].astype(str),
+                strict=True,
+            )
+        )
+        print(f"[INFO] excluded_levels={len(excluded_levels)}")
+    return excluded_studies, excluded_levels
+
+
+# -------------------------
 # データ収集
 # -------------------------
-def collect_items(dataset_dir: Path, csv_path: Path) -> list[dict]:
+def collect_items(
+    dataset_dir: Path,
+    csv_path: Path,
+    excluded_studies_path: Path | None = None,
+    excluded_levels_path: Path | None = None,
+) -> list[dict]:
     """
     fracture_dataset/ と train.csv からアイテムリストを構築する。
 
@@ -98,20 +130,33 @@ def collect_items(dataset_dir: Path, csv_path: Path) -> list[dict]:
 
     train.csv に存在し、かつ fracture_dataset にファイルが存在する
     study × vertebra のみを収集する。
+    excluded_studies_path / excluded_levels_path が指定されていれば、
+    該当する study / study×vertebra を収集対象から除外する
+    （stage2の除外リストと揃え、両モデルの学習データ母集団を一致させる）。
 
     Args:
         dataset_dir: fracture_dataset/ ディレクトリのパス
         csv_path: train.csv のパス
+        excluded_studies_path: 除外対象 study_uid を含む CSV のパス（任意）
+        excluded_levels_path: 除外対象 study_uid×vertebra を含む CSV のパス（任意）
 
     Returns:
         アイテムdictのリスト（最大 2012 studies × 7 vertebrae = 14,084件）
     """
     df = pd.read_csv(csv_path)
+    excluded_studies, excluded_levels = _load_exclusions(
+        excluded_studies_path, excluded_levels_path
+    )
     items = []
     missing_studies = 0
+    excluded_study_count = 0
+    excluded_level_count = 0
 
     for _, row in df.iterrows():
         study_uid = str(row["StudyInstanceUID"])
+        if study_uid in excluded_studies:
+            excluded_study_count += 1
+            continue
         study_dir = dataset_dir / study_uid
         patient_label = int(row["patient_overall"]) if "patient_overall" in df.columns else int(
             max(row[vertebra] for vertebra in VERTEBRAE)
@@ -122,6 +167,10 @@ def collect_items(dataset_dir: Path, csv_path: Path) -> list[dict]:
             continue
 
         for vertebra in VERTEBRAE:
+            if (study_uid, vertebra) in excluded_levels:
+                excluded_level_count += 1
+                continue
+
             ct_path = study_dir / vertebra / "ct.npy"
             mask_path = study_dir / vertebra / "vertebra_mask.npy"
 
@@ -147,6 +196,10 @@ def collect_items(dataset_dir: Path, csv_path: Path) -> list[dict]:
     )
     if missing_studies > 0:
         print(f"[WARNING] fracture_dataset に存在しない study: {missing_studies} 件")
+    if excluded_study_count > 0:
+        print(f"[INFO] excluded_studies によるスキップ: {excluded_study_count} 件")
+    if excluded_level_count > 0:
+        print(f"[INFO] excluded_levels によるスキップ: {excluded_level_count} 件")
 
     return items
 

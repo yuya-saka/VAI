@@ -19,10 +19,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import socket
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -57,7 +59,13 @@ from src.data_utils import (
     split_test_holdout,
 )
 from src.experiment import resolve_fold_paths, resolve_output_base
-from src.trainer import predict_on_items, train_one_fold
+from src.staging import cleanup_stage, stage_dataset, sweep_stale_stages
+from src.trainer import (
+    load_or_reconstruct_fold_artifacts,
+    predict_on_items,
+    save_fold_artifacts,
+    train_one_fold,
+)
 from utils.metrics import compute_level_metrics, compute_oof_metrics
 
 ROOT = Path(__file__).resolve().parent.parent.parent  # VAI/
@@ -139,7 +147,13 @@ def print_level_metrics(level_metrics: dict[str, dict]) -> None:
         )
 
 
-def _do_training(local_rank: int, world_size: int, args: argparse.Namespace, cfg: dict) -> None:
+def _do_training(
+    local_rank: int,
+    world_size: int,
+    args: argparse.Namespace,
+    cfg: dict,
+    dataset_root: Path,
+) -> None:
     """実際の学習ロジック。シングル・マルチ GPU 共通。"""
     is_main = local_rank == 0
 
@@ -153,7 +167,7 @@ def _do_training(local_rank: int, world_size: int, args: argparse.Namespace, cfg
     seed = int(data_cfg.get("random_seed", 42))
     test_size = float(data_cfg.get("test_holdout_size", 0.2))
     gpu_id = local_rank  # CUDA_VISIBLE_DEVICES でマッピング済みなので index=local_rank
-    dataset_dir = ROOT / str(data_cfg.get("dataset_dir", "data/rsna_data/fracture_dataset"))
+    dataset_dir = dataset_root
     csv_path = ROOT / str(data_cfg.get("csv_path", "data/rsna_data/train.csv"))
 
     start_fold = args.start_fold if args.start_fold is not None else int(data_cfg.get("start_fold", 0))
@@ -184,7 +198,18 @@ def _do_training(local_rank: int, world_size: int, args: argparse.Namespace, cfg
         print(f"{'='*60}\n")
 
     set_seed(seed)
-    items = collect_items(dataset_dir, csv_path)
+    excluded_studies_path = data_cfg.get("excluded_studies_path")
+    excluded_levels_path = data_cfg.get("excluded_levels_path")
+    items = collect_items(
+        dataset_dir,
+        csv_path,
+        excluded_studies_path=ROOT / excluded_studies_path
+        if excluded_studies_path
+        else None,
+        excluded_levels_path=ROOT / excluded_levels_path
+        if excluded_levels_path
+        else None,
+    )
     train_val_items, test_items = split_test_holdout(items, test_size=test_size, seed=seed)
 
     if is_main:
@@ -195,20 +220,36 @@ def _do_training(local_rank: int, world_size: int, args: argparse.Namespace, cfg
         )
 
     cfg.setdefault("training", {})["gpu_id"] = gpu_id
-
-    fold_metrics_list: list[dict] = []
-    all_oof: list[dict] = []
+    device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
 
     for fold in range(start_fold, end_fold + 1):
         fold_metrics, oof_preds = train_one_fold(cfg, fold, train_val_items, ROOT)
-        fold_metrics_list.append(fold_metrics)
-        all_oof.extend(oof_preds)
         if is_main:
+            save_fold_artifacts(cfg, fold, fold_metrics, oof_preds, ROOT)
             print_metrics(fold_metrics, label=f"FOLD {fold} val")
             print()
 
     if not is_main:
         return
+
+    # 集計は今回このプロセスで学習したfoldだけでなく、既存の学習済みfold
+    # （別セッションで完走したものなど）も含めた0..n_folds-1全体で行う。
+    # これにより、5foldを複数回に分けて（例: fold0-1→クラッシュ→fold2-4再開）
+    # 学習した場合でも、最後に通しで5fold分の集計結果を表示できる。
+    fold_metrics_list: list[dict] = []
+    all_oof: list[dict] = []
+    trained_folds: list[int] = []
+    for fold in range(n_folds):
+        result = load_or_reconstruct_fold_artifacts(
+            cfg, fold, train_val_items, ROOT, device
+        )
+        if result is None:
+            print(f"[WARNING] fold {fold} は未学習のため集計対象から除外します")
+            continue
+        fold_metrics, oof_preds = result
+        fold_metrics_list.append(fold_metrics)
+        all_oof.extend(oof_preds)
+        trained_folds.append(fold)
 
     # OOF metrics
     oof_metrics: dict = {}
@@ -235,8 +276,6 @@ def _do_training(local_rank: int, world_size: int, args: argparse.Namespace, cfg
     # Test set 評価
     test_metrics: dict = {}
     test_level_metrics: dict = {}
-    trained_folds = list(range(start_fold, end_fold + 1))
-    device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
 
     model_paths = []
     for fold in trained_folds:
@@ -303,16 +342,29 @@ def _do_training(local_rank: int, world_size: int, args: argparse.Namespace, cfg
     print(f"{'='*60}\n")
 
 
-def _worker(local_rank: int, world_size: int, port: int, args: argparse.Namespace, cfg: dict) -> None:
+def _worker(
+    local_rank: int,
+    world_size: int,
+    port: int,
+    args: argparse.Namespace,
+    cfg: dict,
+    dataset_root: Path,
+) -> None:
     """mp.spawn から呼ばれるDDPワーカー。"""
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = str(port)
     dist.init_process_group(backend="nccl", rank=local_rank, world_size=world_size)
     torch.cuda.set_device(local_rank)
     try:
-        _do_training(local_rank, world_size, args, cfg)
+        _do_training(local_rank, world_size, args, cfg, dataset_root)
     finally:
         dist.destroy_process_group()
+
+
+def _raise_on_sigterm(signum: int, frame: Any) -> None:
+    """SIGTERMを通常の例外に変換し、finallyブロックを確実に通す。"""
+    del frame
+    raise SystemExit(f"terminated by signal {signum}")
 
 
 def main() -> None:
@@ -321,6 +373,7 @@ def main() -> None:
     cfg = apply_cli_overrides(cfg, args)
 
     tr_cfg = cfg.get("training", {})
+    data_cfg = cfg.get("data", {})
 
     # CUDA_VISIBLE_DEVICES を CUDA 初期化前に設定
     if "CUDA_VISIBLE_DEVICES" not in os.environ:
@@ -331,11 +384,36 @@ def main() -> None:
 
     n_gpu = int(tr_cfg.get("n_gpu", 1))
 
-    if n_gpu > 1:
-        port = _find_free_port()
-        mp.spawn(_worker, args=(n_gpu, port, args, cfg), nprocs=n_gpu, join=True)
-    else:
-        _do_training(local_rank=0, world_size=1, args=args, cfg=cfg)
+    dataset_root = ROOT / str(
+        data_cfg.get("dataset_dir", "data/rsna_data/fracture_dataset")
+    )
+    stage_dir: Path | None = None
+    if bool(data_cfg.get("stage_to_local", False)):
+        stage_root = Path(str(data_cfg.get("stage_root", "/dev/shm")))
+        sweep_stale_stages(stage_root)
+        stage_dir = stage_dataset(dataset_root, stage_root)
+        dataset_root = stage_dir
+        signal.signal(signal.SIGTERM, _raise_on_sigterm)
+
+    try:
+        if n_gpu > 1:
+            port = _find_free_port()
+            mp.spawn(
+                _worker,
+                args=(n_gpu, port, args, cfg, dataset_root),
+                nprocs=n_gpu,
+                join=True,
+            )
+        else:
+            _do_training(
+                local_rank=0,
+                world_size=1,
+                args=args,
+                cfg=cfg,
+                dataset_root=dataset_root,
+            )
+    finally:
+        cleanup_stage(stage_dir)
 
 
 if __name__ == "__main__":

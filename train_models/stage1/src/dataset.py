@@ -131,28 +131,43 @@ class RSNAFractureDataset(Dataset):
         if self.transform is None:
             images = np.concatenate([ct, mask[:, np.newaxis]], axis=1)
         else:
-            images = np.empty((n_slices, 6, 224, 224), dtype=np.uint8)
-
-            for s in range(n_slices):
-                ct_slice = ct[s].transpose(1, 2, 0)
-                mask_slice = mask[s]
-
-                augmented = self.transform(image=ct_slice, mask=mask_slice)
-                ct_aug = augmented["image"]
-                mask_aug = augmented["mask"]
-
-                combined = np.concatenate([ct_aug, mask_aug[:, :, np.newaxis]], axis=2)
-                images[s] = combined.transpose(2, 0, 1)
+            images = self._augment_volume(ct, mask)
 
         # スライス順序ランダム化（train時のみ）
         if self.mode == "train" and random.random() < self.p_rand_order:
             indices = np.random.permutation(n_slices)
             images = images[indices]
 
-        images_t = torch.from_numpy(images)
+        images_t = torch.from_numpy(np.ascontiguousarray(images))
         labels_t = torch.full((n_slices,), label, dtype=torch.float32)  # (15,) 全同値
         patient_label_t = torch.tensor(patient_label, dtype=torch.float32)
 
         if self.include_patient_label:
             return images_t, labels_t, patient_label_t
         return images_t, labels_t
+
+    def _augment_volume(self, ct: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        """15断面をまとめて1回のtransform呼び出しで拡張する。
+
+        全断面をチャンネル軸へスタックすることで、albumentationsの
+        幾何変換パラメータが断面ごとに独立にランダム化される問題
+        （回転・平行移動・スケールが断面間でバラバラになり、解剖学的な
+        空間整合性が崩れる）を解消する。`(2, 0, 1)`⇄`(1, 2, 0)`は
+        互いに逆変換であることを利用し、往復のtranspose/reshapeで
+        元の軸順に戻す。
+        """
+        n_planes, n_ct_channels, height, width = ct.shape
+        image_stack = ct.transpose(2, 3, 0, 1).reshape(
+            height, width, n_planes * n_ct_channels
+        )
+        mask_stack = mask.transpose(1, 2, 0)
+
+        augmented = self.transform(image=image_stack, mask=mask_stack)
+
+        images = (
+            augmented["image"]
+            .reshape(height, width, n_planes, n_ct_channels)
+            .transpose(2, 3, 0, 1)
+        )
+        masks = augmented["mask"].transpose(2, 0, 1)
+        return np.concatenate([images, masks[:, None]], axis=1)
