@@ -94,12 +94,16 @@ class Stage2Model(nn.Module):
         region_dropout: float = 0.3,
         pretrained: bool = True,
         force_primary_fp32: bool = True,
+        region_mode: str = "masked",
     ) -> None:
         super().__init__()
+        if region_mode not in ("masked", "global"):
+            raise ValueError(f"unsupported region_mode: {region_mode!r}")
         self.n_slices = n_slices
         self.n_regions = n_regions
         self.in_chans = in_chans
         self.force_primary_fp32 = force_primary_fp32
+        self.region_mode = region_mode
 
         # Primary path: identical construction to Stage1's TimmModel so that
         # state_dicts are interchangeable between the two encoder/lstm/head triples.
@@ -168,7 +172,7 @@ class Stage2Model(nn.Module):
             raise ValueError(f"expected {self.n_slices} slices, got {n_slices}")
         flattened = images.reshape(
             batch_size * n_slices, self.in_chans, images.shape[-2], images.shape[-1]
-        )
+        ).to(memory_format=torch.channels_last)
         final_map, intermediates = self.encoder.forward_intermediates(
             flattened, indices=(1, 2, 3, 4), intermediates_only=False
         )
@@ -193,18 +197,23 @@ class Stage2Model(nn.Module):
             for conv, feature in zip(self.lateral_convs, intermediates, strict=True)
         ]
         fused = self.fpn_fusion(torch.cat(projected, dim=1))
-        region_features, region_plane_valid = self._pool_regions(
-            fused, region_masks, batch_size, n_slices
-        )
-        flattened_regions = region_features.permute(0, 2, 1, 3).reshape(
-            batch_size * self.n_regions, n_slices, -1
-        )
-        region_logits = (
-            self.region_head(flattened_regions)
-            .view(batch_size, self.n_regions, n_slices)
-            .permute(0, 2, 1)
-        )
-        plane_valid = region_plane_valid.any(dim=-1)
+        if self.region_mode == "global":
+            region_logits, region_plane_valid, plane_valid = self._global_region_head(
+                fused, batch_size, n_slices
+            )
+        else:
+            region_features, region_plane_valid = self._pool_regions(
+                fused, region_masks, batch_size, n_slices
+            )
+            flattened_regions = region_features.permute(0, 2, 1, 3).reshape(
+                batch_size * self.n_regions, n_slices, -1
+            )
+            region_logits = (
+                self.region_head(flattened_regions)
+                .view(batch_size, self.n_regions, n_slices)
+                .permute(0, 2, 1)
+            )
+            plane_valid = region_plane_valid.any(dim=-1)
         return Stage2Output(
             slice_logits, region_logits, region_plane_valid, plane_valid
         )
@@ -243,6 +252,25 @@ class Stage2Model(nn.Module):
         denominator = masks.sum(dim=(-2, -1)).unsqueeze(-1).clamp_min(1e-6)
         pooled = numerator / denominator
         return pooled.view(batch_size, n_slices, self.n_regions, -1), region_plane_valid
+
+    def _global_region_head(
+        self, feature_map: Tensor, batch_size: int, n_slices: int
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Unmasked global-average pooling ablation: same FPN feature, no region split.
+
+        Isolates whether the FPN neck alone (multi-scale features vs. the
+        primary path's single deepest-layer feature) explains a region-head
+        improvement, independent of anatomical mask pooling. Every plane is
+        treated as valid, matching how the primary path uses all planes
+        unconditionally rather than gating on region-mask coverage.
+        """
+        pooled = feature_map.mean(dim=(-2, -1)).view(batch_size, n_slices, -1)
+        region_logits = self.region_head(pooled).unsqueeze(-1)
+        region_plane_valid = torch.ones(
+            batch_size, n_slices, 1, dtype=torch.bool, device=feature_map.device
+        )
+        plane_valid = region_plane_valid.any(dim=-1)
+        return region_logits, region_plane_valid, plane_valid
 
     def backbone_parameters(self) -> list[nn.Parameter]:
         """encoder (timm backbone) parameters, for differential LR."""

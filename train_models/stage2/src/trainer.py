@@ -33,7 +33,7 @@ from .data_utils import (
     create_model_optimizer_scheduler,
     split_items_cv,
 )
-from .evaluation import compute_metrics, compute_region_diagnostics
+from .evaluation import compute_metrics, compute_region_diagnostics, region_names_for
 from .experiment import (
     append_jsonl,
     prune_training_jsonl,
@@ -41,8 +41,6 @@ from .experiment import (
     validate_resume_config,
 )
 from .model import STAGE2_ARCHITECTURE_VERSION, Stage2Model, Stage2Output
-
-REGION_NAMES = ("body", "right_foramen", "left_foramen", "posterior")
 
 
 def _prepare_images(images: Tensor, device: torch.device) -> Tensor:
@@ -92,13 +90,35 @@ def _loss_for_targets(
     targets: Tensor,
     positive_weight: float,
     region_loss_weight: float,
+    primary_loss_weight: float,
 ) -> tuple[Tensor, dict[str, Tensor]]:
     return stage2_loss(
         output,
         targets,
         positive_weight=positive_weight,
         region_loss_weight=region_loss_weight,
+        primary_loss_weight=primary_loss_weight,
     )
+
+
+_SELECTION_PROBABILITY_KEYS = {"primary": "pred_prob", "region": "region_pred_prob"}
+
+
+def _resolve_selection_probability_key(training_config: dict[str, Any]) -> str:
+    """Map `training.selection_metric` to the prediction column it selects on.
+
+    Checkpoint selection and early stopping must track whichever head is
+    actually being trained (see ``primary_loss_weight``/``region_loss_weight``);
+    a region-only run whose selection stayed on the untrained primary head
+    would pick checkpoints and stop training on pure noise.
+    """
+    selection_metric = str(training_config.get("selection_metric", "primary"))
+    if selection_metric not in _SELECTION_PROBABILITY_KEYS:
+        raise ValueError(
+            f"unsupported training.selection_metric: {selection_metric!r} "
+            f"(expected one of {sorted(_SELECTION_PROBABILITY_KEYS)})"
+        )
+    return _SELECTION_PROBABILITY_KEYS[selection_metric]
 
 
 def _nonfinite_gradient_names(model: torch.nn.Module) -> list[str]:
@@ -172,6 +192,7 @@ def train_epoch(
     mixup_probability = float(training_config.get("p_mixup", 0.2))
     positive_weight = float(training_config.get("positive_weight", 2.0))
     region_loss_weight = float(training_config.get("region_loss_weight", 0.5))
+    primary_loss_weight = float(training_config.get("primary_loss_weight", 1.0))
     raw_gradient_clip_norm = training_config.get("gradient_clip_norm", 1.0)
     gradient_clip_norm = (
         float("inf")
@@ -208,10 +229,10 @@ def train_epoch(
             output = model(images, regions)
             if use_mixup:
                 loss_a, components_a = _loss_for_targets(
-                    output, targets_a, positive_weight, region_loss_weight
+                    output, targets_a, positive_weight, region_loss_weight, primary_loss_weight
                 )
                 loss_b, components_b = _loss_for_targets(
-                    output, targets_b, positive_weight, region_loss_weight
+                    output, targets_b, positive_weight, region_loss_weight, primary_loss_weight
                 )
                 loss = lam * loss_a + (1.0 - lam) * loss_b
                 components = {
@@ -220,7 +241,7 @@ def train_epoch(
                 }
             else:
                 loss, components = _loss_for_targets(
-                    output, targets, positive_weight, region_loss_weight
+                    output, targets, positive_weight, region_loss_weight, primary_loss_weight
                 )
 
         if not torch.isfinite(loss):
@@ -324,6 +345,7 @@ def evaluate(
     use_amp, amp_dtype = _amp_settings(config, device)
     positive_weight = float(training_config.get("positive_weight", 2.0))
     region_loss_weight = float(training_config.get("region_loss_weight", 0.5))
+    primary_loss_weight = float(training_config.get("primary_loss_weight", 1.0))
     total_loss = 0.0
     total_stage1_loss = 0.0
     total_region_loss = 0.0
@@ -345,7 +367,7 @@ def evaluate(
         ):
             output = model(images, regions)
             loss, components = _loss_for_targets(
-                output, targets_device, positive_weight, region_loss_weight
+                output, targets_device, positive_weight, region_loss_weight, primary_loss_weight
             )
         total_loss += float(loss)
         total_stage1_loss += float(components["stage1_loss"])
@@ -371,7 +393,8 @@ def evaluate(
             )
             region_probabilities = torch.sigmoid(region_logits)
             region_plane_valid_f = output.region_plane_valid.to(region_logits.dtype)
-            for region_index, region_name in enumerate(REGION_NAMES):
+            region_names = region_names_for(region_logits.shape[-1])
+            for region_index, region_name in enumerate(region_names):
                 weights = region_plane_valid_f[..., region_index]
                 evidence = (region_probabilities[..., region_index] * weights).sum(
                     dim=1
@@ -392,7 +415,7 @@ def evaluate(
             if region_pred_prob is not None:
                 record["region_pred_prob"] = float(region_pred_prob[index])
                 record["valid_plane_count"] = int(valid_plane_count[index])
-                for region_name in REGION_NAMES:
+                for region_name in region_evidence:
                     record[f"region_evidence_{region_name}"] = float(
                         region_evidence[region_name][index]
                     )
@@ -416,10 +439,12 @@ def evaluate(
     return val_stats, predictions, diagnostics
 
 
-def _metrics_from_predictions(predictions: list[dict[str, Any]]) -> dict[str, Any]:
+def _metrics_from_predictions(
+    predictions: list[dict[str, Any]], probability_key: str = "pred_prob"
+) -> dict[str, Any]:
     return compute_metrics(
         np.asarray([record["label"] for record in predictions]),
-        np.asarray([record["pred_prob"] for record in predictions]),
+        np.asarray([record[probability_key] for record in predictions]),
         np.asarray([record["study_uid"] for record in predictions]),
         np.asarray([record["vertebra"] for record in predictions]),
     )
@@ -518,6 +543,7 @@ def train_one_fold(
     is_main = rank == 0
     data_config = config.get("data", {})
     training_config = config.get("training", {})
+    selection_probability_key = _resolve_selection_probability_key(training_config)
     train_items, val_items = split_items_cv(
         items,
         n_splits=int(data_config.get("n_folds", 5)),
@@ -577,7 +603,7 @@ def train_one_fold(
                 _base_model(model), val_loader, device, config
             )
             val_loss = val_stats["loss"]
-            metrics = _metrics_from_predictions(predictions)
+            metrics = _metrics_from_predictions(predictions, selection_probability_key)
             auroc = float(metrics.get("auroc", float("nan")))
             improved = np.isfinite(auroc) and auroc > best_auroc
             append_jsonl(
@@ -627,8 +653,15 @@ def train_one_fold(
     val_stats, predictions, diagnostics = evaluate(
         _base_model(model), val_loader, device, config, description="best"
     )
+    primary_metrics = _metrics_from_predictions(predictions, "pred_prob")
+    region_metrics = _metrics_from_predictions(predictions, "region_pred_prob")
+    selection_metrics = (
+        primary_metrics if selection_probability_key == "pred_prob" else region_metrics
+    )
     metrics = {
-        **_metrics_from_predictions(predictions),
+        **selection_metrics,
+        "primary": primary_metrics,
+        "region": region_metrics,
         "val_loss": val_stats["loss"],
         "val_stage1_loss": val_stats["stage1_loss"],
         "val_region_loss": val_stats["region_loss"],
@@ -660,10 +693,16 @@ def predict_ensemble(
         fold_predictions.append(predictions)
         del model
     outputs: list[dict[str, Any]] = []
+    # Region evidence column names depend on the model's region_mode (4
+    # anatomical names for "masked", a single generic name for "global"), so
+    # derive the averaged keys from the predictions actually produced rather
+    # than a fixed region list.
     probability_keys = [
-        "pred_prob",
-        "region_pred_prob",
-        *(f"region_evidence_{name}" for name in REGION_NAMES),
+        key
+        for key in fold_predictions[0][0]
+        if key == "pred_prob"
+        or key == "region_pred_prob"
+        or key.startswith("region_evidence_")
     ]
     for index, item in enumerate(items):
         record: dict[str, Any] = {

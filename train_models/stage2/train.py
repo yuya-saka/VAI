@@ -57,6 +57,26 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _primary_and_region_metrics(frame: pd.DataFrame) -> dict[str, Any]:
+    """Score a predictions frame on both the primary and region-MIL heads.
+
+    Both probability columns are always present (region masks are always
+    passed through the model), so ablation conditions that train only one
+    head still report a fair side-by-side comparison against the other.
+    """
+    labels = frame["label"].to_numpy()
+    study_uids = frame["study_uid"].to_numpy()
+    vertebrae = frame["vertebra"].to_numpy()
+    return {
+        "primary": compute_metrics(
+            labels, frame["pred_prob"].to_numpy(), study_uids, vertebrae
+        ),
+        "region": compute_metrics(
+            labels, frame["region_pred_prob"].to_numpy(), study_uids, vertebrae
+        ),
+    }
+
+
 def apply_overrides(config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     """Apply supported CLI overrides without mutating the loaded dictionary."""
     updated = {
@@ -169,12 +189,7 @@ def _run_training(
     if local_rank == 0:
         oof_frame = pd.DataFrame(all_oof)
         oof_frame.to_csv(output_dir / "oof_predictions.csv", index=False)
-        oof_metrics = compute_metrics(
-            oof_frame["label"].to_numpy(),
-            oof_frame["pred_prob"].to_numpy(),
-            oof_frame["study_uid"].to_numpy(),
-            oof_frame["vertebra"].to_numpy(),
-        )
+        oof_metrics = _primary_and_region_metrics(oof_frame)
         model_paths = [
             resolve_fold_paths(config, fold, ROOT)[0]
             for fold in range(start_fold, end_fold + 1)
@@ -182,12 +197,7 @@ def _run_training(
         test_predictions = predict_ensemble(config, test_items, model_paths, device)
         test_frame = pd.DataFrame(test_predictions)
         test_frame.to_csv(output_dir / "test_predictions.csv", index=False)
-        test_metrics = compute_metrics(
-            test_frame["label"].to_numpy(),
-            test_frame["pred_prob"].to_numpy(),
-            test_frame["study_uid"].to_numpy(),
-            test_frame["vertebra"].to_numpy(),
-        )
+        test_metrics = _primary_and_region_metrics(test_frame)
         with (output_dir / "metrics.json").open("w", encoding="utf-8") as file:
             json.dump(
                 {

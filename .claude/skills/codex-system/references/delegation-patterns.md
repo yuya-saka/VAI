@@ -39,7 +39,7 @@
 
 ```bash
 codex exec \
-  --model gpt-5-codex \
+  --model gpt-5.6-sol \
   --config model_reasoning_effort="high" \
   --sandbox read-only \
   --full-auto \
@@ -57,7 +57,7 @@ codex exec \
 
 ```bash
 codex exec \
-  --model gpt-5-codex \
+  --model gpt-5.6-sol \
   --config model_reasoning_effort="high" \
   --sandbox read-only \
   --full-auto \
@@ -79,8 +79,8 @@ codex exec \
 
 ```bash
 codex exec \
-  --model gpt-5-codex \
-  --config model_reasoning_effort="xhigh" \
+  --model gpt-5.6-sol \
+  --config model_reasoning_effort="high" \
   --sandbox read-only \
   --full-auto \
   "Optimize the algorithm in src/data/aggregator.py:
@@ -103,8 +103,8 @@ codex exec \
 
 ```bash
 codex exec \
-  --model gpt-5-codex \
-  --config model_reasoning_effort="xhigh" \
+  --model gpt-5.6-sol \
+  --config model_reasoning_effort="high" \
   --sandbox read-only \
   --full-auto \
   "Security audit of src/api/auth.py:

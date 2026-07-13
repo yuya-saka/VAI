@@ -325,7 +325,8 @@ def create_model_optimizer_scheduler(
         region_dropout=float(model_config.get("region_dropout", 0.3)),
         pretrained=bool(model_config.get("pretrained", True)),
         force_primary_fp32=bool(training_config.get("force_primary_fp32", True)),
-    ).to(device)
+        region_mode=str(model_config.get("region_mode", "masked")),
+    ).to(device, memory_format=torch.channels_last)
     optimizer = torch.optim.AdamW(
         [
             {

@@ -78,16 +78,22 @@ def stage2_loss(
     targets: Tensor,
     positive_weight: float = 2.0,
     region_loss_weight: float = 0.5,
+    primary_loss_weight: float = 1.0,
 ) -> tuple[Tensor, dict[str, Tensor]]:
-    """Compute the Stage1-compatible primary loss plus the region auxiliary loss.
+    """Compute the weighted sum of the primary loss and the region auxiliary loss.
 
     With ``region_loss_weight <= 0`` (or no region output at all), the total
-    loss depends only on ``slice_logits`` and reproduces Stage1's loss exactly.
+    loss depends only on ``slice_logits``; with the default
+    ``primary_loss_weight=1.0`` it then reproduces Stage1's loss exactly.
+    Setting ``primary_loss_weight=0.0`` zeroes the gradient contribution of
+    the primary path (including the shared encoder's primary-path gradient),
+    which is what a region-only ablation needs.
     """
     targets_expanded = targets.float().unsqueeze(1).expand_as(output.slice_logits)
     stage1_loss = weighted_bce(output.slice_logits, targets_expanded, positive_weight)
     if region_loss_weight <= 0.0 or output.region_logits is None:
-        return stage1_loss, {
+        total = primary_loss_weight * stage1_loss
+        return total, {
             "stage1_loss": stage1_loss,
             "region_loss": torch.zeros_like(stage1_loss),
         }
@@ -98,7 +104,7 @@ def stage2_loss(
         targets,
         positive_weight,
     )
-    total = stage1_loss + region_loss_weight * region_loss
+    total = primary_loss_weight * stage1_loss + region_loss_weight * region_loss
     return total, {"stage1_loss": stage1_loss, "region_loss": region_loss}
 
 

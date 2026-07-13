@@ -24,7 +24,7 @@
 
 ### Phase 4: Implementation (Codex が実装する)
 13. Obtain user approval.
-14. **Delegate implementation to Codex** via sub-agent (`gpt-5.3-codex`, `workspace-write`).
+14. **Delegate implementation to Codex** via sub-agent (`gpt-terra`, `workspace-write`).
 15. Claude does NOT write code directly — Codex handles all code and test writing.
 16. Claude reviews Codex output and reports to user.
 
