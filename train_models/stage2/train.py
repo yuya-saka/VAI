@@ -194,9 +194,17 @@ def _run_training(
             resolve_fold_paths(config, fold, ROOT)[0]
             for fold in range(start_fold, end_fold + 1)
         ]
-        test_predictions = predict_ensemble(config, test_items, model_paths, device)
+        test_predictions, test_predictions_per_fold = predict_ensemble(
+            config, test_items, model_paths, device
+        )
         test_frame = pd.DataFrame(test_predictions)
         test_frame.to_csv(output_dir / "test_predictions.csv", index=False)
+        # fold ごとの非アンサンブル予測。OOF と同じ「学習していないモデルによる
+        # 予測」という性質を保ったまま test 側も全 fold 分利用できるようにする。
+        test_per_fold_frame = pd.DataFrame(test_predictions_per_fold)
+        test_per_fold_frame.to_csv(
+            output_dir / "test_predictions_per_fold.csv", index=False
+        )
         test_metrics = _primary_and_region_metrics(test_frame)
         with (output_dir / "metrics.json").open("w", encoding="utf-8") as file:
             json.dump(

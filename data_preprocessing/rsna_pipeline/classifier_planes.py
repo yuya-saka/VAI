@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import csv
-from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -11,9 +10,9 @@ from typing import Final
 import numpy as np
 import numpy.typing as npt
 import pydicom
-from scipy.optimize import linear_sum_assignment  # type: ignore[import-untyped]
 
 from data_preprocessing.rsna_pipeline.classifier_plane_selection import (
+    representative_bbox_slice_numbers,
     select_classifier_plane_positions,
 )
 from data_preprocessing.rsna_pipeline.dicom_geometry import DicomSeriesGeometry
@@ -36,7 +35,7 @@ class ClassifierPlaneError(ValueError):
 
 @dataclass(frozen=True)
 class BoundingBoxCenter:
-    """Representative center of one contiguous bbox slice interval."""
+    """Physical center of one fracture bounding-box row."""
 
     slice_number: int
     patient_lps_mm: tuple[float, float, float]
@@ -71,6 +70,7 @@ class ClassifierPlanePlan:
     robust_range_mm: tuple[float, float]
     full_range_mm: tuple[float, float]
     planes: tuple[ClassifierPlane, ...]
+    assigned_bbox_slice_numbers: tuple[int, ...] = ()
 
 
 def load_study_bbox_centers(
@@ -78,26 +78,23 @@ def load_study_bbox_centers(
     study_id: str,
     geometry: DicomSeriesGeometry,
 ) -> tuple[BoundingBoxCenter, ...]:
-    """Load one representative physical bbox center per contiguous interval."""
+    """Load the physical center of every fracture bounding-box row."""
     if not bbox_csv_path.is_file():
         raise FileNotFoundError(f"Bounding-box CSV not found: {bbox_csv_path}")
 
     rows = _study_bbox_rows(bbox_csv_path, study_id)
     if not rows:
         return ()
-    slice_groups = _contiguous_slice_groups(row.slice_number for row in rows)
     slice_index_by_number = _slice_index_by_number(geometry)
     centers: list[BoundingBoxCenter] = []
-    for slice_group in slice_groups:
-        representative_slice = slice_group[(len(slice_group) - 1) // 2]
-        slice_rows = [row for row in rows if row.slice_number == representative_slice]
-        row_center = float(np.mean([row.y + row.height / 2.0 for row in slice_rows]))
-        column_center = float(np.mean([row.x + row.width / 2.0 for row in slice_rows]))
+    for row in rows:
+        row_center = row.y + row.height / 2.0
+        column_center = row.x + row.width / 2.0
         try:
-            slice_index = slice_index_by_number[representative_slice]
+            slice_index = slice_index_by_number[row.slice_number]
         except KeyError as error:
             raise ClassifierPlaneError(
-                f"BBox slice {representative_slice} has no matching DICOM image"
+                f"BBox slice {row.slice_number} has no matching DICOM image"
             ) from error
         dicom_path = geometry.slices[slice_index].path
         patient_point = (
@@ -113,7 +110,7 @@ def load_study_bbox_centers(
         )
         centers.append(
             BoundingBoxCenter(
-                slice_number=representative_slice,
+                slice_number=row.slice_number,
                 patient_lps_mm=_vector3_tuple(patient_point),
             )
         )
@@ -125,15 +122,27 @@ def assign_bbox_centers_to_vertebrae(
     processed_masks: dict[str, ProcessedVertebraMask],
     orientations: dict[str, OrientationSearchResult],
     *,
-    unique_levels: tuple[str, ...] = (),
+    positive_levels: tuple[str, ...],
 ) -> dict[str, tuple[BoundingBoxCenter, ...]]:
-    """Assign every bbox interval to exactly one nearest vertebra."""
+    """Assign every bbox row independently to one nearest positive vertebra."""
     assignments: dict[str, list[BoundingBoxCenter]] = {
         level: [] for level in processed_masks
     }
+    if not bbox_centers:
+        return {level: () for level in assignments}
+    if not positive_levels:
+        raise ClassifierPlaneError(
+            "BBox assignment requires at least one positive vertebra level"
+        )
+    unknown_levels = set(positive_levels) - processed_masks.keys()
+    if unknown_levels:
+        unknown = ", ".join(sorted(unknown_levels))
+        raise ClassifierPlaneError(
+            f"Fracture label contains unknown vertebra levels: {unknown}"
+        )
     ranges = {
         level: _projection_range(processed_masks[level], orientations[level])
-        for level in processed_masks
+        for level in positive_levels
     }
     centroids = {
         level: float(
@@ -142,21 +151,12 @@ def assign_bbox_centers_to_vertebrae(
                 orientations[level].normal_lps,
             )
         )
-        for level in processed_masks
+        for level in positive_levels
     }
-    if len(bbox_centers) == len(unique_levels) and unique_levels:
-        return _assign_bbox_centers_uniquely(
-            bbox_centers,
-            unique_levels,
-            assignments,
-            ranges,
-            centroids,
-            orientations,
-        )
     for bbox_center in bbox_centers:
         point = np.asarray(bbox_center.patient_lps_mm, dtype=np.float64)
         level = min(
-            processed_masks,
+            positive_levels,
             key=lambda candidate: _assignment_score(
                 point,
                 ranges[candidate],
@@ -207,10 +207,17 @@ def build_classifier_plane_plan(
         center.slice_number: float(np.dot(center.patient_lps_mm, normal))
         for center in bbox_centers
     }
+    anchor_slice_numbers = representative_bbox_slice_numbers(
+        bbox_positions_by_slice.keys()
+    )
+    anchor_positions_by_slice = {
+        slice_number: bbox_positions_by_slice[slice_number]
+        for slice_number in anchor_slice_numbers
+    }
     selection = select_classifier_plane_positions(
         float(robust_low),
         float(robust_high),
-        bbox_positions_mm=tuple(bbox_positions_by_slice.values()),
+        bbox_positions_mm=tuple(anchor_positions_by_slice.values()),
         required_positions_mm=(orientation.max_area_position_mm,),
         plane_count=plane_count,
     )
@@ -222,7 +229,7 @@ def build_classifier_plane_plan(
             centroid,
             centroid_position,
             orientation,
-            bbox_positions_by_slice,
+            anchor_positions_by_slice,
             orientation.max_area_position_mm,
         )
         for position in selection.positions_mm
@@ -240,6 +247,7 @@ def build_classifier_plane_plan(
             float(projections.min()),
             float(projections.max()),
         ),
+        assigned_bbox_slice_numbers=tuple(sorted(bbox_positions_by_slice)),
         planes=planes,
     )
 
@@ -272,21 +280,6 @@ def _study_bbox_rows(
                 )
             )
     return tuple(rows)
-
-
-def _contiguous_slice_groups(
-    slice_numbers: Iterable[int],
-) -> tuple[tuple[int, ...], ...]:
-    unique_numbers = sorted(set(int(value) for value in slice_numbers))
-    if not unique_numbers:
-        return ()
-    groups: list[list[int]] = [[unique_numbers[0]]]
-    for number in unique_numbers[1:]:
-        if number == groups[-1][-1] + 1:
-            groups[-1].append(number)
-            continue
-        groups.append([number])
-    return tuple(tuple(group) for group in groups)
 
 
 def _slice_index_by_number(
@@ -370,38 +363,6 @@ def _assignment_score(
     range_distance = max(low - position, 0.0, position - high)
     centroid_distance = abs(position - centroid_position)
     return (range_distance, centroid_distance, level)
-
-
-def _assign_bbox_centers_uniquely(
-    bbox_centers: tuple[BoundingBoxCenter, ...],
-    unique_levels: tuple[str, ...],
-    assignments: dict[str, list[BoundingBoxCenter]],
-    ranges: dict[str, tuple[float, float]],
-    centroids: dict[str, float],
-    orientations: dict[str, OrientationSearchResult],
-) -> dict[str, tuple[BoundingBoxCenter, ...]]:
-    if any(level not in assignments for level in unique_levels):
-        raise ClassifierPlaneError("Fracture label contains an unknown vertebra level")
-    costs = np.empty((len(bbox_centers), len(unique_levels)), dtype=np.float64)
-    for row_index, bbox_center in enumerate(bbox_centers):
-        point = np.asarray(bbox_center.patient_lps_mm, dtype=np.float64)
-        for column_index, level in enumerate(unique_levels):
-            range_distance, centroid_distance, _ = _assignment_score(
-                point,
-                ranges[level],
-                centroids[level],
-                orientations[level].normal_lps,
-                level,
-            )
-            costs[row_index, column_index] = (
-                range_distance * 1_000_000.0 + centroid_distance
-            )
-    row_indices, column_indices = linear_sum_assignment(costs)
-    for row_index, column_index in zip(row_indices, column_indices, strict=True):
-        assignments[unique_levels[int(column_index)]].append(
-            bbox_centers[int(row_index)]
-        )
-    return {level: tuple(centers) for level, centers in assignments.items()}
 
 
 def _classifier_plane(

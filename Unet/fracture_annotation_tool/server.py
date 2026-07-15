@@ -1,6 +1,6 @@
 """骨折領域アノテーションツール HTTPサーバー。
 
-465件の (study, level) について、15プレーンを確認しながら
+bboxが割り当てられた (study, level) について、15プレーンを確認しながら
 4領域のどれに骨折があるかをラベル付けする。
 
 使い方:
@@ -30,14 +30,13 @@ STATIC_DIR = Path(__file__).resolve().parent
 
 DATA_DIR = ROOT_DIR / "data" / "rsna_data"
 FRACTURE_DATASET_DIR = DATA_DIR / "fracture_dataset"
-META_DIR = DATA_DIR / "processing_metadata"
-BBOX_CSV = DATA_DIR / "train_bounding_boxes.csv"
 TRAIN_CSV = DATA_DIR / "train.csv"
 LABEL_CSV = DATA_DIR / "fracture_region_labels.csv"
+# 前処理パイプラインの正式なbbox割り当てを224px空間に投影済みのCSV。
+# build_fracture_bbox_planes.py で生成する。
+BBOX_PLANES_CSV = DATA_DIR / "fracture_bbox_planes.csv"
 
-SAMPLING_PS = 0.4
 OUTPUT_SIZE = 224
-HALF_PX = (OUTPUT_SIZE - 1) / 2.0
 LEVEL_COLS = ["C1", "C2", "C3", "C4", "C5", "C6", "C7"]
 
 # 4領域の色 (RGB)
@@ -48,8 +47,11 @@ REGION_COLORS: dict[int, tuple[int, int, int]] = {
     4: (255, 215, 0),    # R4 後右: gold
 }
 
+# (study_id, level) → {plane_index: [(row_min, col_min, row_max, col_max), ...]}
+BboxPlanes = dict[tuple[str, str], dict[int, list[tuple[float, float, float, float]]]]
+
 _targets: list[dict] | None = None
-_bbox_df: pd.DataFrame | None = None
+_bbox_planes: BboxPlanes = {}
 _data_lock = threading.Lock()
 
 # (study_id, level) → 15枚のPNG bytesリスト
@@ -58,16 +60,40 @@ _cache_lock = threading.Lock()
 MAX_CACHE = 15
 
 
+def load_bbox_planes() -> BboxPlanes:
+    """投影済みbbox CSVを {(study, level): {plane_index: [(rmin,cmin,rmax,cmax),...]}} で返す。"""
+    if not BBOX_PLANES_CSV.exists():
+        print(
+            f"警告: {BBOX_PLANES_CSV.name} が見つかりません。"
+            " build_fracture_bbox_planes.py で生成してください。bboxは表示されません。"
+        )
+        return {}
+    df = pd.read_csv(BBOX_PLANES_CSV)
+    result: BboxPlanes = {}
+    for _, row in df.iterrows():
+        key = (str(row["study_id"]), str(row["level"]))
+        plane_idx = int(row["plane_index"])
+        rect = (
+            float(row["row_min"]),
+            float(row["col_min"]),
+            float(row["row_max"]),
+            float(row["col_max"]),
+        )
+        result.setdefault(key, {}).setdefault(plane_idx, []).append(rect)
+    return result
+
+
 def load_data() -> None:
-    """起動時に対象リストとbboxデータを読み込む。has_bboxを椎体レベルで判定する。"""
-    global _targets, _bbox_df
-    bbox_df = pd.read_csv(BBOX_CSV)
+    """起動時にbboxが割り当てられた陽性椎体の対象リストを読み込む。"""
+    global _targets, _bbox_planes
+    _bbox_planes = load_bbox_planes()
     train_df = pd.read_csv(TRAIN_CSV)
-    _bbox_df = bbox_df
 
-    studies_with_bbox = set(bbox_df["StudyInstanceUID"].unique())
+    # bboxを持つstudy/levelは投影済みCSVから直接引く（正式な椎体割り当て済み）
+    studies_with_bbox = {key[0] for key in _bbox_planes}
+    levels_with_bbox = set(_bbox_planes.keys())
 
-    candidates: list[tuple[str, str]] = []
+    targets: list[dict] = []
     for _, row in train_df.iterrows():
         sid = row["StudyInstanceUID"]
         if sid not in studies_with_bbox:
@@ -75,65 +101,17 @@ def load_data() -> None:
         for level in LEVEL_COLS:
             if row[level] != 1:
                 continue
+            if (sid, level) not in levels_with_bbox:
+                continue
             if not (FRACTURE_DATASET_DIR / sid / level / "region_4class.npy").exists():
                 continue
-            candidates.append((sid, level))
+            targets.append({
+                "study_id": sid,
+                "level": level,
+                "short_id": sid.split(".")[-1],
+                "has_bbox": True,
+            })
 
-    # メタデータをstudy単位で1回だけ読み、levelレベルでhas_bboxを判定
-    study_to_levels: dict[str, list[str]] = {}
-    for sid, level in candidates:
-        study_to_levels.setdefault(sid, []).append(level)
-
-    has_bbox_map: dict[tuple[str, str], bool] = {}
-    for sid, levels in study_to_levels.items():
-        study_bboxes = bbox_df[bbox_df["StudyInstanceUID"] == sid]
-        meta_path = META_DIR / f"{sid}.json"
-        if study_bboxes.empty or not meta_path.exists():
-            for lv in levels:
-                has_bbox_map[(sid, lv)] = False
-            continue
-        try:
-            with open(meta_path) as f:
-                meta = json.load(f)
-            slices_meta = meta["dicom_geometry"]["slices"]
-            sn_to_pos: dict[int, float] = {}
-            for s in slices_meta:
-                stem = Path(s["source_file"]).stem
-                try:
-                    sn_to_pos[int(stem)] = float(s["slice_position_mm"])
-                except ValueError:
-                    pass
-                if s["instance_number"] is not None:
-                    sn_to_pos.setdefault(int(s["instance_number"]), float(s["slice_position_mm"]))
-            for lv in levels:
-                found = False
-                try:
-                    full_range = meta["vertebrae"][lv]["classifier_planes"]["full_range_mm"]
-                    z_min, z_max = min(full_range), max(full_range)
-                    for sn in study_bboxes["slice_number"]:
-                        sp = sn_to_pos.get(int(sn))
-                        if sp is not None and z_min <= sp <= z_max:
-                            found = True
-                            break
-                except (KeyError, ValueError):
-                    pass
-                has_bbox_map[(sid, lv)] = found
-        except Exception:
-            for lv in levels:
-                has_bbox_map[(sid, lv)] = False
-
-    targets: list[dict] = [
-        {
-            "study_id": sid,
-            "level": level,
-            "short_id": sid.split(".")[-1],
-            "has_bbox": has_bbox_map.get((sid, level), False),
-        }
-        for sid, level in candidates
-    ]
-    no_bbox = sum(1 for t in targets if not t["has_bbox"])
-    if no_bbox:
-        print(f"  うちbboxなし: {no_bbox} 件")
     _targets = targets
 
 
@@ -178,83 +156,18 @@ def write_label(study_id: str, level: str, regions: dict) -> None:
         df.to_csv(LABEL_CSV, index=False)
 
 
-def _build_slice_mapping(slices_meta: list[dict]) -> dict[int, int]:
-    """slice_number → slices_metaインデックスのマッピングを作る。
-    ファイルstem数値を優先し、instance_numberを補助にする（_slice_index_by_numberと同ロジック）。
-    """
-    result: dict[int, int] = {}
-    for idx, s in enumerate(slices_meta):
-        stem = Path(s["source_file"]).stem
-        try:
-            result[int(stem)] = idx
-        except ValueError:
-            pass
-        if s["instance_number"] is not None:
-            result.setdefault(s["instance_number"], idx)
-    return result
-
-
 def render_planes(study_id: str, level: str) -> list[bytes]:
-    """15枚のプレーン画像をPNG bytesのリストで生成する。"""
+    """15枚のプレーン画像をPNG bytesのリストで生成する。
+
+    bboxは投影済みCSV（_bbox_planes）から引くため、この(study, level)に
+    正式に割り当てられた矩形だけが描画される（隣接椎体への漏れは起きない）。
+    """
     level_dir = FRACTURE_DATASET_DIR / study_id / level
     ct = np.load(level_dir / "ct.npy")               # (15, 5, 224, 224)
     vmask = np.load(level_dir / "vertebra_mask.npy")  # (15, 224, 224)
     region_mask = np.load(level_dir / "region_4class.npy")  # (15, 224, 224)
 
-    with open(META_DIR / f"{study_id}.json") as f:
-        meta = json.load(f)
-
-    slices_meta = meta["dicom_geometry"]["slices"]
-    row_dir = np.array(meta["dicom_geometry"]["row_direction_lps"])
-    col_dir = np.array(meta["dicom_geometry"]["column_direction_lps"])
-    ps_row, ps_col = meta["dicom_geometry"]["pixel_spacing_row_column_mm"]
-
-    sn_to_idx = _build_slice_mapping(slices_meta)
-    planes_meta = meta["vertebrae"][level]["classifier_planes"]["planes"]
-    full_range = meta["vertebrae"][level]["classifier_planes"]["full_range_mm"]
-    z_min, z_max = min(full_range), max(full_range)
-    plane_positions = np.array([p["position_mm"] for p in planes_meta])
-
-    # bboxを最近傍プレーンに割り当て
-    plane_bbox_list: dict[int, list[dict]] = {i: [] for i in range(len(planes_meta))}
-    for _, row in _bbox_df[_bbox_df["StudyInstanceUID"] == study_id].iterrows():
-        sn = int(row["slice_number"])
-        sidx = sn_to_idx.get(sn)
-        if sidx is None:
-            continue
-        sp = slices_meta[sidx]["slice_position_mm"]
-        if not (z_min <= sp <= z_max):
-            continue
-        nearest = int(np.argmin(np.abs(plane_positions - sp)))
-        ip = slices_meta[sidx]["image_position_lps_mm"]
-        plane_bbox_list[nearest].append({
-            "x": float(row["x"]),
-            "y": float(row["y"]),
-            "w": float(row["width"]),
-            "h": float(row["height"]),
-            "img_pos": np.array(ip, dtype=np.float64),
-        })
-
-    def bbox_to_224(b: dict, plane: dict) -> tuple[float, float, float, float]:
-        """DICOMのbbox → 224×224プレーン座標 (row_min, col_min, row_max, col_max)。"""
-        center = np.array(plane["center_lps_mm"], dtype=np.float64)
-        row_basis = np.array(plane["row_basis_lps"], dtype=np.float64)
-        col_basis = np.array(plane["column_basis_lps"], dtype=np.float64)
-        corners = [
-            (b["x"], b["y"]),
-            (b["x"] + b["w"], b["y"]),
-            (b["x"] + b["w"], b["y"] + b["h"]),
-            (b["x"], b["y"] + b["h"]),
-        ]
-        rs, cs = [], []
-        for cx, cy in corners:
-            lps = b["img_pos"] + cx * ps_col * row_dir + cy * ps_row * col_dir
-            delta = lps - center
-            # plane_sampling.py の _patient_coordinates の逆変換
-            # row_offset ↔ col_basis, col_offset ↔ row_basis
-            rs.append(float(np.dot(delta, col_basis)) / SAMPLING_PS + HALF_PX)
-            cs.append(float(np.dot(delta, row_basis)) / SAMPLING_PS + HALF_PX)
-        return min(rs), min(cs), max(rs), max(cs)
+    plane_bboxes = _bbox_planes.get((study_id, level), {})
 
     result: list[bytes] = []
     for pi in range(15):
@@ -271,17 +184,15 @@ def render_planes(study_id: str, level: str) -> list[bytes]:
         img = Image.fromarray(blended, mode="RGB")
         draw = ImageDraw.Draw(img)
 
-        # bboxを白矩形で描画
-        for b in plane_bbox_list[pi]:
-            try:
-                r0, c0, r1, c1 = bbox_to_224(b, planes_meta[pi])
-                x0 = max(0, int(c0))
-                y0 = max(0, int(r0))
-                x1 = min(OUTPUT_SIZE - 1, int(c1))
-                y1 = min(OUTPUT_SIZE - 1, int(r1))
-                draw.rectangle([(x0, y0), (x1, y1)], outline=(255, 255, 255), width=2)
-            except Exception:
-                pass
+        # 投影済みbboxを白矩形で描画
+        for r_min, c_min, r_max, c_max in plane_bboxes.get(pi, []):
+            x0 = max(0, int(c_min))
+            y0 = max(0, int(r_min))
+            x1 = min(OUTPUT_SIZE - 1, int(c_max))
+            y1 = min(OUTPUT_SIZE - 1, int(r_max))
+            if x1 <= x0 or y1 <= y0:
+                continue
+            draw.rectangle([(x0, y0), (x1, y1)], outline=(255, 255, 255), width=2)
 
         buf = io.BytesIO()
         img.save(buf, "PNG")

@@ -674,11 +674,14 @@ def predict_on_items(
     test_items: list[dict],
     cfg: dict,
     device: torch.device,
-) -> list[dict]:
+) -> tuple[list[dict], list[dict]]:
     """
-    複数 fold の best model でテストセットを推論し、確率を平均する（アンサンブル）。
+    複数 fold の best model でテストセットを推論する。
 
     学習・モデル選択に使っていない held-out test set に対して使う。
+    アンサンブル平均は fold 間の相関を均してしまい、fold 単位の非アンサンブル
+    予測（OOF と同じ「学習していないモデルによる予測」という性質を持つ）を
+    捨ててしまうため、両方を返す。
 
     Args:
         model_paths: 各 fold の best_model.pt のパスリスト
@@ -686,7 +689,10 @@ def predict_on_items(
         cfg: config dict
 
     Returns:
-        各要素: {study_uid, vertebra, label, pred_prob}
+        (ensemble_preds, per_fold_preds)
+        - ensemble_preds: 各要素 {study_uid, vertebra, label, pred_prob}（fold 間平均）
+        - per_fold_preds: 各要素 {study_uid, vertebra, label, fold, pred_prob}
+          （test_items × model_paths、fold ごとの非アンサンブル予測）
     """
     from .data_utils import create_eval_data_loader
     from .model import TimmModel
@@ -726,9 +732,9 @@ def predict_on_items(
 
     avg_probs = np.mean(all_fold_probs, axis=0).tolist()
 
-    test_preds = []
+    ensemble_preds = []
     for item, prob in zip(test_items, avg_probs, strict=True):
-        test_preds.append(
+        ensemble_preds.append(
             {
                 "study_uid": item["study_uid"],
                 "vertebra": item["vertebra"],
@@ -737,7 +743,20 @@ def predict_on_items(
             }
         )
 
-    return test_preds
+    per_fold_preds = []
+    for fold_index, fold_probs in enumerate(all_fold_probs):
+        for item, prob in zip(test_items, fold_probs, strict=True):
+            per_fold_preds.append(
+                {
+                    "study_uid": item["study_uid"],
+                    "vertebra": item["vertebra"],
+                    "label": item["label"],
+                    "fold": fold_index,
+                    "pred_prob": float(prob),
+                }
+            )
+
+    return ensemble_preds, per_fold_preds
 
 
 def save_fold_artifacts(
@@ -798,7 +817,7 @@ def load_or_reconstruct_fold_artifacts(
     ckpt = torch.load(best_model_path, map_location=device)
     fold_metrics = ckpt["val_metrics"]
     _, val_items = split_items_cv(items, n_splits=n_folds, val_fold=fold, seed=seed)
-    oof_preds = predict_on_items([best_model_path], val_items, cfg, device)
+    oof_preds, _ = predict_on_items([best_model_path], val_items, cfg, device)
 
     save_fold_artifacts(cfg, fold, fold_metrics, oof_preds, root)
     return fold_metrics, oof_preds

@@ -126,10 +126,7 @@ def process_study(
         bbox_centers,
         processed_masks,
         orientations,
-        unique_levels=load_study_fracture_levels(
-            TRAIN_LABEL_CSV,
-            study_id,
-        ),
+        positive_levels=load_study_fracture_levels(TRAIN_LABEL_CSV, study_id),
     )
     classifier_planes = {
         level: build_classifier_plane_plan(
@@ -168,7 +165,7 @@ def process_study(
         classifier_planes=classifier_planes,
         sampled_classifier_planes=sampled_classifier_planes,
         sampled_segmentation_planes=sampled_segmentation_planes,
-        bbox_interval_count=len(bbox_centers),
+        bbox_row_count=len(bbox_centers),
         bbox_csv_path=bbox_csv_path,
         output_directory=output_directory,
         geometry_mode=geometry_mode,
@@ -220,7 +217,7 @@ def _study_metadata(
     classifier_planes: dict[str, ClassifierPlanePlan],
     sampled_classifier_planes: dict[str, SampledClassifierPlanes],
     sampled_segmentation_planes: dict[str, SampledSegmentationPlanes],
-    bbox_interval_count: int,
+    bbox_row_count: int,
     bbox_csv_path: Path | None,
     output_directory: Path,
     geometry_mode: str,
@@ -254,7 +251,12 @@ def _study_metadata(
             "orientation_search_boundary_count": sum(
                 orientation.at_search_boundary for orientation in orientations.values()
             ),
-            "bbox_interval_count": bbox_interval_count,
+            "bbox_row_count": bbox_row_count,
+            "bbox_interval_count": sum(
+                plane.bbox_forced
+                for plan in classifier_planes.values()
+                for plane in plan.planes
+            ),
             "bbox_forced_plane_count": sum(
                 plane.bbox_forced
                 for plan in classifier_planes.values()
@@ -343,6 +345,9 @@ def _vertebra_metadata(
         "classifier_planes": {
             "robust_range_mm": list(classifier_plane_plan.robust_range_mm),
             "full_range_mm": list(classifier_plane_plan.full_range_mm),
+            "assigned_bbox_slice_numbers": list(
+                classifier_plane_plan.assigned_bbox_slice_numbers
+            ),
             "sequence_order": "head_to_tail",
             "planes": [
                 {

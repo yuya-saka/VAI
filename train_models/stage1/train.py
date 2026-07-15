@@ -289,7 +289,9 @@ def _do_training(
         print(f"\n{'='*60}")
         print(f"Test set 評価 ({len(model_paths)} fold アンサンブル)")
         print(f"{'='*60}")
-        test_preds = predict_on_items(model_paths, test_items, cfg, device)
+        test_preds, test_preds_per_fold = predict_on_items(
+            model_paths, test_items, cfg, device
+        )
 
         y_true_test = np.array([x["label"] for x in test_preds], dtype=int)
         y_prob_test = np.array([x["pred_prob"] for x in test_preds], dtype=float)
@@ -307,6 +309,10 @@ def _do_training(
         import pandas as pd
         test_df = pd.DataFrame(test_preds)
         test_df.to_csv(output_base / "test_predictions.csv", index=False)
+        # fold ごとの非アンサンブル予測。OOF と同じ「学習していないモデルによる
+        # 予測」という性質を保ったまま test 側も全 fold 分利用できるようにする。
+        test_per_fold_df = pd.DataFrame(test_preds_per_fold)
+        test_per_fold_df.to_csv(output_base / "test_predictions_per_fold.csv", index=False)
         print(f"\n[INFO] test 予測を保存しました: {output_base / 'test_predictions.csv'}")
 
     results = {

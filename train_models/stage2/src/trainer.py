@@ -680,8 +680,21 @@ def predict_ensemble(
     items: list[dict[str, Any]],
     model_paths: list[Path],
     device: torch.device,
-) -> list[dict[str, Any]]:
-    """Average primary and region-evidence probabilities across fold checkpoints."""
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Average primary and region-evidence probabilities across fold checkpoints.
+
+    Ensemble averaging smooths over fold-to-fold correlation, which discards
+    the fold-level non-ensembled predictions (each one made by a model that
+    never trained on this held-out item, the same property OOF predictions
+    have). Returns both so callers can analyze test-set results with the same
+    per-fold granularity as OOF instead of only the smoothed ensemble.
+
+    Returns:
+        (ensemble_outputs, per_fold_outputs)
+        - ensemble_outputs: one record per item, averaged across model_paths.
+        - per_fold_outputs: one record per (item, fold), each tagged with
+          "fold" (the index into model_paths).
+    """
     loader = create_eval_data_loader(items, config)
     fold_predictions: list[list[dict[str, Any]]] = []
     for model_path in model_paths:
@@ -693,6 +706,7 @@ def predict_ensemble(
         fold_predictions.append(predictions)
         del model
     outputs: list[dict[str, Any]] = []
+    per_fold_outputs: list[dict[str, Any]] = []
     # Region evidence column names depend on the model's region_mode (4
     # anatomical names for "masked", a single generic name for "global"), so
     # derive the averaged keys from the predictions actually produced rather
@@ -715,4 +729,14 @@ def predict_ensemble(
                 np.mean([fold[index][key] for fold in fold_predictions])
             )
         outputs.append(record)
-    return outputs
+        for fold_index, fold in enumerate(fold_predictions):
+            per_fold_outputs.append(
+                {
+                    "study_uid": item["study_uid"],
+                    "vertebra": item["vertebra"],
+                    "label": int(item["label"]),
+                    "fold": fold_index,
+                    **{key: float(fold[index][key]) for key in probability_keys},
+                }
+            )
+    return outputs, per_fold_outputs

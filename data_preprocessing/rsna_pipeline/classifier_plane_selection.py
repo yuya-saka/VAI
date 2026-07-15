@@ -62,11 +62,9 @@ def select_classifier_plane_positions(
     if len(required_positions) > plane_count:
         raise ValueError("Required positions exceed the classifier plane count")
 
-    range_low = min((t_low_mm, *required_positions))
-    range_high = max((t_high_mm, *required_positions))
     uniform_positions = np.linspace(
-        range_low,
-        range_high,
+        t_low_mm,
+        t_high_mm,
         plane_count,
         dtype=np.float64,
     )

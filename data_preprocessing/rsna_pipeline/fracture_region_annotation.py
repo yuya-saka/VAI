@@ -36,7 +36,7 @@ def _setup(Path, json, np, pd):
     DATA_DIR = Path("data/rsna_data")
     FRACTURE_DATASET_DIR = DATA_DIR / "fracture_dataset"
     META_DIR = DATA_DIR / "processing_metadata"
-    BBOX_CSV = DATA_DIR / "train_bounding_boxes.csv"
+    BBOX_CSV = DATA_DIR / "fracture_bbox_planes.csv"
     TRAIN_CSV = DATA_DIR / "train.csv"
     LABEL_CSV = DATA_DIR / "fracture_region_labels.csv"
 
@@ -56,7 +56,10 @@ def _setup(Path, json, np, pd):
     bbox_df = pd.read_csv(BBOX_CSV)
     train_df = pd.read_csv(TRAIN_CSV)
     level_cols = ["C1", "C2", "C3", "C4", "C5", "C6", "C7"]
-    studies_with_bbox = set(bbox_df["StudyInstanceUID"].unique())
+    studies_with_bbox = set(bbox_df["study_id"].unique())
+    levels_with_bbox = set(
+        zip(bbox_df["study_id"], bbox_df["level"], strict=True)
+    )
 
     targets = []
     for _, row in train_df.iterrows():
@@ -65,6 +68,8 @@ def _setup(Path, json, np, pd):
             continue
         for level in level_cols:
             if row[level] != 1:
+                continue
+            if (sid, level) not in levels_with_bbox:
                 continue
             if not (FRACTURE_DATASET_DIR / sid / level / "region_4class.npy").exists():
                 continue
@@ -79,7 +84,7 @@ def _setup(Path, json, np, pd):
         existing = pd.DataFrame(columns=["study_id", "level", "region_1", "region_2", "region_3", "region_4"])
 
     # 未完了のインデックスを特定
-    done_set = set(zip(existing["study_id"], existing["level"]))
+    done_set = set(zip(existing["study_id"], existing["level"], strict=True))
     remaining_indices = [
         i for i, row in targets_df.iterrows()
         if (row["study_id"], row["level"]) not in done_set
@@ -148,74 +153,21 @@ def _render_image(
     vmask = np.load(level_dir / "vertebra_mask.npy")  # (15, 224, 224)
     region = np.load(level_dir / "region_4class.npy") # (15, 224, 224)
 
-    # bbox 変換情報
-    with open(META_DIR / f"{study_id}.json") as f:
-        meta = json.load(f)
-
-    slices_meta = meta["dicom_geometry"]["slices"]
-    row_dir = np.array(meta["dicom_geometry"]["row_direction_lps"])
-    col_dir = np.array(meta["dicom_geometry"]["column_direction_lps"])
-    ps_row, ps_col = meta["dicom_geometry"]["pixel_spacing_row_column_mm"]
-
-    slice_num_to_idx: dict = {}
-    for s_idx, s in enumerate(slices_meta):
-        stem = Path(s["source_file"]).stem
-        try:
-            slice_num_to_idx[int(stem)] = s_idx
-        except ValueError:
-            pass
-        if s["instance_number"] is not None:
-            slice_num_to_idx.setdefault(s["instance_number"], s_idx)
-
-    def get_image_pos(sn):
-        i = slice_num_to_idx.get(int(sn))
-        return slices_meta[i]["image_position_lps_mm"] if i is not None else None
-
-    def get_slice_pos(sn):
-        i = slice_num_to_idx.get(int(sn))
-        return slices_meta[i]["slice_position_mm"] if i is not None else None
-
-    planes = meta["vertebrae"][level]["classifier_planes"]["planes"]
-    full_range = meta["vertebrae"][level]["classifier_planes"]["full_range_mm"]
-    z_min, z_max = min(full_range), max(full_range)
-    plane_positions = np.array([pl["position_mm"] for pl in planes])
-
-    study_bboxes = bbox_df[bbox_df["StudyInstanceUID"] == study_id]
-    level_bboxes = study_bboxes[
-        study_bboxes["slice_number"].apply(
-            lambda s: (sp := get_slice_pos(int(s))) is not None and z_min <= sp <= z_max
-        )
+    level_bboxes = bbox_df[
+        (bbox_df["study_id"] == study_id) & (bbox_df["level"] == level)
     ]
 
     # plane → bboxリスト
     plane_bbox_list: dict = {i: [] for i in range(15)}
-    for _, br in level_bboxes.iterrows():
-        sn = int(br["slice_number"])
-        sp = get_slice_pos(sn)
-        if sp is None:
-            continue
-        nearest = int(np.argmin(np.abs(plane_positions - sp)))
-        ip = get_image_pos(sn)
-        if ip is None:
-            continue
-        plane_bbox_list[nearest].append({
-            "x": br["x"], "y": br["y"], "w": br["width"], "h": br["height"],
-            "img_pos": np.array(ip),
-        })
-
-    def bbox_to_224(b, plane):
-        center = np.array(plane["center_lps_mm"])
-        rb = np.array(plane["row_basis_lps"])
-        cb = np.array(plane["column_basis_lps"])
-        corners = [(b["x"], b["y"]), (b["x"]+b["w"], b["y"]),
-                   (b["x"]+b["w"], b["y"]+b["h"]), (b["x"], b["y"]+b["h"])]
-        rs, cs = [], []
-        for cx, cy in corners:
-            lps = b["img_pos"] + cx * ps_col * row_dir + cy * ps_row * col_dir
-            d = lps - center
-            rs.append(np.dot(d, cb) / SAMPLING_PS + HALF_PX)
-            cs.append(np.dot(d, rb) / SAMPLING_PS + HALF_PX)
-        return min(rs), min(cs), max(rs), max(cs)
+    for _, bbox in level_bboxes.iterrows():
+        plane_bbox_list[int(bbox["plane_index"])].append(
+            (
+                float(bbox["row_min"]),
+                float(bbox["col_min"]),
+                float(bbox["row_max"]),
+                float(bbox["col_max"]),
+            )
+        )
 
     # 3行×5列のグリッド
     fig, axes = plt.subplots(3, 5, figsize=(18, 11))
@@ -237,18 +189,14 @@ def _render_image(
         ax.axis("off")
 
         # bbox
-        for b in plane_bbox_list[pi]:
-            try:
-                r0, c0, r1, c1 = bbox_to_224(b, planes[pi])
-                r0c, c0c = max(0, int(r0)), max(0, int(c0))
-                r1c, c1c = min(OUTPUT_SIZE, int(r1)), min(OUTPUT_SIZE, int(c1))
-                rect = mpatches.Rectangle(
-                    (c0c, r0c), c1c - c0c, r1c - r0c,
-                    linewidth=1.5, edgecolor="white", facecolor="none",
-                )
-                ax.add_patch(rect)
-            except Exception:
-                pass
+        for r0, c0, r1, c1 in plane_bbox_list[pi]:
+            r0c, c0c = max(0, int(r0)), max(0, int(c0))
+            r1c, c1c = min(OUTPUT_SIZE, int(r1)), min(OUTPUT_SIZE, int(c1))
+            rect = mpatches.Rectangle(
+                (c0c, r0c), c1c - c0c, r1c - r0c,
+                linewidth=1.5, edgecolor="white", facecolor="none",
+            )
+            ax.add_patch(rect)
 
     # 凡例
     legend_patches = [

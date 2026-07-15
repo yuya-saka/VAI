@@ -67,6 +67,31 @@ def load_excluded_levels_by_study(csv_path: Path) -> dict[str, frozenset[str]]:
     return {uid: frozenset(levels) for uid, levels in result.items()}
 
 
+def load_study_ids(csv_path: Path, column: str) -> frozenset[str]:
+    """Return unique non-empty study IDs from one CSV column."""
+    if not csv_path.is_file():
+        raise FileNotFoundError(f"Study-ID CSV not found: {csv_path}")
+    with csv_path.open(newline="", encoding="utf-8") as file:
+        reader = csv.DictReader(file)
+        if reader.fieldnames is None or column not in reader.fieldnames:
+            raise ValueError(f"Study-ID CSV is missing column: {column}")
+        return frozenset(row[column] for row in reader if row[column])
+
+
+def select_requested_studies(
+    eligible: tuple[str, ...],
+    requested: frozenset[str] | None,
+) -> tuple[str, ...]:
+    """Filter eligible studies and reject missing requested IDs."""
+    if requested is None:
+        return eligible
+    missing = requested - set(eligible)
+    if missing:
+        missing_text = ", ".join(sorted(missing))
+        raise ValueError(f"Requested studies are not eligible: {missing_text}")
+    return tuple(study_id for study_id in eligible if study_id in requested)
+
+
 def discover_eligible_studies(
     train_images_dir: Path,
     segmentation_dir: Path,
@@ -141,6 +166,7 @@ def process_dataset(
     log_path: Path,
     excluded_studies_csv: Path = EXCLUDED_STUDIES_CSV,
     excluded_levels_csv: Path = EXCLUDED_LEVELS_CSV,
+    requested_study_ids: frozenset[str] | None = None,
     limit: int | None = None,
     overwrite: bool = False,
 ) -> tuple[DatasetStudyResult, ...]:
@@ -155,6 +181,7 @@ def process_dataset(
 
     eligible = discover_eligible_studies(train_images_dir, segmentation_dir)
     eligible = tuple(s for s in eligible if s not in excluded_studies)
+    eligible = select_requested_studies(eligible, requested_study_ids)
     selected = eligible[:limit] if limit is not None else eligible
     pending = tuple(
         study_id
@@ -322,6 +349,8 @@ def main() -> None:
     )
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--study-ids-csv", type=Path, default=None)
+    parser.add_argument("--study-id-column", default="StudyInstanceUID")
     parser.add_argument(
         "--excluded-studies-csv",
         type=Path,
@@ -347,6 +376,11 @@ def main() -> None:
         log_path=arguments.log_path,
         excluded_studies_csv=arguments.excluded_studies_csv,
         excluded_levels_csv=arguments.excluded_levels_csv,
+        requested_study_ids=(
+            load_study_ids(arguments.study_ids_csv, arguments.study_id_column)
+            if arguments.study_ids_csv is not None
+            else None
+        ),
         limit=arguments.limit,
         overwrite=arguments.overwrite,
     )
