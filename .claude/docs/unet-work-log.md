@@ -1,7 +1,7 @@
 # Unet/ 作業サマリー
 
 <!-- ルール: 現在地・次アクションのみ。完了詳細は work-logs/YYYY-MM-DD.md へ。上限60行 -->
-<!-- 最終更新: 2026-06-17 -->
+<!-- 最終更新: 2026-07-19 -->
 
 ## line_only 最新結果（line_20260616, sig4.0_ALL）
 
@@ -98,6 +98,7 @@ CC適用 vs CC-metrics の差は training variability によるもの（CC 自�
 
 | 日付 | 主な内容 |
 |------|---------|
+| [2026-07-19](work-logs/2026-07-19.md) | bboxのnative DICOM 3D補正・bbox中心536 runs全件再生成・4領域527 runs生成・全7,217行QC・viewer改善 |
 | [2026-06-17](work-logs/2026-06-17.md) | CC フィルタ実装・全パス統一（val/test）・angle 5.076°→4.804°・worst 88°→38° |
 | [2026-06-16](work-logs/2026-06-16.md) | config移動・best epoch→angle_error_deg・Blob IoU追加・LR/BS増量 |
 | [2026-06-15](work-logs/2026-06-15.md) | line_only trainer 責務分割・公開API互換維持・テスト収集整理 |

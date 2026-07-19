@@ -67,8 +67,6 @@ def process_one_level(
         vertebra,
         metadata_dir,
     )
-    z_seg_offsets = [idx * dz for idx in SEG_INDEX_OFFSETS]
-
     plane_preds = predict_5planes(
         models,
         seg_ct,
@@ -78,12 +76,46 @@ def process_one_level(
         avg_lengths,
     )
 
+    interp = build_boundary_interpolator(
+        plane_preds,
+        avg_lengths,
+        dz,
+    )
+
+    if len(interp.available_lines) < 4:
+        return {
+            "status": "failed",
+            "reason": f"insufficient anchors: {interp.available_lines}",
+        }
+
+    region_4class, plane_stats = generate_region_masks(
+        interp,
+        z_cls_offsets,
+        vert_mask,
+    )
+    np.save(level_dir / "region_4class.npy", region_4class)
+
+    n_ok = sum(1 for s in plane_stats if s["success"])
+    return {
+        "status": "complete",
+        "planes_ok": n_ok,
+        "planes_total": len(z_cls_offsets),
+        "available_lines": interp.available_lines,
+    }
+
+
+def build_boundary_interpolator(
+    plane_predictions: list[dict[str, PredictedLine | None]],
+    avg_lengths: dict[str, float],
+    slice_spacing_mm: float,
+) -> SDFBoundaryInterpolator:
+    """5枚の線予測から任意の補正後位置へ評価できる補間器を作る。"""
     phi_rho_anchors: dict[str, list[tuple[float | None, float | None]]] = {}
     centroid_anchors: dict[str, list[tuple[float, float] | None]] = {}
     for line_key in LINE_KEYS:
         line_params: list[tuple[float | None, float | None]] = []
         line_centroids: list[tuple[float, float] | None] = []
-        for plane_prediction in plane_preds:
+        for plane_prediction in plane_predictions:
             pred: PredictedLine | None = plane_prediction.get(line_key)
             if pred is None:
                 line_params.append((None, None))
@@ -94,7 +126,8 @@ def process_one_level(
         phi_rho_anchors[line_key] = line_params
         centroid_anchors[line_key] = line_centroids
 
-    interp = SDFBoundaryInterpolator(
+    z_seg_offsets = [idx * slice_spacing_mm for idx in SEG_INDEX_OFFSETS]
+    return SDFBoundaryInterpolator(
         phi_rho_anchors=phi_rho_anchors,
         z_offsets=z_seg_offsets,
         centre_idx=CENTER_CHANNEL,
@@ -103,18 +136,21 @@ def process_one_level(
         line_lengths_px=avg_lengths,
     )
 
-    if len(interp.available_lines) < 4:
-        return {
-            "status": "failed",
-            "reason": f"insufficient anchors: {interp.available_lines}",
-        }
 
-    region_4class = np.zeros((15, IMAGE_SIZE, IMAGE_SIZE), dtype=np.uint8)
+def generate_region_masks(
+    interpolator: SDFBoundaryInterpolator,
+    z_targets_mm: list[float],
+    vertebra_mask: np.ndarray,
+) -> tuple[np.ndarray, list[dict[str, Any]]]:
+    """任意の補正後位置で4領域maskを生成する。"""
+    if vertebra_mask.shape != (len(z_targets_mm), IMAGE_SIZE, IMAGE_SIZE):
+        raise ValueError("vertebra mask shape must match target plane count")
+    region_4class = np.zeros_like(vertebra_mask, dtype=np.uint8)
     plane_stats: list[dict[str, Any]] = []
 
-    for plane_idx, z_target in enumerate(z_cls_offsets):
-        lines = interp.get_lines(z_target)
-        mask_plane = vert_mask[plane_idx].astype(np.uint8)
+    for plane_idx, z_target in enumerate(z_targets_mm):
+        lines = interpolator.get_lines(z_target)
+        mask_plane = vertebra_mask[plane_idx].astype(np.uint8)
 
         if lines is None or mask_plane.sum() == 0:
             plane_stats.append({"plane": plane_idx, "success": False})
@@ -132,16 +168,7 @@ def process_one_level(
             plane_stats.append({"plane": plane_idx, "success": True})
         except Exception as e:
             plane_stats.append({"plane": plane_idx, "success": False, "reason": str(e)})
-
-    np.save(level_dir / "region_4class.npy", region_4class)
-
-    n_ok = sum(1 for s in plane_stats if s["success"])
-    return {
-        "status": "complete",
-        "planes_ok": n_ok,
-        "planes_total": 15,
-        "available_lines": interp.available_lines,
-    }
+    return region_4class, plane_stats
 
 
 def main() -> None:
