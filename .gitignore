@@ -67,6 +67,7 @@ dataset_past/
 segmentations/
 annotation_data/
 tests/
+Unet/dicom_bbox_annotation_tool/.cache/
 wandb/
 trash/
 .claude/docs/codex/

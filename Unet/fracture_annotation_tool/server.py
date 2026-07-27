@@ -1,7 +1,9 @@
 """骨折領域アノテーションツール HTTPサーバー。
 
-bboxが割り当てられた (study, level) について、15プレーンを確認しながら
-4領域のどれに骨折があるかをラベル付けする。
+bbox中心データセット (`data/rsna_data/bbox_centered_dataset/{study}/{level}/run_XX/`)
+の各runについて、15プレーンを確認しながら4領域のどれに骨折があるかをラベル付けする。
+1つの(study, level)が複数run（非連続なbbox区間）を持つ場合があるため、
+run単位でアノテーション対象を扱う。
 
 使い方:
     uv run python Unet/fracture_annotation_tool/server.py
@@ -21,6 +23,7 @@ from pathlib import Path
 from threading import Timer
 from urllib.parse import parse_qs, urlparse
 
+import cv2
 import numpy as np
 import pandas as pd
 from PIL import Image, ImageDraw
@@ -29,100 +32,76 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 STATIC_DIR = Path(__file__).resolve().parent
 
 DATA_DIR = ROOT_DIR / "data" / "rsna_data"
-FRACTURE_DATASET_DIR = DATA_DIR / "fracture_dataset"
-TRAIN_CSV = DATA_DIR / "train.csv"
+BBOX_CENTERED_DATASET_DIR = DATA_DIR / "bbox_centered_dataset"
 LABEL_CSV = DATA_DIR / "fracture_region_labels.csv"
-# 前処理パイプラインの正式なbbox割り当てを224px空間に投影済みのCSV。
-# build_fracture_bbox_planes.py で生成する。
-BBOX_PLANES_CSV = DATA_DIR / "fracture_bbox_planes.csv"
 
-OUTPUT_SIZE = 224
-LEVEL_COLS = ["C1", "C2", "C3", "C4", "C5", "C6", "C7"]
+PLANE_COUNT = 15
+CENTER_CHANNEL = 2  # ct.npy (15,5,224,224) の中央チャンネル
+DEFAULT_RUN_ID = "run_00"  # run_id列がない旧CSV行の扱い
 
-# 4領域の色 (RGB)
+# 4領域の色 (RGB)。data_preprocessing/rsna_pipeline/visualize_bbox_centered.py と揃える。
 REGION_COLORS: dict[int, tuple[int, int, int]] = {
-    1: (100, 149, 237),  # R1 前左: cornflower blue
-    2: (50, 205, 50),    # R2 前右: lime green
-    3: (220, 80, 80),    # R3 後左: tomato
-    4: (255, 215, 0),    # R4 後右: gold
+    1: (100, 149, 237),  # R1 椎体: cornflower blue
+    2: (50, 205, 50),  # R2 右椎間孔: lime green
+    3: (220, 80, 80),  # R3 左椎間孔: tomato
+    4: (255, 215, 0),  # R4 後方要素: gold
 }
+NO_REGION_TINT = (80, 180, 255)  # region_4class.npy が無い場合の椎体強調色
 
-# (study_id, level) → {plane_index: [(row_min, col_min, row_max, col_max), ...]}
-BboxPlanes = dict[tuple[str, str], dict[int, list[tuple[float, float, float, float]]]]
+# bbox_corrected_occupancy.npy は4倍supersampling由来のuint8[0,255]。
+# 255が完全占有、alphaは最大でも0.5に抑えて下地(領域色/CT)を見えるようにする。
+OCCUPANCY_TINT = (255, 40, 40)
+OCCUPANCY_ALPHA_MAX = 0.5
+OCCUPANCY_ALPHA_SCALE = 510.0
+
+CONTOUR_COLOR = (255, 255, 0)
+CONTOUR_SIMPLIFY_TOLERANCE_PX = 0.75  # visualize_bbox_centered.py と同一の表示簡略化
 
 _targets: list[dict] | None = None
-_bbox_planes: BboxPlanes = {}
 _data_lock = threading.Lock()
 
-# (study_id, level) → 15枚のPNG bytesリスト
-_plane_cache: dict[tuple[str, str], list[bytes]] = {}
+# (study_id, level, run_id) → 15枚のPNG bytesリスト
+_plane_cache: dict[tuple[str, str, str], list[bytes]] = {}
 _cache_lock = threading.Lock()
 MAX_CACHE = 15
 
 
-def load_bbox_planes() -> BboxPlanes:
-    """投影済みbbox CSVを {(study, level): {plane_index: [(rmin,cmin,rmax,cmax),...]}} で返す。"""
-    if not BBOX_PLANES_CSV.exists():
-        print(
-            f"警告: {BBOX_PLANES_CSV.name} が見つかりません。"
-            " build_fracture_bbox_planes.py で生成してください。bboxは表示されません。"
-        )
-        return {}
-    df = pd.read_csv(BBOX_PLANES_CSV)
-    result: BboxPlanes = {}
-    for _, row in df.iterrows():
-        key = (str(row["study_id"]), str(row["level"]))
-        plane_idx = int(row["plane_index"])
-        rect = (
-            float(row["row_min"]),
-            float(row["col_min"]),
-            float(row["row_max"]),
-            float(row["col_max"]),
-        )
-        result.setdefault(key, {}).setdefault(plane_idx, []).append(rect)
-    return result
-
-
 def load_data() -> None:
-    """起動時にbboxが割り当てられた陽性椎体の対象リストを読み込む。"""
-    global _targets, _bbox_planes
-    _bbox_planes = load_bbox_planes()
-    train_df = pd.read_csv(TRAIN_CSV)
+    """起動時にbbox中心データセットの全runを対象リストとして読み込む。
 
-    # bboxを持つstudy/levelは投影済みCSVから直接引く（正式な椎体割り当て済み）
-    studies_with_bbox = {key[0] for key in _bbox_planes}
-    levels_with_bbox = set(_bbox_planes.keys())
+    bbox_centered_dataset は元々bboxが割り当てられた陽性椎体からのみ生成されているため、
+    train.csvとの突合は不要（旧ツールのfracture_dataset+fracture_bbox_planes.csv経路とは異なる）。
+    """
+    global _targets
 
     targets: list[dict] = []
-    for _, row in train_df.iterrows():
-        sid = row["StudyInstanceUID"]
-        if sid not in studies_with_bbox:
-            continue
-        for level in LEVEL_COLS:
-            if row[level] != 1:
-                continue
-            if (sid, level) not in levels_with_bbox:
-                continue
-            if not (FRACTURE_DATASET_DIR / sid / level / "region_4class.npy").exists():
-                continue
-            targets.append({
-                "study_id": sid,
-                "level": level,
-                "short_id": sid.split(".")[-1],
-                "has_bbox": True,
-            })
-
+    for run_dir in sorted(BBOX_CENTERED_DATASET_DIR.glob("*/*/run_*")):
+        study_id = run_dir.parent.parent.name
+        level = run_dir.parent.name
+        run_id = run_dir.name
+        metadata = json.loads((run_dir / "metadata.json").read_text(encoding="utf-8"))
+        targets.append({
+            "study_id": study_id,
+            "level": level,
+            "run_id": run_id,
+            "short_id": study_id.split(".")[-1],
+            "has_region": (run_dir / "region_4class.npy").exists(),
+            "geometry_mode": metadata.get("geometry_mode", "unknown"),
+        })
     _targets = targets
 
 
-def read_labels() -> dict[tuple[str, str], dict]:
-    """CSVから {(study_id, level): {region_1:0,...}} を返す。"""
+def read_labels() -> dict[tuple[str, str, str], dict]:
+    """CSVから {(study_id, level, run_id): {region_1:0,...}} を返す。"""
     if not LABEL_CSV.exists():
         return {}
     df = pd.read_csv(LABEL_CSV)
-    result: dict[tuple[str, str], dict] = {}
+    if "run_id" not in df.columns:
+        # 旧スキーマ（run未対応時代）の行はrun_00とみなす
+        df["run_id"] = DEFAULT_RUN_ID
+    result: dict[tuple[str, str, str], dict] = {}
     for _, row in df.iterrows():
-        key = (str(row["study_id"]), str(row["level"]))
+        key = (str(row["study_id"]), str(row["level"]), str(row["run_id"]))
         result[key] = {
             "region_1": int(row["region_1"]),
             "region_2": int(row["region_2"]),
@@ -132,67 +111,115 @@ def read_labels() -> dict[tuple[str, str], dict]:
     return result
 
 
-def write_label(study_id: str, level: str, regions: dict) -> None:
+def write_label(study_id: str, level: str, run_id: str, regions: dict) -> None:
     """1件のラベルをCSVに書き込む（既存行は上書き）。"""
     with _data_lock:
         if LABEL_CSV.exists():
             df = pd.read_csv(LABEL_CSV)
+            if "run_id" not in df.columns:
+                df["run_id"] = DEFAULT_RUN_ID
         else:
             df = pd.DataFrame(
-                columns=["study_id", "level", "region_1", "region_2", "region_3", "region_4"]
+                columns=[
+                    "study_id",
+                    "level",
+                    "run_id",
+                    "region_1",
+                    "region_2",
+                    "region_3",
+                    "region_4",
+                ]
             )
-        mask = ~((df["study_id"] == study_id) & (df["level"] == level))
+        mask = ~(
+            (df["study_id"] == study_id)
+            & (df["level"] == level)
+            & (df["run_id"] == run_id)
+        )
         df = df[mask]
         new_row = pd.DataFrame([{
             "study_id": study_id,
             "level": level,
+            "run_id": run_id,
             "region_1": int(regions.get("region_1", 0)),
             "region_2": int(regions.get("region_2", 0)),
             "region_3": int(regions.get("region_3", 0)),
             "region_4": int(regions.get("region_4", 0)),
         }])
         df = pd.concat([df, new_row], ignore_index=True)
-        df = df.sort_values(["study_id", "level"]).reset_index(drop=True)
+        df = df.sort_values(["study_id", "level", "run_id"]).reset_index(drop=True)
         df.to_csv(LABEL_CSV, index=False)
 
 
-def render_planes(study_id: str, level: str) -> list[bytes]:
+def _simplify_contour(component: list[list[float]]) -> np.ndarray | None:
+    """スーパーサンプリングの階段状ノイズを除去した表示用輪郭 (row, col) を返す。
+
+    保存済みoccupancy自体は変更しない（表示のみの簡略化）。
+    """
+    polygon = np.asarray(component, dtype=np.float32)
+    if len(polygon) < 3:
+        return None
+    simplified = cv2.approxPolyDP(
+        polygon[:, ::-1].reshape(-1, 1, 2),  # (row,col) -> cv2の(x,y)=(col,row)
+        epsilon=CONTOUR_SIMPLIFY_TOLERANCE_PX,
+        closed=True,
+    ).reshape(-1, 2)
+    return simplified[:, ::-1]  # (col,row) -> (row,col)
+
+
+def render_planes(study_id: str, level: str, run_id: str) -> list[bytes]:
     """15枚のプレーン画像をPNG bytesのリストで生成する。
 
-    bboxは投影済みCSV（_bbox_planes）から引くため、この(study, level)に
-    正式に割り当てられた矩形だけが描画される（隣接椎体への漏れは起きない）。
+    bboxは矩形ではなく、`bbox_corrected_occupancy.npy`（3D envelopeと補正断面の交差の
+    partial occupancy）を半透明の赤で塗り、`bbox_corrected_contours.json` の輪郭を
+    黄色線で重ねて表示する。形状は三角形・非凸・複数componentになり得る。
     """
-    level_dir = FRACTURE_DATASET_DIR / study_id / level
-    ct = np.load(level_dir / "ct.npy")               # (15, 5, 224, 224)
-    vmask = np.load(level_dir / "vertebra_mask.npy")  # (15, 224, 224)
-    region_mask = np.load(level_dir / "region_4class.npy")  # (15, 224, 224)
+    run_dir = BBOX_CENTERED_DATASET_DIR / study_id / level / run_id
+    ct = np.load(run_dir / "ct.npy")  # (15, 5, 224, 224)
+    vmask = np.load(run_dir / "vertebra_mask.npy")  # (15, 224, 224)
+    occupancy = np.load(run_dir / "bbox_corrected_occupancy.npy")  # (15, 224, 224)
+    contours = json.loads(
+        (run_dir / "bbox_corrected_contours.json").read_text(encoding="utf-8")
+    )
+    contour_by_plane = {int(item["plane_index"]): item["components"] for item in contours}
 
-    plane_bboxes = _bbox_planes.get((study_id, level), {})
+    region_path = run_dir / "region_4class.npy"
+    region_mask = np.load(region_path) if region_path.exists() else None
 
     result: list[bytes] = []
-    for pi in range(15):
-        ct_plane = ct[pi, 2].astype(np.uint8)  # 中央チャンネル (224, 224)
+    for pi in range(PLANE_COUNT):
+        ct_plane = ct[pi, CENTER_CHANNEL].astype(np.uint8)
         rgb = np.stack([ct_plane] * 3, axis=-1).astype(np.float32)
+        vmask_bool = vmask[pi] > 0
 
-        # region_4classカラーオーバーレイ (alpha=0.45)
-        overlay = rgb.copy()
-        for r, color in REGION_COLORS.items():
-            mask = (region_mask[pi] == r) & (vmask[pi] > 0)
-            overlay[mask] = color
-        blended = (0.55 * rgb + 0.45 * overlay).clip(0, 255).astype(np.uint8)
+        if region_mask is not None:
+            overlay = rgb.copy()
+            for r, color in REGION_COLORS.items():
+                region_pixels = (region_mask[pi] == r) & vmask_bool
+                overlay[region_pixels] = color
+            blended = 0.55 * rgb + 0.45 * overlay
+        else:
+            # region_4class.npyが未生成のrun（QC除外分）はCT+椎体強調のみ表示
+            blended = rgb.copy()
+            tint = np.array(NO_REGION_TINT, dtype=np.float32)
+            blended[vmask_bool] = 0.8 * blended[vmask_bool] + 0.2 * tint
+
+        alpha = np.clip(
+            occupancy[pi].astype(np.float32) / OCCUPANCY_ALPHA_SCALE,
+            0.0,
+            OCCUPANCY_ALPHA_MAX,
+        )[..., None]
+        tint = np.array(OCCUPANCY_TINT, dtype=np.float32)
+        blended = blended * (1.0 - alpha) + tint * alpha
+        blended = blended.clip(0, 255).astype(np.uint8)
 
         img = Image.fromarray(blended, mode="RGB")
         draw = ImageDraw.Draw(img)
-
-        # 投影済みbboxを白矩形で描画
-        for r_min, c_min, r_max, c_max in plane_bboxes.get(pi, []):
-            x0 = max(0, int(c_min))
-            y0 = max(0, int(r_min))
-            x1 = min(OUTPUT_SIZE - 1, int(c_max))
-            y1 = min(OUTPUT_SIZE - 1, int(r_max))
-            if x1 <= x0 or y1 <= y0:
+        for component in contour_by_plane.get(pi, []):
+            polygon = _simplify_contour(component)
+            if polygon is None:
                 continue
-            draw.rectangle([(x0, y0), (x1, y1)], outline=(255, 255, 255), width=2)
+            points = [(float(c), float(r)) for r, c in polygon]
+            draw.line([*points, points[0]], fill=CONTOUR_COLOR, width=1)
 
         buf = io.BytesIO()
         img.save(buf, "PNG")
@@ -201,14 +228,14 @@ def render_planes(study_id: str, level: str) -> list[bytes]:
     return result
 
 
-def get_cached_planes(study_id: str, level: str) -> list[bytes]:
+def get_cached_planes(study_id: str, level: str, run_id: str) -> list[bytes]:
     """キャッシュからプレーン画像を取得、なければ生成する。"""
-    key = (study_id, level)
+    key = (study_id, level, run_id)
     with _cache_lock:
         if key not in _plane_cache:
             if len(_plane_cache) >= MAX_CACHE:
                 _plane_cache.pop(next(iter(_plane_cache)))
-            _plane_cache[key] = render_planes(study_id, level)
+            _plane_cache[key] = render_planes(study_id, level, run_id)
         return _plane_cache[key]
 
 
@@ -245,14 +272,16 @@ class FractureAnnotationHandler(BaseHTTPRequestHandler):
         labels = read_labels()
         result = []
         for t in _targets:
-            key = (t["study_id"], t["level"])
+            key = (t["study_id"], t["level"], t["run_id"])
             ann = labels.get(key)
             result.append({
                 "study_id": t["study_id"],
                 "short_id": t["short_id"],
                 "level": t["level"],
+                "run_id": t["run_id"],
                 "annotated": ann is not None,
-                "has_bbox": t.get("has_bbox", True),
+                "has_region": t["has_region"],
+                "geometry_mode": t["geometry_mode"],
                 "regions": ann,
             })
         self._send_json(result)
@@ -260,9 +289,10 @@ class FractureAnnotationHandler(BaseHTTPRequestHandler):
     def _api_image(self, params: dict) -> None:
         study_id = self._param(params, "study")
         level = self._param(params, "level")
+        run_id = self._param(params, "run")
         plane_str = self._param(params, "plane")
 
-        if not all([study_id, level, plane_str]):
+        if not all([study_id, level, run_id, plane_str]):
             self._send_bytes(400, b"Missing params")
             return
 
@@ -272,12 +302,12 @@ class FractureAnnotationHandler(BaseHTTPRequestHandler):
             self._send_bytes(400, b"Invalid plane")
             return
 
-        if not (0 <= plane_idx <= 14):
+        if not (0 <= plane_idx <= PLANE_COUNT - 1):
             self._send_bytes(400, b"Plane out of range")
             return
 
         try:
-            planes = get_cached_planes(study_id, level)
+            planes = get_cached_planes(study_id, level, run_id)
         except Exception as e:
             self._send_bytes(500, f"Render error: {e}".encode())
             return
@@ -292,17 +322,19 @@ class FractureAnnotationHandler(BaseHTTPRequestHandler):
     def _api_get_annotation(self, params: dict) -> None:
         study_id = self._param(params, "study")
         level = self._param(params, "level")
-        if not all([study_id, level]):
+        run_id = self._param(params, "run")
+        if not all([study_id, level, run_id]):
             self._send_json({})
             return
         labels = read_labels()
-        ann = labels.get((study_id, level), {})
+        ann = labels.get((study_id, level, run_id), {})
         self._send_json(ann)
 
     def _api_post_annotation(self, params: dict) -> None:
         study_id = self._param(params, "study")
         level = self._param(params, "level")
-        if not all([study_id, level]):
+        run_id = self._param(params, "run")
+        if not all([study_id, level, run_id]):
             self._send_json({"error": "missing params"}, 400)
             return
 
@@ -314,7 +346,7 @@ class FractureAnnotationHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "invalid json"}, 400)
             return
 
-        write_label(study_id, level, data)
+        write_label(study_id, level, run_id, data)
         self._send_json({"ok": True})
 
     def _serve_file(self, path: Path) -> None:
@@ -359,7 +391,7 @@ def main() -> None:
 
     print("データ読み込み中...")
     load_data()
-    print(f"対象 {len(_targets)} 件")
+    print(f"対象 {len(_targets)} 件 (run単位)")
 
     url = f"http://localhost:{args.port}"
     print(f"起動: {url}")

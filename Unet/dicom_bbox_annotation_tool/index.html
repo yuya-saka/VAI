@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>元DICOM bboxアノテーション</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  height: 100vh; display: flex; overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px; color: #d6dde7; background: #070a0f;
+}
+#sidebar {
+  width: 270px; flex-shrink: 0; display: flex; flex-direction: column;
+  background: #111722; border-right: 1px solid #293141;
+}
+#sidebar-title {
+  padding: 12px 13px 5px; color: #f0f4fa; font-size: 13px; font-weight: 700;
+}
+#source-note {
+  padding: 0 13px 11px; color: #8792a2; font-size: 10px; line-height: 1.45;
+  border-bottom: 1px solid #293141;
+}
+#progress-wrap { padding: 8px 12px; border-bottom: 1px solid #293141; }
+#progress-text { font-size: 11px; margin-bottom: 5px; }
+#progress-bar { height: 4px; border-radius: 3px; overflow: hidden; background: #242c39; }
+#progress-fill { width: 0; height: 100%; background: #2ea043; transition: width .2s; }
+#filter-bar { display: flex; gap: 4px; padding: 7px 8px 5px; }
+.filter-btn {
+  flex: 1; padding: 4px 0; border: 1px solid #30394a; border-radius: 4px;
+  color: #8995a6; background: #1a2230; font-size: 10px; cursor: pointer;
+}
+.filter-btn:hover { color: #d6dde7; background: #242e3d; }
+.filter-btn.active { color: #e8f1ff; border-color: #3978c5; background: #17375e; }
+#search {
+  width: calc(100% - 16px); margin: 0 8px 6px; padding: 6px 8px;
+  color: #d6dde7; background: #090d14; border: 1px solid #30394a; border-radius: 4px;
+  outline: none; font-size: 11px;
+}
+#search:focus { border-color: #3978c5; }
+#sample-count { padding: 0 12px 5px; color: #6f7b8c; font-size: 10px; }
+#sample-list { flex: 1; overflow-y: auto; padding: 3px 5px 8px; }
+.sample-item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 7px 8px; margin-bottom: 2px; border-radius: 5px; cursor: pointer;
+}
+.sample-item:hover { background: #1b2431; }
+.sample-item.active { padding-left: 6px; background: #17375e; border-left: 2px solid #58a6ff; }
+.sample-id { color: #e2e8f0; font-size: 12px; font-weight: 650; }
+.sample-meta { margin-top: 2px; color: #8490a1; font-size: 10px; }
+.badge { padding: 2px 6px; border-radius: 9px; font-size: 9px; font-weight: 700; }
+.badge.done { color: #56d77d; background: #103922; }
+.badge.todo { color: #788596; background: #242c39; }
+.badge.recovered { color: #e8c94f; background: #3a2f0a; }
+.badge.missing { color: #ff6b6b; background: #3a1010; }
+.sample-item.warning { border-left: 2px solid #e8c94f; }
+.sample-item.critical { border-left: 2px solid #ff6b6b; }
+#main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+#topbar {
+  flex-shrink: 0; min-height: 54px; display: flex; align-items: center; gap: 14px;
+  padding: 8px 14px; background: #111722; border-bottom: 1px solid #293141;
+}
+#current-title { color: #f0f4fa; font-size: 15px; font-weight: 700; }
+#current-subtitle { margin-top: 3px; color: #8792a2; font-size: 10px; }
+#top-spacer { flex: 1; }
+.source-badge {
+  padding: 4px 7px; border: 1px solid #3e7d58; border-radius: 4px;
+  color: #6cdb91; background: #102d1b; font-size: 10px; font-weight: 650;
+}
+.mask-badge {
+  padding: 4px 7px; border: 1px solid #2587ad; border-radius: 4px;
+  color: #70d7ff; background: #0d2a36; font-size: 10px; font-weight: 650;
+}
+#current-pos { color: #788596; font-size: 11px; }
+#grid {
+  flex: 1; overflow-y: auto; display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  align-content: start; gap: 8px; padding: 9px; background: #03060a;
+}
+#empty-message { grid-column: 1 / -1; padding: 70px 20px; color: #697586; text-align: center; }
+.grid-notice { grid-column: 1 / -1; padding: 60px 20px; text-align: center; line-height: 1.7; }
+.grid-notice.critical { color: #ff8f8f; }
+.slice-card {
+  overflow: hidden; border: 1px solid #252d3a; border-radius: 5px;
+  background: #0e131c; cursor: zoom-in;
+}
+.slice-card:hover { border-color: #b84040; }
+.image-wrap { position: relative; aspect-ratio: 1; background: #000; }
+.image-wrap img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.image-wrap.loading img { opacity: .2; }
+.slice-label {
+  position: absolute; top: 5px; left: 5px; padding: 2px 5px; border-radius: 3px;
+  color: #fff; background: rgba(0, 0, 0, .7); font-size: 10px; font-weight: 700;
+}
+.bbox-label {
+  position: absolute; top: 5px; right: 5px; padding: 2px 5px; border-radius: 3px;
+  color: #ff7373; background: rgba(0, 0, 0, .72); font-size: 9px; font-weight: 700;
+}
+.slice-info { padding: 6px 7px 7px; color: #8c98a9; font: 10px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.slice-info strong { color: #f06b6b; font-weight: 650; }
+#toolbar {
+  flex-shrink: 0; display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+  padding: 9px 12px; background: #111722; border-top: 1px solid #293141;
+}
+#legend { display: flex; align-items: center; gap: 5px; }
+.legend-dot { width: 9px; height: 9px; border-radius: 2px; }
+.legend-text { margin-right: 5px; color: #8792a2; font-size: 10px; }
+.separator { width: 1px; height: 27px; margin: 0 2px; background: #30394a; }
+.region-btn {
+  padding: 5px 11px; border: 2px solid; border-radius: 5px; cursor: pointer;
+  font-size: 11px; font-weight: 700; background: transparent; opacity: .35;
+}
+.region-btn:hover { opacity: .72; }
+.region-btn:disabled, #save-btn:disabled {
+  opacity: .2; cursor: not-allowed; pointer-events: none;
+}
+.region-btn.active { opacity: 1; }
+#region-1 { color: #72a4ef; border-color: #72a4ef; }
+#region-1.active { color: #06101e; background: #72a4ef; }
+#region-2 { color: #47cf47; border-color: #47cf47; }
+#region-2.active { color: #031503; background: #47cf47; }
+#region-3 { color: #e66565; border-color: #e66565; }
+#region-3.active { color: #190303; background: #e66565; }
+#region-4 { color: #e8c94f; border-color: #e8c94f; }
+#region-4.active { color: #171302; background: #e8c94f; }
+#save-btn {
+  padding: 6px 14px; color: #64dd88; background: #123a22; border: 1px solid #2b8b48;
+  border-radius: 5px; cursor: pointer; font-size: 11px; font-weight: 700;
+}
+#save-btn:hover { background: #1d6334; }
+#status { min-width: 70px; font-size: 10px; }
+#keyboard-hint { margin-left: auto; color: #566274; font-size: 9px; }
+#modal {
+  position: fixed; inset: 0; z-index: 10; display: none; align-items: center; justify-content: center;
+  padding: 28px; background: rgba(0, 0, 0, .91); cursor: zoom-out;
+}
+#modal.open { display: flex; }
+#modal-content { max-width: 96vw; max-height: 94vh; display: flex; flex-direction: column; align-items: center; }
+#modal-image { max-width: 92vw; max-height: calc(94vh - 42px); object-fit: contain; image-rendering: auto; }
+#modal-caption { padding-top: 8px; color: #d6dde7; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+@media (max-width: 1050px) {
+  #sidebar { width: 225px; }
+  #grid { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); }
+  #legend, #keyboard-hint { display: none; }
+}
+</style>
+</head>
+<body>
+<aside id="sidebar">
+  <div id="sidebar-title">元DICOM bboxアノテーション</div>
+  <div id="source-note">CSV座標を元解像度へ直接描画<br>水色 = 割当椎体の3D mask</div>
+  <div id="progress-wrap">
+    <div id="progress-text">読み込み中...</div>
+    <div id="progress-bar"><div id="progress-fill"></div></div>
+  </div>
+  <div id="filter-bar">
+    <button class="filter-btn active" data-filter="all">全て</button>
+    <button class="filter-btn" data-filter="todo">未完了</button>
+    <button class="filter-btn" data-filter="done">完了</button>
+  </div>
+  <input id="search" type="search" placeholder="study ID / C1-C7">
+  <div id="sample-count"></div>
+  <div id="sample-list"></div>
+</aside>
+
+<main id="main">
+  <header id="topbar">
+    <div>
+      <div id="current-title">左のリストから対象を選択してください</div>
+      <div id="current-subtitle">水色 = 割当椎体mask · 赤 = CSV bbox</div>
+    </div>
+    <div id="top-spacer"></div>
+    <span class="mask-badge">水色: 割当椎体mask</span>
+    <span class="source-badge">native DICOM + canonical level</span>
+    <span id="current-pos"></span>
+  </header>
+
+  <section id="grid">
+    <div id="empty-message">bboxを持つ元DICOMスライスだけをrun単位で表示します。</div>
+  </section>
+
+  <footer id="toolbar">
+    <div id="legend">
+      <span class="legend-dot" style="background:#72a4ef"></span><span class="legend-text">R1 椎体</span>
+      <span class="legend-dot" style="background:#47cf47"></span><span class="legend-text">R2 右椎間孔</span>
+      <span class="legend-dot" style="background:#e66565"></span><span class="legend-text">R3 左椎間孔</span>
+      <span class="legend-dot" style="background:#e8c94f"></span><span class="legend-text">R4 後方要素</span>
+    </div>
+    <span class="separator"></span>
+    <button class="region-btn" id="region-1">R1 椎体</button>
+    <button class="region-btn" id="region-2">R2 右椎間孔</button>
+    <button class="region-btn" id="region-3">R3 左椎間孔</button>
+    <button class="region-btn" id="region-4">R4 後方要素</button>
+    <span class="separator"></span>
+    <button id="save-btn">DICOM判定を保存</button>
+    <span id="status"></span>
+    <span id="keyboard-hint">1–4: 領域 / Ctrl+S: 保存 / ←→: run移動 / Esc: 拡大を閉じる</span>
+  </footer>
+</main>
+
+<div id="modal" role="dialog" aria-modal="true" aria-label="DICOM拡大表示">
+  <div id="modal-content">
+    <img id="modal-image" alt="拡大DICOM">
+    <div id="modal-caption"></div>
+  </div>
+</div>
+
+<script>
+const EMPTY_REGIONS = { region_1: 0, region_2: 0, region_3: 0, region_4: 0 };
+let samples = [];
+let currentIndex = -1;
+let currentFilter = "all";
+let regions = { ...EMPTY_REGIONS };
+
+async function initialize() {
+  bindEvents();
+  try {
+    const response = await fetch("/api/samples");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    samples = await response.json();
+    renderSidebar();
+    updateProgress();
+  } catch (error) {
+    setStatus(`読込失敗: ${error.message}`, "#ff6b6b");
+  }
+}
+
+function bindEvents() {
+  document.querySelectorAll(".filter-btn").forEach(button => {
+    button.addEventListener("click", () => setFilter(button.dataset.filter));
+  });
+  document.getElementById("search").addEventListener("input", renderSidebar);
+  for (let region = 1; region <= 4; region += 1) {
+    document.getElementById(`region-${region}`).addEventListener("click", () => toggleRegion(region));
+  }
+  document.getElementById("save-btn").addEventListener("click", saveAnnotation);
+  document.getElementById("modal").addEventListener("click", closeModal);
+  document.addEventListener("keydown", handleKeydown);
+}
+
+function updateProgress() {
+  const completed = samples.filter(sample => sample.annotated).length;
+  const total = samples.length;
+  document.getElementById("progress-text").textContent = `${completed} / ${total} runs 完了`;
+  document.getElementById("progress-fill").style.width = `${total ? completed / total * 100 : 0}%`;
+}
+
+function setFilter(filterName) {
+  currentFilter = filterName;
+  document.querySelectorAll(".filter-btn").forEach(button => {
+    button.classList.toggle("active", button.dataset.filter === filterName);
+  });
+  renderSidebar();
+}
+
+function filteredSamples() {
+  const query = document.getElementById("search").value.trim().toLowerCase();
+  return samples.filter(sample => {
+    if (currentFilter === "todo" && sample.annotated) return false;
+    if (currentFilter === "done" && !sample.annotated) return false;
+    if (!query) return true;
+    return `${sample.study_id} ${sample.short_id} ${sample.level} ${sample.run_id}`.toLowerCase().includes(query);
+  });
+}
+
+function renderSidebar() {
+  const list = document.getElementById("sample-list");
+  const visible = filteredSamples();
+  list.replaceChildren();
+  document.getElementById("sample-count").textContent = `${visible.length} / ${samples.length} runs`;
+
+  if (!visible.length) {
+    const empty = document.createElement("div");
+    empty.style.cssText = "padding:10px;color:#697586";
+    empty.textContent = "該当なし";
+    list.appendChild(empty);
+    return;
+  }
+
+  visible.forEach(sample => {
+    const globalIndex = samples.indexOf(sample);
+    const noteClass = sample.note === "bbox_missing" ? " critical"
+      : sample.note === "coverage_recovered" ? " warning" : "";
+    const item = document.createElement("div");
+    item.className = `sample-item${noteClass}${globalIndex === currentIndex ? " active" : ""}`;
+    item.addEventListener("click", () => loadSample(globalIndex));
+
+    const text = document.createElement("div");
+    const id = document.createElement("div");
+    id.className = "sample-id";
+    id.textContent = sample.short_id;
+    const meta = document.createElement("div");
+    meta.className = "sample-meta";
+    const noteSuffix = sample.note === "bbox_missing" ? " · bbox無し"
+      : sample.note === "coverage_recovered" ? " · 被覆率から復元" : "";
+    meta.textContent = `${sample.level} · ${sample.run_id} · ${sample.rows.length} slices${noteSuffix}`;
+    text.append(id, meta);
+
+    const badge = document.createElement("span");
+    if (sample.note === "bbox_missing") {
+      badge.className = "badge missing";
+      badge.textContent = "bboxなし";
+    } else if (sample.note === "coverage_recovered" && !sample.annotated) {
+      badge.className = "badge recovered";
+      badge.textContent = "補完";
+    } else {
+      badge.className = `badge ${sample.annotated ? "done" : "todo"}`;
+      badge.textContent = sample.annotated ? "✓" : "未";
+    }
+    item.append(text, badge);
+    list.appendChild(item);
+  });
+
+  list.querySelector(".sample-item.active")?.scrollIntoView({ block: "nearest" });
+}
+
+function loadSample(index) {
+  const sample = samples[index];
+  if (!sample) return;
+  currentIndex = index;
+  regions = { ...EMPTY_REGIONS, ...(sample.regions || {}) };
+  updateRegionButtons();
+  renderSidebar();
+  renderGrid(sample);
+  document.getElementById("current-title").textContent = `${sample.short_id} / ${sample.level} / ${sample.run_id}`;
+  const noteText = sample.note === "bbox_missing"
+    ? " · ⚠ 骨折ラベルはあるがCSVにbboxが1行も無い（元データ欠損）"
+    : sample.note === "coverage_recovered"
+      ? " · ⚠ 前処理の割当ではrunが作れず、mask被覆率から椎体を推定して復元"
+      : "";
+  document.getElementById("current-subtitle").textContent =
+    `${sample.rows.length} bbox rows · 水色: ${sample.level} mask · 赤: CSV bbox · bone window W2000/L400${noteText}`;
+  document.getElementById("current-pos").textContent = `[${index + 1} / ${samples.length}]`;
+  setAnnotationControlsEnabled(sample.rows.length > 0);
+  setStatus("");
+}
+
+function setAnnotationControlsEnabled(enabled) {
+  document.getElementById("save-btn").disabled = !enabled;
+  for (let region = 1; region <= 4; region += 1) {
+    document.getElementById(`region-${region}`).disabled = !enabled;
+  }
+}
+
+function renderGrid(sample) {
+  const grid = document.getElementById("grid");
+  grid.replaceChildren();
+  if (sample.note === "bbox_missing") {
+    const notice = document.createElement("div");
+    notice.className = "grid-notice critical";
+    notice.textContent =
+      "この椎体は骨折ラベルがありますが、RSNA元データにbbox矩形が1行もありません。" +
+      "画像は表示できないため、他の椎体・画像を参照するなど別途確認してください。";
+    grid.appendChild(notice);
+    return;
+  }
+  sample.rows.forEach(row => {
+    const card = document.createElement("article");
+    card.className = "slice-card";
+    const wrap = document.createElement("div");
+    wrap.className = "image-wrap loading";
+    const image = document.createElement("img");
+    const imageUrl = `/api/image?target=${sample.target_id}&row=${row.row_index}`;
+    image.src = imageUrl;
+    image.alt = `slice ${row.slice_number}`;
+    image.loading = "lazy";
+    image.addEventListener("load", () => wrap.classList.remove("loading"));
+    image.addEventListener("error", () => wrap.classList.remove("loading"));
+    const sliceLabel = document.createElement("span");
+    sliceLabel.className = "slice-label";
+    sliceLabel.textContent = `slice ${row.slice_number}`;
+    const bboxLabel = document.createElement("span");
+    bboxLabel.className = "bbox-label";
+    bboxLabel.textContent = `${sample.level} mask + CSV bbox`;
+    wrap.append(image, sliceLabel, bboxLabel);
+
+    const info = document.createElement("div");
+    info.className = "slice-info";
+    const firstLine = document.createElement("div");
+    firstLine.textContent = `series ${row.series_index + 1} · CSV line ${row.csv_line}`;
+    const secondLine = document.createElement("div");
+    const prefix = document.createElement("strong");
+    prefix.textContent = "bbox ";
+    secondLine.append(prefix, document.createTextNode(
+      `x=${formatNumber(row.x)} y=${formatNumber(row.y)} w=${formatNumber(row.width)} h=${formatNumber(row.height)}`
+    ));
+    info.append(firstLine, secondLine);
+    card.append(wrap, info);
+    card.addEventListener("click", () => openModal(imageUrl, row));
+    grid.appendChild(card);
+  });
+  grid.scrollTop = 0;
+}
+
+function formatNumber(value) {
+  return Number(value).toFixed(2).replace(/\.00$/, "");
+}
+
+function openModal(imageUrl, row) {
+  document.getElementById("modal-image").src = imageUrl;
+  document.getElementById("modal-caption").textContent =
+    `水色: 割当椎体mask · 赤: CSV bbox · slice ${row.slice_number} · x=${row.x}, y=${row.y}, width=${row.width}, height=${row.height}`;
+  document.getElementById("modal").classList.add("open");
+}
+
+function closeModal() {
+  document.getElementById("modal").classList.remove("open");
+  document.getElementById("modal-image").removeAttribute("src");
+}
+
+function toggleRegion(region) {
+  const key = `region_${region}`;
+  regions[key] = regions[key] ? 0 : 1;
+  updateRegionButtons();
+}
+
+function updateRegionButtons() {
+  for (let region = 1; region <= 4; region += 1) {
+    document.getElementById(`region-${region}`).classList.toggle("active", Boolean(regions[`region_${region}`]));
+  }
+}
+
+async function saveAnnotation() {
+  if (currentIndex < 0) return;
+  const sample = samples[currentIndex];
+  if (!sample.rows.length) {
+    setStatus("bboxが無いため保存できません", "#ff6b6b");
+    return;
+  }
+  setStatus("保存中...", "#8490a1");
+  try {
+    const response = await fetch(`/api/annotation?target=${sample.target_id}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(regions),
+    });
+    if (!response.ok) {
+      const body = await response.json();
+      throw new Error(body.error || `HTTP ${response.status}`);
+    }
+    samples[currentIndex] = { ...sample, annotated: true, regions: { ...regions } };
+    setStatus("✓ 保存完了", "#56d77d");
+    renderSidebar();
+    updateProgress();
+  } catch (error) {
+    setStatus(`保存失敗: ${error.message}`, "#ff6b6b");
+  }
+}
+
+function setStatus(message, color = "#56d77d") {
+  const status = document.getElementById("status");
+  status.textContent = message;
+  status.style.color = color;
+}
+
+function navigate(delta) {
+  const nextIndex = currentIndex + delta;
+  if (nextIndex >= 0 && nextIndex < samples.length) loadSample(nextIndex);
+}
+
+function handleKeydown(event) {
+  if (event.key === "Escape") {
+    closeModal();
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+    event.preventDefault();
+    saveAnnotation();
+    return;
+  }
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  const current = samples[currentIndex];
+  if (["1", "2", "3", "4"].includes(event.key) && current?.rows.length) {
+    toggleRegion(Number(event.key));
+  }
+  if (event.key === "ArrowRight") navigate(1);
+  if (event.key === "ArrowLeft") navigate(-1);
+}
+
+initialize();
+</script>
+</body>
+</html>

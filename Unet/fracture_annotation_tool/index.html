@@ -143,8 +143,8 @@ body {
   color: #6e7681; padding: 40px; text-align: center;
   grid-column: span 5; font-size: 14px;
 }
-.nobbox-icon { font-size: 9px; color: #d29922; margin-right: 2px; }
-#nobbox-badge {
+.warn-icon { font-size: 9px; color: #d29922; margin-right: 2px; }
+#noregion-badge, #geometry-badge {
   padding: 2px 7px; border-radius: 4px; font-size: 11px; font-weight: 600;
   background: #3d2a00; border: 1px solid #d29922; color: #d29922; display: none;
 }
@@ -162,7 +162,7 @@ body {
     <button class="filter-btn active" data-filter="all" onclick="setFilter('all')">全て</button>
     <button class="filter-btn" data-filter="todo" onclick="setFilter('todo')">未完了</button>
     <button class="filter-btn" data-filter="done" onclick="setFilter('done')">完了</button>
-    <button class="filter-btn" data-filter="nobbox" onclick="setFilter('nobbox')">bbox なし</button>
+    <button class="filter-btn" data-filter="noregion" onclick="setFilter('noregion')">maskなし</button>
   </div>
   <div id="sidebar-count"></div>
   <div id="sample-list">
@@ -173,7 +173,8 @@ body {
 <div id="main">
   <div id="top-bar">
     <div id="current-title">サンプルを選択してください</div>
-    <span id="nobbox-badge">⚠ bbox なし</span>
+    <span id="noregion-badge">⚠ 4領域maskなし</span>
+    <span id="geometry-badge">⚠ 近似ジオメトリ</span>
     <div id="current-pos"></div>
   </div>
 
@@ -242,7 +243,7 @@ function getFiltered() {
   return samples.filter(s => {
     if (currentFilter === 'todo') return !s.annotated;
     if (currentFilter === 'done') return s.annotated;
-    if (currentFilter === 'nobbox') return s.has_bbox === false;
+    if (currentFilter === 'noregion') return s.has_region === false;
     return true;
   });
 }
@@ -267,8 +268,8 @@ function renderSidebar() {
     div.dataset.idx = globalIdx;
     div.innerHTML = `
       <div>
-        <div class="sample-name">${s.has_bbox === false ? '<span class="nobbox-icon">⚠</span>' : ''}${s.short_id}</div>
-        <div class="level-name">${s.level}</div>
+        <div class="sample-name">${s.has_region === false ? '<span class="warn-icon">⚠</span>' : ''}${s.short_id}</div>
+        <div class="level-name">${s.level} · ${s.run_id}</div>
       </div>
       <span class="badge ${s.annotated ? 'badge-done' : 'badge-none'}">${s.annotated ? '✓' : '未'}</span>
     `;
@@ -286,8 +287,10 @@ async function loadSample(idx) {
   const s = samples[idx];
   if (!s) return;
 
-  document.getElementById('current-title').textContent = `${s.short_id} / ${s.level}`;
-  document.getElementById('nobbox-badge').style.display = s.has_bbox === false ? 'inline' : 'none';
+  document.getElementById('current-title').textContent = `${s.short_id} / ${s.level} / ${s.run_id}`;
+  document.getElementById('noregion-badge').style.display = s.has_region === false ? 'inline' : 'none';
+  document.getElementById('geometry-badge').style.display =
+    (s.geometry_mode && s.geometry_mode !== 'native_dicom') ? 'inline' : 'none';
   document.getElementById('current-pos').textContent = `[${idx + 1} / ${samples.length}]`;
 
   document.querySelectorAll('.sample-item').forEach(el => {
@@ -303,7 +306,7 @@ async function loadSample(idx) {
   // 非同期でアノテーションを取得してボタン更新
   try {
     const annRes = await fetch(
-      `/api/annotation?study=${encodeURIComponent(s.study_id)}&level=${encodeURIComponent(s.level)}`
+      `/api/annotation?study=${encodeURIComponent(s.study_id)}&level=${encodeURIComponent(s.level)}&run=${encodeURIComponent(s.run_id)}`
     );
     if (annRes.ok) {
       const ann = await annRes.json();
@@ -330,7 +333,7 @@ function renderGrid(s) {
     const cell = document.createElement('div');
     cell.className = 'plane-cell loading';
 
-    const url = `/api/image?study=${encodeURIComponent(s.study_id)}&level=${encodeURIComponent(s.level)}&plane=${pi}`;
+    const url = `/api/image?study=${encodeURIComponent(s.study_id)}&level=${encodeURIComponent(s.level)}&run=${encodeURIComponent(s.run_id)}&plane=${pi}`;
     const img = document.createElement('img');
     img.alt = `plane ${pi}`;
     img.src = url;
@@ -367,7 +370,7 @@ async function saveAnnotation() {
   setStatus('保存中...', '#6e7681');
 
   const res = await fetch(
-    `/api/annotation?study=${encodeURIComponent(s.study_id)}&level=${encodeURIComponent(s.level)}`,
+    `/api/annotation?study=${encodeURIComponent(s.study_id)}&level=${encodeURIComponent(s.level)}&run=${encodeURIComponent(s.run_id)}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
