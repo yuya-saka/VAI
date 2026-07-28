@@ -9,7 +9,7 @@ needs to change in stage1 before it can be retrained as a fair comparison
 baseline against stage2's region-auxiliary-head model. Investigation only,
 no code changes made.
 
-Files read: `.claude/docs/work-logs/2026-07-01.md`, `2026-07-02.md`;
+Files read: `.claude/docs/work-logs/2026-07/2026-07-01.md`, `2026-07-02.md`;
 `train_models/stage1/{train.py,src/trainer.py,src/dataset.py,
 src/data_utils.py,src/experiment.py,utils/losses.py,src/evaluation.py,
 config/config.yaml}`; `train_models/stage2/{train.py,src/trainer.py,

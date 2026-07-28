@@ -10,7 +10,7 @@
   - Test: 従来のアンサンブル平均（2,703行）に加え、**fold毎の非アンサンブル予測を新規に推論**
     （13,515行 = 2,703症例 × 5fold、各fold単独モデルの予測。詳細は§6）
   - 「全症例」統合: OOF + Test per-fold = **24,245行、2,009患者（データセット全体）**
-- 関連: `.claude/docs/work-logs/2026-07-13.md`（セッション経緯の詳細）
+- 関連: `.claude/docs/work-logs/2026-07/2026-07-13.md`（セッション経緯の詳細）
 
 ## 要点
 
@@ -175,7 +175,7 @@ fold単位の非アンサンブル予測も返すよう修正済み（詳細は 
 ## 7. 次のステップ
 
 1. 既存3実験の`test_predictions_per_fold.csv`を正式生成（新コードで推論のみ再実行）。
-2. `.claude/docs/work-logs/2026-07-09.md`記載の未着手ablation
+2. `.claude/docs/work-logs/2026-07/2026-07-09.md`記載の未着手ablation
    （shuffled region mask、Noisy-OR pooling、primary-only-same-architecture、
    global FPN head）の実行。
 3. Screening operating point評価（specificity固定時のrecall等）は未実施。

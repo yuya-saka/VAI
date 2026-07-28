@@ -275,4 +275,4 @@ fold0限定とはいえ良い初期兆候。
 5. F1最大点ではなく、specificity固定時のrecallなど、スクリーニング運用に即した
    operating pointでの評価を行う
 
-（詳細は `.claude/docs/work-logs/2026-07-09.md` を参照）
+（詳細は `.claude/docs/work-logs/2026-07/2026-07-09.md` を参照）

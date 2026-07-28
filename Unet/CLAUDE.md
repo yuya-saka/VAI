@@ -5,7 +5,7 @@
 | ファイル | 内容 | 更新タイミング |
 |---------|------|--------------|
 | **`../.claude/docs/unet-work-log.md`** | 現在の精度・設計決定・次にやること（サマリー） | 大きな変更時 |
-| **`../.claude/docs/work-logs/YYYY-MM-DD.md`** | 日別の詳細作業ログ | 各セッション終了時 |
+| **`../.claude/docs/work-logs/YYYY-MM/YYYY-MM-DD.md`** | 日別の詳細作業ログ（月別フォルダ） | 各セッション終了時 |
 | **`../.claude/docs/DESIGN.md`** | アーキテクチャ・設計決定の詳細 | 重要な設計判断時 |
 | **`config/config.yaml`** | 訓練設定、ハイパーパラメータ | 実験時 |
 
