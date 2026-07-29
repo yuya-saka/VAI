@@ -340,6 +340,16 @@ def main() -> None:
     parser.add_argument("--metadata-dir", type=Path, default=STUDY_METADATA_DIR)
     parser.add_argument("--output-dir", type=Path, default=FRACTURE_DATASET_DIR)
     parser.add_argument("--bbox-csv", type=Path, default=BOUNDING_BOX_CSV)
+    parser.add_argument(
+        "--no-bbox",
+        action="store_true",
+        help=(
+            "Select classifier planes from vertebra geometry alone. "
+            "Required for leakage-free localization data, because forcing "
+            "bounding-box positions into the plane set only happens for "
+            "fracture-bearing vertebrae."
+        ),
+    )
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--threads-per-worker", type=int, default=2)
     parser.add_argument(
@@ -371,7 +381,7 @@ def main() -> None:
         segmentation_dir=arguments.segmentation_dir,
         metadata_dir=arguments.metadata_dir,
         output_dir=arguments.output_dir,
-        bbox_csv_path=arguments.bbox_csv,
+        bbox_csv_path=None if arguments.no_bbox else arguments.bbox_csv,
         workers=arguments.workers,
         log_path=arguments.log_path,
         excluded_studies_csv=arguments.excluded_studies_csv,

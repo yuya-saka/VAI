@@ -436,6 +436,11 @@ def main() -> None:
         type=Path,
         default=BOUNDING_BOX_CSV,
     )
+    parser.add_argument(
+        "--no-bbox",
+        action="store_true",
+        help="Select classifier planes from vertebra geometry alone.",
+    )
     arguments = parser.parse_args()
 
     result = process_study(
@@ -443,7 +448,7 @@ def main() -> None:
         arguments.segmentation_dir / arguments.study_id,
         arguments.metadata_dir / f"{arguments.study_id}.json",
         arguments.output_dir / arguments.study_id,
-        bbox_csv_path=arguments.bbox_csv,
+        bbox_csv_path=None if arguments.no_bbox else arguments.bbox_csv,
     )
     print(result.metadata_path)
 
