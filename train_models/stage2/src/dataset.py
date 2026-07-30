@@ -139,7 +139,7 @@ class RSNARegionDataset(Dataset):
             images = np.concatenate([ct, vertebra_mask[:, None]], axis=1)
             regions = region_mask.astype(np.uint8, copy=False)
         else:
-            images, regions = self._augment_volume(ct, vertebra_mask, region_mask)
+            images, regions, _ = self._augment_volume(ct, vertebra_mask, region_mask)
 
         if self.mode == "train" and random.random() < self.p_rand_order:
             indices = np.random.permutation(images.shape[0])
@@ -160,7 +160,7 @@ class RSNARegionDataset(Dataset):
         ct: np.ndarray,
         vertebra_mask: np.ndarray,
         region_mask: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, bool]:
         """Apply one shared spatial transform to all planes at once.
 
         All 15 planes are stacked into the channel axis so Albumentations
@@ -189,6 +189,7 @@ class RSNARegionDataset(Dataset):
         regions = augmented["region_mask"].transpose(2, 0, 1)
         combined = np.concatenate([images, vertebra_masks[:, None]], axis=1)
 
-        if replay_applied_horizontal_flip(augmented["replay"]):
+        flip_applied = replay_applied_horizontal_flip(augmented["replay"])
+        if flip_applied:
             regions = remap_regions_after_horizontal_flip(regions)
-        return combined, regions
+        return combined, regions, flip_applied

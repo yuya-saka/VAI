@@ -1,0 +1,11 @@
+_base: "stage4_mixed.yaml"
+experiment:
+  name: "stage4_smoke_v2"
+data:
+  start_fold: 0
+  end_fold: 0
+  stage_to_local: false
+training:
+  fixed_epochs: 1
+wandb:
+  enabled: false

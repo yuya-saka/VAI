@@ -1,0 +1,5 @@
+_base: "base.yaml"
+experiment:
+  name: "stage4_weak_only_v2"
+training:
+  lambda_region_scale: 0.0

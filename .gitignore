@@ -98,3 +98,11 @@ scripts/
 *.evx
 *.jsonl
 *.npz
+
+# Stage4 experiment code and reproducibility inputs
+!train_models/stage4/config/
+!train_models/stage4/config/*.yaml
+!train_models/stage4/scripts/
+!train_models/stage4/scripts/*.py
+!train_models/stage4/tests/
+!train_models/stage4/tests/*.py

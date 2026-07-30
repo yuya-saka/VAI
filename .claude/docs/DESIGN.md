@@ -9,11 +9,25 @@
 
 ## Architecture
 
-<!-- System structure, components, data flow -->
+### Stage3 Hierarchical Weak-Label Model
 
+```text
+15 planes × (5-channel 2.5D CT + vertebra mask)
+    -> shared EfficientNetV2-S encoder
+    -> four-scale FPN fusion (256 channels)
+    -> anatomical four-region mask pooling
+    -> shared 2-layer bidirectional LSTM over 15 planes
+    -> contextual evidence logit for every plane and region
+    -> evidence-tied attention pooling over planes
+    -> normalized smooth-max pooling over regions
+    -> one vertebra fracture logit
 ```
-[Component diagram or description here]
-```
+
+Stage3 has no direct whole-image classification head. Training uses vertebra-level
+fracture labels for the final bag BCE and applies an auxiliary instance-level
+negative penalty only to fracture-negative vertebrae. Region outputs are contextual
+fracture-candidate evidence, not independently supervised or calibrated regional
+fracture probabilities.
 
 ## Implementation Plan
 
@@ -210,9 +224,21 @@
 | Use the raw-DICOM tool as the sole future manual fracture-region annotation path: draw each `train_bounding_boxes.csv` rectangle directly in the native DICOM pixel frame without resize or reprojection, attach `C1-C7` only from persisted `assigned_bbox_slice_numbers`, split runs by true DICOM series adjacency, and save judgments to `fracture_region_labels_dicom.csv`; retain the bbox-centered corrected 15-plane tool only for visualization/QC and never use it to create or update annotation labels | Keeps the manual label source of truth on the original acquisition frame with the exact source bbox and assigned vertebra mask, prevents derived/reprojected views from becoming annotation inputs, and avoids maintaining two competing label-generation paths | Continue both tools as annotation paths; create labels with the bbox-centered tool; modify the existing tool in place; infer levels from slice ranges; share the previous label CSV | 2026-07-20 |
 | In the raw-DICOM bbox annotation tool, overlay only the canonically assigned vertebra's cleaned 3D mask in cyan by nearest-neighbor sampling at every native DICOM pixel center, then draw the unmodified CSV bbox in red above it; keep both rendered PNGs and bounded mask volumes memory-only | Directly exposes whether the persisted vertebra assignment agrees with the source bbox while preserving categorical mask labels and the native DICOM frame. Drawing bbox last prevents the mask tint from hiding the source annotation, and memory-only generation avoids a redundant image dataset | Show bbox without mask context; overlay all C1-C7 masks simultaneously; persist rendered PNGs; interpolate categorical masks linearly | 2026-07-20 |
 
+| Implement Stage4 as a separate `train_models/stage4/` package and run confirmatory Weak-only/Mixed training for exactly 75 epochs without outer-fold early stopping | Keeps Stage4 mixed-supervision data, loss, sampler, and evaluation behavior isolated from the established Stage3 pipeline while fixing identical update budgets across confirmatory arms | Extend Stage3 behind config flags; retain validation-selected stopping; choose epochs after opening confirmatory region OOF results | 2026-07-29 |
+| Invalidate the initial Stage4 Weak-only run and do not resume confirmatory training until stratum-level bag-risk correction and effective 1:1 strong/negative region-loss weighting are implemented and verified over a complete epoch | The fixed `2 strong / 2 weak / 4 negative` sampler overrepresented strong positives in `L_vertebra`, while repeated strong bags versus once-presented sampled negatives produced approximately `12.5:1` rather than `1:1` region-supervision exposure. Fold 0 consequently showed train-loss collapse and severe probability saturation unlike Stage3 | Accept the fold 0 result because AUROC/AP remained nontrivial; continue all 50 folds with the same biased sampler; correct only positive-vs-negative class prior | 2026-07-30 |
+| Recover Stage4 with four-stratum population-risk aggregation (`strong`, `weak`, `sampled negative`, `other negative`), exact per-batch strong/sampled-negative region supervision of `1:1`, exposure manifests, and data-protocol version `2`; monitor validation every epoch but keep the epoch-75 final checkpoint fixed | Fixed-ratio sampling remains useful for batch stability, but its raw mean is not the Stage3 population objective and repeated matched negatives otherwise dominate both bag and instance losses. Separating sampling from objective weights restores the unique-fold population risk, while exact per-batch region balance makes the configured region `pos_weight` match actual optimization exposure. Protocol and output versioning prevents accidental resume from invalid checkpoints | Natural-frequency batches with unstable strong-label coverage; positive-vs-negative-only correction; epoch-only balance that can drift by DDP rank; resume the invalid version-1 checkpoints | 2026-07-30 |
+
 ## TODO
 
 <!-- Features to implement -->
+
+### Stage4 Recovery
+
+- [x] Replace positive-vs-negative-only bag correction with four-stratum population-risk aggregation
+- [x] Make per-batch and epoch-level strong/sampled-negative region-loss weight exactly 1:1
+- [x] Add epoch-exposure manifests and DDP-global-weight invariant tests
+- [ ] Re-run only corrected Weak-only fold 0 and compare its loss trajectory with Stage3
+- [ ] Resume full Stage4 experiments only after explicit user review
 
 ### Stage2 Consistency Audit
 
@@ -299,6 +325,10 @@
 
 | Date | Changes |
 |------|---------|
+| 2026-07-30 | Implemented Stage4 protocol v2 recovery: four-stratum population-risk losses, exact 1:1 region-supervision exposure, exposure manifests, every-epoch validation monitoring, incompatible output/checkpoint versioning, and sampler/loss/DDP invariant tests |
+| 2026-07-30 | Invalidated and stopped the initial Stage4 Weak-only run after identifying strong/weak bag-risk bias and approximately 12.5:1 effective strong/negative region-supervision exposure; added recovery requirements |
+| 2026-07-29 | Fixed Stage4 implementation location at `train_models/stage4/` and fixed the confirmatory training budget at 75 epochs |
+| 2026-07-29 | Documented the current Stage3 hierarchy in Architecture: six-channel 15-plane input, EfficientNetV2-S/FPN feature extraction, four-region mask pooling, shared BiLSTM contextual evidence, plane and region aggregation, and vertebra-label-only supervision |
 | 2026-07-20 | Added a five-step auto-segmentation process diagram before the four-region qualitative image in the poster and Markdown draft |
 | 2026-07-20 | Split the poster's proposed method into numbered anatomical four-region auto-segmentation and deep-learning region-wise fracture-detection subsections |
 | 2026-07-20 | Replaced the poster's generic model flow with an explicit hierarchical weak-label architecture showing CT/mask inputs, four region evidence paths, two-stage aggregation, and vertebra-label-only supervision |

@@ -1,0 +1,5 @@
+_base: "base.yaml"
+experiment:
+  name: "stage4_mixed_v2"
+training:
+  lambda_region_scale: 1.0
