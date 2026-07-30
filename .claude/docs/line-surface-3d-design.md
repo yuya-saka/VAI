@@ -512,6 +512,16 @@ N=15〜21 で数千の学習単位が取れる。284椎体からの重複窓な�
 
 ![面の定義](line-surface-explain.png)
 
+生成: `uv run python Unet/debug/plot_line_ribbon_explain.py data/dataset/sample3/C5 line_1 出力.png`
+
+図の例（sample3/C5 line_1、20枚 = 8mm）の実数値：
+**角度の全変動 9.4°、重心の移動 x 2.0px / y 3.8px、線分長 約40px。**
+
+> **図を描くときの注意**：3D表示は必ず等方スケール（1px = 1px = 1slice）にすること。
+> matplotlib の自動スケールに任せると、x の変動幅（この例で5px）が y（43px）に対して
+> 小さいため横方向に約8倍引き伸ばされ、**ほぼ平行な線が大きくばらついて見える**。
+> 上のスクリプトは `set_box_aspect` で等方に固定してある。
+
 ### ρ は使わない（2026-07-30 決定）
 
 面を (φ, ρ) で表すのをやめ、**(角度, ヒートマップ重心)** で表す。
@@ -603,12 +613,19 @@ leave-one-slice-out：
 
 ## 22. モデルと損失（既存を壊さない最小変更）
 
+### 実装境界（2026-07-30 追記）
+
+実装は `Unet/line_surface_3d/` の独立プロジェクトとして行い、既存コードの
+参照元は `Unet/line_only/` のみに限定する。`multitask` の ResUNet は使わず、
+`line_only/src/model.py` の `TinyUNet` を基準にする。新規プロジェクトから
+`line_only` を実行時 import せず、必要最小限の構造を独立パッケージへ移植する。
+
 ### 最小構成
 
-`ResUNet` は `in_channels` / `line_channels` が config 引数なので、
+`TinyUNet` は `in_ch` / `out_ch` を引数に取るので、
 
-- 入力：`in_channels = 2N`（CT + マスク を N スライス分チャンネル方向に積む）
-- 出力：`line_channels = 4N`（4本 × N スライス分のヒートマップ）
+- 入力：`in_ch = 2N`（CT + マスク を N スライス分チャンネル方向に積む）
+- 出力：`out_ch = 4N`（4本 × N スライス分のヒートマップ）
 
 とするだけで 2D のままスラブを扱える。3D conv 化は次段階でよい。
 
@@ -687,6 +704,6 @@ leave-one-slice-out：
 
 1. スラブを返す Dataset を書く（密画像は `dataset_zprop/images/`、教師は `dataset/lines.json`）
 2. aug をスラブ内で共有させる
-3. `in_channels=2N` / `line_channels=4N` で既存 ResUNet を回す（面フィットなし）＝ベースライン
+3. `in_ch=2N` / `out_ch=4N` で `line_only` 基準の TinyUNet を回す（面フィットなし）＝ベースライン
 4. 微分可能な1次面フィットと面損失・面外れ罰を足す
 5. スライディング推論 → 帯外の領域欠損率で比較

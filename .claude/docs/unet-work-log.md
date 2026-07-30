@@ -1,7 +1,15 @@
 # Unet/ 作業サマリー
 
 <!-- ルール: 現在地・次アクションのみ。完了詳細は work-logs/YYYY-MM/YYYY-MM-DD.md へ。上限60行 -->
-<!-- 最終更新: 2026-07-19 -->
+<!-- 最終更新: 2026-07-30 -->
+
+## line_surface_3d 実装状況
+
+- `Unet/line_surface_3d/` を独立実装。参照元は `line_only/` のみ
+- N=15、TinyUNet `30ch -> 60ch`、heatmap-only / ribbon損失をconfig切替
+- 全高sliding推論、重複不一致、4領域欠損率、z平滑性、断面可視化を実装
+- 実データ窓4,370件、新規16テスト + line_only回帰27テスト pass
+- 次: fold 0で baseline と ribbon を同条件比較
 
 ## line_only 最新結果（line_20260616, sig4.0_ALL）
 

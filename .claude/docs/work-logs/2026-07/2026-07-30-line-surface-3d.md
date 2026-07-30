@@ -329,9 +329,64 @@ leave-one-slice-out：
 | `Unet/debug/analyze_line_centroid_surface.py` | **8.3 重心座標でのモデル次数LOO（仕様決定の根拠）** |
 | `Unet/debug/analyze_line_pred_zjitter.py` | 4節 z平滑化が効かないことの実測 |
 | `Unet/debug/reformat_line_surface_view.py` | 11節 冠状断・矢状断リフォーマット可視化 |
+| `Unet/debug/plot_line_ribbon_explain.py` | `line-surface-explain.png` の生成 |
+
+図の作り直し（セッション終盤）：初版の3D図は matplotlib の自動スケールで
+x 方向が約8倍に引き伸ばされ、線がばらついて見える誤解を招くものだった。
+実際は sample3/C5 line_1 で**角度の全変動 9.4°**（重心移動 x 2.0px / y 3.8px）と揃っている。
+`set_box_aspect` で等方スケール（1px = 1px = 1slice）に固定して修正済み。
+**今後この種の3D図を描くときは必ず等方スケールにすること。**
 
 6節（領域欠損率）と7節（横突孔検出）の集計はワンライナーで実行したため未永続化。
 数値は本ログに転記済み。
 
 なお `reformat_line_surface_view.py` は 12節の着手項目より前に単体で使えるので、
 現行 zprop の破綻範囲を全椎体で把握するのに先に回してよい。
+
+---
+
+## 14. 実装完了（追記）
+
+`Unet/line_surface_3d/` を新規独立プロジェクトとして実装した。
+既存コードの参照元はユーザー指定どおり `Unet/line_only/` のみに限定し、
+`multitask` のコードは使用していない。
+
+実装範囲：
+
+1. 密画像と疎な手動教師からN=15の連続スラブを作るDataset
+2. スラブ全体で共有するReplayCompose augmentation
+3. TinyUNetの `30 input -> 60 output` heatmap baseline
+4. doubled-angle + 重心の微分可能1次リボンfit
+5. masked heatmap / angle / centroid / ribbon residual損失
+6. sample単位5-fold、checkpoint、manifest hash、ローカルログ
+7. 全高sliding-window推論と重複不一致集計
+8. 4領域欠損率、距離別欠損率、z平滑性、冠状・矢状断可視化
+
+実データで得られた学習窓は合計4,370件
+（train 2,551 / validation 944 / test 875）。
+新規テスト16件、`line_only` 回帰テスト27件、ruff、mypy、compileallは全てpass。
+実験の実行手順は `Unet/line_surface_3d/README.md` に記載した。
+
+---
+
+## 15. 学習監視と評価指標の修正（追記）
+
+初回baselineでは `selection_metric=fitted_angle_error_deg` をcheckpoint選択と
+early stoppingの両方へ流用していた。このためfold 0は、validation MSEが
+epoch 17まで改善し続けていたにもかかわらず、epoch 2のfitted angleを
+15 epoch更新できず停止した。
+
+line_onlyとの差分を確認し、次のように修正した。
+
+1. checkpoint選択はline_only共通の `angle_error_deg`
+2. schedulerとearly stoppingはline_only共通の `val_loss_mse`
+3. GTは手動ポリラインからPCAで抽出した `(phi, rho)`
+4. 予測は適応閾値 + peak connected-component filter後のmomentから抽出
+5. `peak_dist_mean`、`blob_iou`、`rho_error_px`、外れ値率、
+   `per_vertebra` をline_onlyと同じ名前で追加
+6. raw/fittedの角度・重心、surface loss、検出率は `surface_*` として追加
+
+DataLoaderは `num_workers=8` で約37秒/epochとなり、`0` の281.7秒/epochから
+約7.6倍高速化した。batchが大きいため `prefetch_factor=1` に制限し、
+workerを毎epoch再生成しない `persistent_workers=true` も追加した。
+評価契約テストを追加し、新規テストは17件になった。

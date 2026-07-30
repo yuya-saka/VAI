@@ -87,6 +87,8 @@ scripts/
 *.log
 *.pth
 *.yaml
+!Unet/line_surface_3d/config/
+!Unet/line_surface_3d/config/*.yaml
 *.png
 *.nrrd
 *.pt
