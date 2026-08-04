@@ -14,7 +14,7 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from ..utils.detection import extract_gt_line_params
+from ..utils.plane import SurfacePlane, build_surface_plane, extract_gt_line_params
 
 LINE_KEYS = ("line_1", "line_2", "line_3", "line_4")
 VERTEBRAE = ("C1", "C2", "C3", "C4", "C5", "C6", "C7")
@@ -22,7 +22,11 @@ VERTEBRAE = ("C1", "C2", "C3", "C4", "C5", "C6", "C7")
 
 @dataclass(frozen=True)
 class SlabRecord:
-    """1つの連続スラブを表すindex情報。"""
+    """1つの連続スラブを表すindex情報。
+
+    `plane_slopes` と `plane_reliable` は椎体全体の手動線から事前計算した
+    GT平面の傾き。面内回転に不変なので、増補後もそのまま使える。
+    """
 
     sample: str
     vertebra: str
@@ -30,6 +34,7 @@ class SlabRecord:
     image_paths: tuple[Path, ...]
     mask_paths: tuple[Path, ...]
     labels: dict[int, dict[str, list[list[float]]]]
+    planes: tuple[SurfacePlane, ...] = ()
 
 
 def preprocess_polyline(
@@ -152,6 +157,60 @@ def _valid_lines(lines: Any) -> bool:
     )
 
 
+def _load_qc_excluded(path: Path) -> set[int]:
+    """qc_scores.jsonからexclude指定のスライスindexを返す。
+
+    形式はスライスindexをキーとするdict。過去にlistとして走査していたため
+    exclude指定が無視されていた。
+    """
+    entries = _read_json(path)
+    if isinstance(entries, dict):
+        return {
+            int(slice_key)
+            for slice_key, value in entries.items()
+            if isinstance(value, dict) and value.get("label") == "exclude"
+        }
+    if isinstance(entries, list):
+        return {
+            int(entry["slice_idx"])
+            for entry in entries
+            if isinstance(entry, dict)
+            and entry.get("label") == "exclude"
+            and "slice_idx" in entry
+        }
+    return set()
+
+
+def compute_surface_planes(
+    labels: dict[int, dict[str, list[list[float]]]],
+    image_size: int,
+) -> dict[str, SurfacePlane]:
+    """1椎体の手動線全体から、4面それぞれのGT平面を構築する。
+
+    窓ごとではなく利用可能な中央帯全体でfitする。窓内の数枚だけでは
+    傾きの符号が安定しないため。
+    """
+    diagonal = float(np.sqrt(2.0) * image_size)
+    planes: dict[str, SurfacePlane] = {}
+    for line_key in LINE_KEYS:
+        positions: list[float] = []
+        angles: list[float] = []
+        offsets: list[float] = []
+        for slice_index in sorted(labels):
+            phi, rho = extract_gt_line_params(labels[slice_index][line_key], image_size)
+            if np.isnan(phi) or np.isnan(rho):
+                continue
+            positions.append(float(slice_index))
+            angles.append(float(phi))
+            offsets.append(float(rho) * diagonal)
+        planes[line_key] = build_surface_plane(
+            np.asarray(positions, dtype=np.float64),
+            np.asarray(angles, dtype=np.float64),
+            np.asarray(offsets, dtype=np.float64),
+        )
+    return planes
+
+
 def load_manual_labels(
     annotation_root: Path,
     sample: str,
@@ -161,12 +220,7 @@ def load_manual_labels(
     """手動lines.jsonだけを読み、有効な教師を返す。"""
     vertebra_dir = annotation_root / sample / vertebra
     raw_labels = _read_json(vertebra_dir / "lines.json")
-    qc_entries = _read_json(vertebra_dir / "qc_scores.json")
-    qc_excluded = {
-        int(entry["slice_idx"])
-        for entry in qc_entries
-        if isinstance(entry, dict) and entry.get("label") == "exclude"
-    }
+    qc_excluded = _load_qc_excluded(vertebra_dir / "qc_scores.json")
     labels: dict[int, dict[str, list[list[float]]]] = {}
     if not isinstance(raw_labels, dict):
         return labels
@@ -240,6 +294,7 @@ def build_slab_records(
     stride: int,
     min_labeled_slices: int,
     require_labels: bool,
+    image_size: int = 224,
 ) -> list[SlabRecord]:
     """指定sample群から学習または推論スラブを構築する。"""
     bad_slices = _load_bad_slices(annotation_root)
@@ -255,6 +310,8 @@ def build_slab_records(
                 vertebra,
                 bad_slices,
             )
+            surface_planes = compute_surface_planes(labels, image_size)
+            planes = tuple(surface_planes[key] for key in LINE_KEYS)
             indices = sorted(dense_paths)
             starts = _window_starts(
                 indices,
@@ -277,6 +334,7 @@ def build_slab_records(
                         image_paths=tuple(dense_paths[index][0] for index in window),
                         mask_paths=tuple(dense_paths[index][1] for index in window),
                         labels=window_labels,
+                        planes=planes,
                     )
                 )
     return records
@@ -369,14 +427,20 @@ class SlabLineDataset(Dataset[dict[str, Any]]):
         list[np.ndarray],
         list[np.ndarray],
         list[dict[str, list[list[float]]]],
+        bool,
     ]:
-        """1枚目のreplayをスラブ全体へ共有する。"""
+        """1枚目のreplayをスラブ全体へ共有する。
+
+        水平反転が起きたかも返す。反転時は線channelが入れ替わるため、
+        呼び出し側で平面パラメータも同じ順へ並べ替える必要がある。
+        """
         if self.transform is None:
-            return ct_images, mask_images, polylines_by_slice
+            return ct_images, mask_images, polylines_by_slice, False
         transformed_ct: list[np.ndarray] = []
         transformed_masks: list[np.ndarray] = []
         transformed_lines: list[dict[str, list[list[float]]]] = []
         replay: dict[str, Any] | None = None
+        flipped = False
         for index, (ct_image, mask_image, polylines) in enumerate(
             zip(ct_images, mask_images, polylines_by_slice, strict=True)
         ):
@@ -403,10 +467,18 @@ class SlabLineDataset(Dataset[dict[str, Any]]):
             }
             if replay is not None and self._did_flip(replay):
                 output_lines = self._swap_lines(output_lines)
+                flipped = True
             transformed_ct.append(np.asarray(output["image"], dtype=np.float32))
             transformed_masks.append(np.asarray(output["mask"], dtype=np.float32))
             transformed_lines.append(output_lines)
-        return transformed_ct, transformed_masks, transformed_lines
+        return transformed_ct, transformed_masks, transformed_lines, flipped
+
+    def _swap_plane_values(self, values: tuple[Any, ...]) -> tuple[Any, ...]:
+        """水平反転後に平面パラメータを線channelと同じ順へ並べ替える。"""
+        swap = self.augmentation_config.get("hflip_channel_swap")
+        if swap is None:
+            return values
+        return tuple(values[int(index) - 1] for index in swap)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         """1スラブをtensor辞書として返す。"""
@@ -420,11 +492,14 @@ class SlabLineDataset(Dataset[dict[str, Any]]):
             )
             for slice_index in record.slice_indices
         ]
-        ct_images, mask_images, polylines = self._apply_transform(
+        ct_images, mask_images, polylines, flipped = self._apply_transform(
             ct_images,
             mask_images,
             polylines,
         )
+        planes: tuple[SurfacePlane, ...] = record.planes
+        if flipped:
+            planes = tuple(self._swap_plane_values(planes))
         input_channels: list[np.ndarray] = []
         heatmaps: list[np.ndarray] = []
         label_mask = np.zeros((len(record.slice_indices), 4), dtype=np.bool_)
@@ -459,6 +534,22 @@ class SlabLineDataset(Dataset[dict[str, Any]]):
             "label_mask": torch.from_numpy(label_mask),
             "line_params_gt": torch.from_numpy(line_params_gt),
             "slice_indices": torch.as_tensor(record.slice_indices, dtype=torch.long),
+            "plane_slope_gt": torch.as_tensor(
+                [plane.slope_px_per_slice for plane in planes], dtype=torch.float32
+            ),
+            "plane_reliable": torch.as_tensor(
+                [plane.reliable for plane in planes], dtype=torch.bool
+            ),
+            # 以下は増補前座標系の値。増補なしの検証・テストでのみ使う
+            "plane_angle_gt": torch.as_tensor(
+                [plane.angle_rad for plane in planes], dtype=torch.float32
+            ),
+            "plane_rho0_gt": torch.as_tensor(
+                [plane.rho_at_reference_px for plane in planes], dtype=torch.float32
+            ),
+            "plane_reference_z": torch.as_tensor(
+                [plane.reference_slice for plane in planes], dtype=torch.float32
+            ),
             "sample": record.sample,
             "vertebra": record.vertebra,
         }

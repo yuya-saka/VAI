@@ -1,170 +1,117 @@
-"""重複窓集約とendpoints再構成のテスト。"""
+"""平面推論の出力テスト。"""
 
 from __future__ import annotations
 
 import json
 import math
 from pathlib import Path
+from typing import Any
 
 import numpy as np
+import pytest
 import torch
 import torch.nn as nn
-from line_surface_3d.src.inference import (
-    OnlineRibbonAggregate,
-    predict_loader,
-)
-from line_surface_3d.utils.detection import line_from_ribbon
-from line_surface_3d.utils.region_eval import evaluate_prediction_tree
-from PIL import Image
+from line_surface_3d.src.inference import line_endpoints_in_image, predict_loader
+
+SLAB_SIZE = 15
+IMAGE_SIZE = 64
+SIGMA = 4.0
 
 
-def test_identical_windows_have_zero_disagreement() -> None:
-    """一致する重複窓の分散は0になる。"""
-    aggregate = OnlineRibbonAggregate()
-    for _ in range(3):
-        aggregate.add(2.0, -1.0, 1.0, 0.0, 40.0, 0.8)
-    result = aggregate.finalize()
-    assert result["centroid_x"] == 2.0
-    assert result["centroid_y"] == -1.0
-    assert result["centroid_disagreement_px"] == 0.0
-    assert result["angle_disagreement_deg"] == 0.0
-    assert result["overlap_count"] == 3.0
+class FixedHeatmapModel(nn.Module):
+    """固定ヒートマップをlogitとして返すテストモデル。"""
 
-
-def test_disagreement_increases_for_conflicting_windows() -> None:
-    """位置・角度の不一致が指標へ反映される。"""
-    aggregate = OnlineRibbonAggregate()
-    aggregate.add(0.0, 0.0, 1.0, 0.0, 40.0, 0.8)
-    aggregate.add(4.0, 0.0, 0.0, 1.0, 40.0, 0.8)
-    result = aggregate.finalize()
-    assert math.isclose(result["centroid_disagreement_px"], 2.0)
-    assert result["angle_disagreement_deg"] > 0.0
-
-
-def test_line_from_ribbon_reconstructs_horizontal_line() -> None:
-    """垂直法線から水平線を再構成する。"""
-    line = line_from_ribbon(
-        centroid_x=0.0,
-        centroid_y=0.0,
-        doubled_cosine=-1.0,
-        doubled_sine=0.0,
-        length=40.0,
-        image_size=64,
-    )
-    first, second = line["endpoints"]
-    assert math.isclose(first[1], 32.0, abs_tol=1e-5)
-    assert math.isclose(second[1], 32.0, abs_tol=1e-5)
-    assert math.isclose(abs(second[0] - first[0]), 40.0, abs_tol=1e-5)
-
-
-class _ZeroModel(nn.Module):
-    """一定logitを返す推論統合テスト用モデル。"""
+    def __init__(self, heatmaps: torch.Tensor) -> None:
+        super().__init__()
+        clipped = heatmaps.clamp(1e-6, 1.0 - 1e-6)
+        self.register_buffer("fixed_logits", torch.logit(clipped).flatten(1, 2))
 
     def forward(
         self,
-        inputs: torch.Tensor,
-        vertebra_indices: torch.Tensor | None = None,
+        images: torch.Tensor,
+        vertebra_indices: torch.Tensor,
     ) -> torch.Tensor:
-        del vertebra_indices
-        return torch.zeros(
-            inputs.shape[0],
-            12,
-            inputs.shape[-2],
-            inputs.shape[-1],
-            device=inputs.device,
-        )
+        """固定logitを返す。"""
+        del images, vertebra_indices
+        return self.fixed_logits
 
 
-def test_predict_loader_writes_full_slice_tree(tmp_path: Path) -> None:
-    """1窓から全z・4線のJSONを生成する。"""
-    batch = {
-        "image": torch.zeros(1, 6, 16, 16),
-        "heatmaps": torch.zeros(1, 3, 4, 16, 16),
-        "label_mask": torch.zeros(1, 3, 4, dtype=torch.bool),
-        "slice_indices": torch.tensor([[5, 6, 7]]),
-        "sample": ["sample1"],
-        "vertebra": ["C1"],
-    }
-    summary = predict_loader(
-        _ZeroModel(),
-        [batch],
-        torch.device("cpu"),
-        {
-            "data": {"slab_size": 3, "image_size": 16, "sigma": 1.5},
-            "evaluation": {"line_extend_ratio": 1.0},
-        },
-        tmp_path,
-    )
-    lines = json.loads(
-        (tmp_path / "sample1" / "C1" / "lines.json").read_text(encoding="utf-8")
-    )
-    assert summary["window_count"] == 1
-    assert sorted(lines) == ["5", "6", "7"]
-    assert all(len(slice_lines) == 4 for slice_lines in lines.values())
+def test_line_endpoints_span_the_image() -> None:
+    """水平線は画像の左右端まで伸びる。"""
+    endpoints = line_endpoints_in_image(np.array([0.0, 1.0]), 0.0, IMAGE_SIZE)
+    assert len(endpoints) == 2
+    for point in endpoints:
+        assert point[1] == pytest.approx(IMAGE_SIZE / 2.0, abs=1.0)
+    assert abs(endpoints[0][0] - endpoints[1][0]) > IMAGE_SIZE * 0.9
 
 
-def _region_lines() -> dict[str, list[list[float]]]:
-    """4領域を形成できる合流線を返す。"""
+def test_line_endpoints_follow_offset() -> None:
+    """rhoが正なら線は画像の上側へ移動する。"""
+    endpoints = line_endpoints_in_image(np.array([0.0, 1.0]), 10.0, IMAGE_SIZE)
+    for point in endpoints:
+        assert point[1] == pytest.approx(IMAGE_SIZE / 2.0 - 10.0, abs=1.0)
+
+
+def test_vertical_line_endpoints() -> None:
+    """垂直線でも端点が得られる。"""
+    endpoints = line_endpoints_in_image(np.array([1.0, 0.0]), 5.0, IMAGE_SIZE)
+    assert len(endpoints) == 2
+    for point in endpoints:
+        assert point[0] == pytest.approx(IMAGE_SIZE / 2.0 + 5.0, abs=1.0)
+
+
+def _batch(slope_image: float, window_start: int) -> dict[str, Any]:
+    """既知の平面から1窓分の推論バッチを作る。"""
+    rows = torch.arange(IMAGE_SIZE).float()[:, None]
+    heatmaps = torch.zeros(1, SLAB_SIZE, 4, IMAGE_SIZE, IMAGE_SIZE)
+    slice_indices = torch.arange(window_start, window_start + SLAB_SIZE)
+    center_reference = float(window_start + (SLAB_SIZE - 1) / 2.0)
+    for index in range(SLAB_SIZE):
+        center_y = 32.0 + slope_image * (float(slice_indices[index]) - center_reference)
+        ridge = torch.exp(-((rows - center_y) ** 2) / (2.0 * SIGMA**2))
+        heatmaps[0, index, 0] = ridge.expand(IMAGE_SIZE, IMAGE_SIZE)
     return {
-        "line_1": [[11.0, 8.0], [14.0, 3.0]],
-        "line_2": [[11.0, 8.0], [15.0, 10.0]],
-        "line_3": [[5.0, 8.0], [2.0, 3.0]],
-        "line_4": [[5.0, 8.0], [1.0, 10.0]],
+        "image": torch.zeros(1, 2 * SLAB_SIZE, IMAGE_SIZE, IMAGE_SIZE),
+        "heatmaps": heatmaps,
+        "slice_indices": slice_indices[None, :],
+        "sample": ["sample1"],
+        "vertebra": ["C4"],
     }
 
 
-def test_region_evaluation_counts_formed_regions(tmp_path: Path) -> None:
-    """予測treeから領域欠損率とreformatを生成する。"""
-    prediction_root = tmp_path / "predictions"
-    dense_root = tmp_path / "dense"
-    annotation_root = tmp_path / "annotation"
-    prediction_dir = prediction_root / "sample1" / "C1"
-    dense_dir = dense_root / "sample1" / "C1"
-    annotation_dir = annotation_root / "sample1" / "C1"
-    prediction_dir.mkdir(parents=True)
-    (dense_dir / "images").mkdir(parents=True)
-    (dense_dir / "masks").mkdir()
-    annotation_dir.mkdir(parents=True)
-    lines = {str(index): _region_lines() for index in range(3)}
-    surface = {
-        str(index): {
-            f"line_{line_index}": {
-                "centroid_math": [0.0, 0.0],
-                "normal_angle_deg": 0.0,
-            }
-            for line_index in range(1, 5)
-        }
-        for index in range(3)
-    }
-    (prediction_dir / "lines.json").write_text(
-        json.dumps(lines),
-        encoding="utf-8",
-    )
-    (prediction_dir / "surface.json").write_text(
-        json.dumps(surface),
-        encoding="utf-8",
-    )
-    (annotation_dir / "lines.json").write_text(
-        json.dumps({"1": _region_lines()}),
-        encoding="utf-8",
-    )
-    image = np.zeros((16, 16), dtype=np.uint8)
-    mask = np.zeros((16, 16), dtype=np.uint8)
-    mask[1:15, 1:15] = 255
-    for slice_index in range(3):
-        Image.fromarray(image).save(
-            dense_dir / "images" / f"slice_{slice_index:03d}.png"
-        )
-        Image.fromarray(mask).save(dense_dir / "masks" / f"slice_{slice_index:03d}.png")
-    summary = evaluate_prediction_tree(
-        prediction_root,
-        dense_root,
-        annotation_root,
-        tmp_path / "evaluation",
-        image_size=16,
-        spacing_mm=0.4,
-        bin_width_mm=3.2,
-    )
-    assert summary["scopes"]["all"]["slice_count"] == 3
-    assert summary["scopes"]["all"]["any_missing_count"] == 0
-    assert (tmp_path / "evaluation" / "reformats" / "sample1_C1.png").exists()
+def test_predict_loader_writes_one_plane_per_surface(tmp_path: Path) -> None:
+    """重なり窓から椎体ごとに平面1枚を出力する。"""
+    batches = [_batch(0.5, window_start=start) for start in (20, 21, 22)]
+    model = FixedHeatmapModel(batches[0]["heatmaps"])
+    config = {"data": {"slab_size": SLAB_SIZE, "image_size": IMAGE_SIZE}}
+
+    summary = predict_loader(model, batches, torch.device("cpu"), config, tmp_path)
+    assert summary["vertebra_count"] == 1
+
+    planes = json.loads((tmp_path / "sample1" / "C4" / "planes.json").read_text())
+    assert set(planes) == {"line_1"}
+    # 数学座標では画像行の増加方向と符号が逆
+    assert planes["line_1"]["slope_px_per_slice"] == pytest.approx(-0.5, abs=0.05)
+    assert planes["line_1"]["window_count"] == 3
+
+    lines = json.loads((tmp_path / "sample1" / "C4" / "lines.json").read_text())
+    # 全窓が覆うglobal zすべてに交線が出る
+    assert len(lines) == 22 + SLAB_SIZE - 20
+    for per_slice in lines.values():
+        assert len(per_slice["line_1"]) == 2
+
+
+def test_predicted_lines_follow_the_tilt(tmp_path: Path) -> None:
+    """出力した交線がz方向に平面の傾きどおり移動する。"""
+    batches = [_batch(0.5, window_start=20)]
+    model = FixedHeatmapModel(batches[0]["heatmaps"])
+    config = {"data": {"slab_size": SLAB_SIZE, "image_size": IMAGE_SIZE}}
+    predict_loader(model, batches, torch.device("cpu"), config, tmp_path)
+
+    lines = json.loads((tmp_path / "sample1" / "C4" / "lines.json").read_text())
+    keys = sorted(lines, key=int)
+    first_y = lines[keys[0]]["line_1"][0][1]
+    last_y = lines[keys[-1]]["line_1"][0][1]
+    span = int(keys[-1]) - int(keys[0])
+    assert (last_y - first_y) / span == pytest.approx(0.5, abs=0.05)
+    assert not math.isnan(first_y)

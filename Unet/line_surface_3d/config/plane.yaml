@@ -1,0 +1,94 @@
+experiment:
+  name: test-v2
+  output_dir: Unet/outputs/line_surface_3d
+
+data:
+  annotation_root: /mnt/nfs1/home/yamamoto-hiroto/research/VAI/data/dataset
+  dense_root: /mnt/nfs1/home/yamamoto-hiroto/research/VAI/data/dataset_zprop
+  group: ALL
+  image_size: 224
+  sigma: 4.0
+  slab_size: 15
+  min_labeled_slices: 3
+  train_stride: 1
+  inference_stride: 1
+  n_folds: 5
+  test_fold: 0
+  random_seed: 42
+
+# モデルはbaseline-v1から変更しない。平面制約は損失側だけで課す
+model:
+  features: [16, 32, 64, 128]
+  dropout: 0.08
+  use_vertebra_conditioning: true
+  num_vertebra: 7
+
+training:
+  gpu_id: 0
+  batch_size: 16
+  learning_rate: 0.0005
+  weight_decay: 0.0002
+  epochs: 150
+  early_stopping_patience: 15
+  lr_patience: 8
+  lr_factor: 0.5
+  grad_clip: 1.0
+  num_workers: 8
+  prefetch_factor: 1
+  persistent_workers: true
+  log_interval_steps: 10
+  amp: true
+  # 「いつ止めるか」と「どのepochを採用するか」は別の指標にする。
+  # 早期終了は一次信号のheatmap損失（実測: rhoで早期終了すると、停止直前
+  # 10epochでheatmap MSEがまだ-19.7%改善中でも止まってしまっていた）。
+  # checkpoint選択は、重要なのは「各画像の線の角度・重心位置」と「面の傾き」
+  # という指示に基づき、その3値をpx換算して合算した plane_combined_error_px
+  # で行う（heatmap損失そのものは選択基準にしない。heatmapは手段であって
+  # 目的の量ではないため）。
+  selection_metric: plane_combined_error_px
+  early_stopping_metric: val_loss_mse
+
+augmentation:
+  horizontal_flip: false
+  horizontal_flip_prob: 0.1
+  hflip_channel_swap: [3, 4, 1, 2]
+  rotation: true
+  rotation_limit: 25
+  scale: true
+  scale_limit: 0.05
+  brightness_contrast: true
+  brightness_limit: 0.1
+  contrast_limit: 0.1
+  gaussian_noise: false
+  noise_var_limit: [10, 50]
+
+loss:
+  plane:
+    enabled: true
+    # 平面のパラメータは3つだけ。損失項もこの3つに対応する。
+    # 3項ともpx単位へ換算済みだが、heatmapまで遡る勾配の大きさは項ごとに違う。
+    # 重みは実測（training_audit.py --check loss-balance）で決めた:
+    # warmup終了相当の状態で幾何3項の勾配合計が heatmap の約50%になる値。
+    # 損失の定義を変えたら必ず測り直すこと。
+    angle_weight: 0.0001
+    rho_weight: 0.0020
+    tilt_weight: 0.0300
+    # 傾きが不確かでk=0を教師にした面の重み。完全なゼロ回帰は課さない
+    fallback_weight: 0.25
+    warmup_start_epoch: 5
+    warmup_epochs: 15
+
+evaluation:
+  heatmap_threshold:
+    mode: adaptive
+    min: 0.10
+    peak_ratio: 0.4
+  blob_iou_threshold: 0.10
+  line_extend_ratio: 1.0
+  distance_bin_mm: 3.2
+  voxel_spacing_mm: 0.4
+
+wandb:
+  enabled: false
+  project: null
+  run_name: null

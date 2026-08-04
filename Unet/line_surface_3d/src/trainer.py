@@ -11,7 +11,8 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from ..utils.losses import compute_surface_loss, warmup_weight
+from ..utils.losses import compute_plane_loss, warmup_weight
+from ..utils.plane import centered_positions
 from .data_utils import create_training_loaders
 from .evaluation import evaluate, vertebra_indices
 from .experiment import (
@@ -74,12 +75,13 @@ def _train_epoch(
     """1 epochを学習し、損失平均を返す。"""
     model.train()
     training_config = config.get("training", {})
-    ribbon_config = config.get("loss", {}).get("ribbon", {})
+    plane_config = config.get("loss", {}).get("plane", {})
     slab_size = int(config["data"]["slab_size"])
+    image_size = int(config["data"]["image_size"])
     geometry_weight = warmup_weight(
         epoch,
-        int(ribbon_config.get("warmup_start_epoch", 0)),
-        int(ribbon_config.get("warmup_epochs", 0)),
+        int(plane_config.get("warmup_start_epoch", 0)),
+        int(plane_config.get("warmup_epochs", 0)),
     )
     grad_clip = float(training_config.get("grad_clip", 1.0))
     log_interval_steps = max(1, int(training_config.get("log_interval_steps", 10)))
@@ -95,14 +97,18 @@ def _train_epoch(
         "total": 0.0,
         "heatmap": 0.0,
         "angle": 0.0,
-        "centroid": 0.0,
-        "ribbon": 0.0,
+        "rho": 0.0,
+        "tilt": 0.0,
     }
+    positions = centered_positions(slab_size, device, torch.float32)
     step_count = 0
     for batch in loader:
         images = batch["image"].to(device).float()
         targets = batch["heatmaps"].to(device).float()
         label_mask = batch["label_mask"].to(device).bool()
+        line_params_gt = batch["line_params_gt"].to(device).float()
+        gt_slope = batch["plane_slope_gt"].to(device).float()
+        gt_reliable = batch["plane_reliable"].to(device).bool()
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast(
             device_type=device.type,
@@ -110,13 +116,19 @@ def _train_epoch(
         ):
             logits = model(images, vertebra_indices(batch, device))
             predictions = torch.sigmoid(reshape_slab_heatmaps(logits, slab_size))
-            loss_output = compute_surface_loss(
-                predictions,
-                targets,
-                label_mask,
-                ribbon_config,
-                geometry_weight,
-            )
+        # 幾何は数値安定性のためFP32で計算する
+        loss_output = compute_plane_loss(
+            predictions.float(),
+            targets,
+            label_mask,
+            line_params_gt,
+            gt_slope,
+            gt_reliable,
+            positions,
+            image_size,
+            plane_config,
+            geometry_weight,
+        )
         scaler.scale(loss_output.total).backward()
         scaler.unscale_(optimizer)
         nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
@@ -125,8 +137,8 @@ def _train_epoch(
         sums["total"] += float(loss_output.total.detach())
         sums["heatmap"] += float(loss_output.heatmap.detach())
         sums["angle"] += float(loss_output.angle.detach())
-        sums["centroid"] += float(loss_output.centroid.detach())
-        sums["ribbon"] += float(loss_output.ribbon.detach())
+        sums["rho"] += float(loss_output.rho.detach())
+        sums["tilt"] += float(loss_output.tilt.detach())
         step_count += 1
         if (
             step_count == 1
@@ -146,8 +158,8 @@ def _train_epoch(
         "train_loss": sums["total"] / denominator,
         "train_heatmap_loss": sums["heatmap"] / denominator,
         "train_angle_loss": sums["angle"] / denominator,
-        "train_centroid_loss": sums["centroid"] / denominator,
-        "train_ribbon_loss": sums["ribbon"] / denominator,
+        "train_rho_loss": sums["rho"] / denominator,
+        "train_tilt_loss": sums["tilt"] / denominator,
         "geometry_weight": geometry_weight,
     }
 
@@ -209,7 +221,9 @@ def train_one_fold(config: dict[str, Any]) -> dict[str, Any]:
     wandb = initialize_wandb(config, fold)
     epochs = int(training_config.get("epochs", 200))
     patience = int(training_config.get("early_stopping_patience", 15))
-    selection_metric = str(training_config.get("selection_metric", "angle_error_deg"))
+    selection_metric = str(
+        training_config.get("selection_metric", "plane_combined_error_px")
+    )
     early_stopping_metric = str(
         training_config.get("early_stopping_metric", "val_loss_mse")
     )
@@ -259,10 +273,11 @@ def train_one_fold(config: dict[str, Any]) -> dict[str, Any]:
             f"[fold={fold} epoch={epoch:03d}] "
             f"train={train_metrics['train_loss']:.6f} "
             f"val_mse={validation_metrics['val_loss_mse']:.6f} "
-            f"angle={validation_metrics['angle_error_deg']:.3f} "
-            f"rho={validation_metrics['rho_error_px']:.3f} "
-            f"surface_fit_angle="
-            f"{validation_metrics['surface_fitted_angle_error_deg']:.3f}",
+            f"line_angle={validation_metrics['line_angle_error_deg']:.3f} "
+            f"line_rho={validation_metrics['line_rho_error_px']:.3f} "
+            f"tilt={validation_metrics['tilt_error_px_per_slice']:.4f} "
+            f"sign={validation_metrics['tilt_sign_accuracy']:.3f} "
+            f"combined={validation_metrics['plane_combined_error_px']:.3f}",
             flush=True,
         )
         if (

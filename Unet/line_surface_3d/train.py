@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="3D line surface学習")
     parser.add_argument(
         "--config",
-        default="Unet/line_surface_3d/config/baseline.yaml",
+        default="Unet/line_surface_3d/config/plane.yaml",
     )
     parser.add_argument("--gpu_id", type=int, default=None)
     parser.add_argument("--start_fold", type=int, default=0)

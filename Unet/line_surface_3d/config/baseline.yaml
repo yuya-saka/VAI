@@ -1,5 +1,5 @@
 experiment:
-  name: baseline-v1
+  name: baseline-noplane
   output_dir: Unet/outputs/line_surface_3d
 
 data:
@@ -37,7 +37,10 @@ training:
   persistent_workers: true
   log_interval_steps: 10
   amp: true
-  selection_metric: angle_error_deg
+  # plane.yamlと同じ基準にする（対照群としての比較を公平にするため）。
+  # plane_combined_error_pxはplane.enabled=falseでも常に計算される
+  # （fit_planeは学習とは独立に評価時点のheatmapへ常に適用されるため）
+  selection_metric: plane_combined_error_px
   early_stopping_metric: val_loss_mse
 
 augmentation:
@@ -54,27 +57,22 @@ augmentation:
   gaussian_noise: false
   noise_var_limit: [10, 50]
 
+# 平面制約なしの対照群。plane.yaml との差は loss.plane.enabled だけにする
 loss:
-  ribbon:
+  plane:
     enabled: false
-    angle_weight: 0.004
-    centroid_weight: 0.01
-    residual_weight: 0.01
-    warmup_start_epoch: 0
-    warmup_epochs: 20
 
 evaluation:
   heatmap_threshold:
     mode: adaptive
     min: 0.10
     peak_ratio: 0.4
+  blob_iou_threshold: 0.10
   line_extend_ratio: 1.0
   distance_bin_mm: 3.2
   voxel_spacing_mm: 0.4
-  outlier_angle_threshold_deg: 10.0
-  outlier_rho_threshold_px: 8.0
 
 wandb:
-  enabled: true
+  enabled: false
   project: null
   run_name: null
