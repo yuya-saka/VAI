@@ -9,7 +9,189 @@
 
 ## Architecture
 
-### Stage3 Hierarchical Weak-Label Model
+### Active: New Fully Supervised Cervical Fracture Region Classifier
+
+The PI has discarded the previous four-stage 2.5D/MIL design, including all
+mask-average-pooling variants. They are historical artifacts only and must not be
+reused as the starting point for the new classifier.
+
+The new task is one 4-label prediction per C1--C7 vertebra (`body`,
+`right_transverse_foramen`, `left_transverse_foramen`, `posterior_elements`). Its
+**region** supervision comes only from the 268 fully region-annotated
+fracture-positive vertebrae. The vertebra-level fracture label is ground truth for
+every vertebra and the vertebra-level task is in scope from the start (see the
+two-endpoint table below).
+
+**2026-08-07 update:** the plan document `memo/計画書/提案手法.md` now defines the
+study. It supersedes the 2026-08-04 restriction that pseudo-labelling / weak
+supervision "must not enter the core method": Proposed A (teacher pseudo-labels)
+and Proposed B (weak supervision from vertebra labels only) are now first-class
+arms alongside the supervised baselines. Supervised region learning on the 268
+remains the foundation (it is Baseline 2 and the Proposed-A teacher).
+
+#### Fixed by the PI (2026-08-04)
+
+- **Input is 2.5D**, using the existing `fracture_dataset_blind` format. An earlier
+  recommendation of a from-scratch 3D crop layer was **withdrawn**: the bbox-forced
+  plane leak it was meant to fix is already fixed, and the existing data is 0.4 mm
+  in-plane over an 89.6 mm FOV, which resolves the transverse foramen at 10-11 px.
+- **Four-region mask generation stays as-is** (line detection cutting the vertebra
+  mask). Improvements to the line model proceed in parallel and are not a blocker.
+- **Region annotation is capped at 268** and cannot be increased.
+- **No mask-average or per-region hard pooling**, in any arm.
+
+#### Proposed method and arms (per `memo/計画書/提案手法.md`, 2026-08-07)
+
+Common architecture: 2.5D CNN + LSTM (RSNA-2022 1st-place type-1 style). The
+proposed model takes CT + 5 masks (whole vertebra + 4 regions) through a two-stem
+encoder (image stem / mask stem, fused before the shared CNN), with a shared
+CNN+LSTM trunk and two heads (whole-vertebra, 4 regions). Note the plan document's
+"6ch" is per-plane 5 CT channels + 5 mask channels = 10ch in the existing 2.5D
+format; the two-stem split absorbs this.
+
+1. **Baseline 1**: CT + whole-vertebra mask -> vertebra-level classification.
+2. **Baseline 2**: four independent per-region CNN+LSTM models. Training data:
+   268 annotated bags **plus vertebra-negative bags as entailed negatives**
+   (decided 2026-08-07; extends the plan document's "annotated cases only"
+   wording).
+3. **Proposed A** (semi-supervised): teacher trained on the 268 region labels
+   generates pseudo-labels for unannotated positives; student is the multitask
+   model trained on true vertebra labels + true region labels + pseudo-labels.
+   Teachers and pseudo-labels must be produced **within each outer fold**.
+4. **Proposed B** (weakly supervised): region head trained from vertebra labels
+   only via `y_whole = OR(y_regions)`; aggregation candidates max / smooth-max /
+   noisy-OR (smooth-max primary per Codex 2026-08-06; noisy-OR has an
+   explaining-away gradient failure). The 268 region labels are evaluation-only
+   in this arm.
+
+#### Two endpoints, deliberately split by statistical power
+
+| endpoint | population | role |
+|---|---|---|
+| vertebra-level fracture AUROC | 14,133 vertebrae / 1,444 positive | **confirmatory** arm ranking; paired MDE 0.007-0.012 |
+| per-region AP | 268 annotated vertebrae / 160 patients / R1 78, R2 59, R3 72, R4 158 | per-region reporting + shortcut-floor gates |
+
+Region-level **arm ranking is not confirmatory** at n=268 (paired MDE 0.027-0.059,
+depending on between-arm correlation) and is reported as exploratory with CIs.
+Per-region absolute accuracy *is*
+reportable. Each region is tested against its own level-only floor; required AP is
+R1 `0.59`, R2 `0.37`, R3 `0.45`, R4 `0.72`. Note R2 has the fewest positives but the
+**easiest** bar, because the level prior is nearly useless there, while R4 has the
+most positives and the hardest bar.
+
+**Floors pending recomputation (2026-08-07).** The floors above, the paired MDE
+range, and the level-only macro-AP 0.451 were all derived on region counts
+R1 77 / R3 71 / R4 155, produced by a keep-latest-run deduplication that has
+since been found wrong (see the region-label provenance note below). They must
+be recomputed on the corrected OR-aggregated labels before any gate is
+pre-registered. The shifts are small (three regions gain 1-3 positives) and are
+not expected to change conclusions, but the pre-registered numbers must match
+the labels actually used.
+
+#### Region-label provenance: runs are fracture sites, not repeat annotations
+
+`fracture_region_labels_dicom.csv` has one row per `run`, and a run is a group
+of contiguous fracture-bbox slices within one vertebra, built by
+`Unet/dicom_bbox_annotation_tool`. Two runs on one vertebra are therefore two
+disjoint fracture sites (observed gaps of 5-50 slices), each rendered and judged
+separately by the annotator. 17 of the 268 vertebrae have multiple runs; in 6 of
+them the runs carry different region labels, which is two sites reaching
+different regions rather than a contradiction. The annotator confirmed
+(2026-08-07) that each run's labels are correct as recorded.
+
+R2/R3 are the **transverse** foramina (横突孔), the canal the vertebral artery
+runs through. Both annotation tools' buttons said 椎間孔 (intervertebral
+foramen), a different structure; the annotator confirmed on 2026-08-07 that the
+labels themselves are transverse-foramen judgments and only the UI wording was
+wrong, so the wording was corrected in place and no label changes were needed.
+
+"Right"/"left" in R2/R3 are **image-side, not patient-side**: class 2 sits on
+the image's right (measured mean column 155 vs 66 for class 3), and under the
+radiological display convention image-right is the patient's left. Labels,
+masks and class indices agree with each other, so training and evaluation are
+unaffected, but any clinical statement about vertebral-artery laterality must
+flip the name. Both tools now state this convention in their legend.
+
+The per-vertebra region label is therefore the **OR across that vertebra's
+runs**. `fracture_detection/folds/load_labels.py` is the single implementation
+and asserts the resulting counts. Any earlier document citing R1 77 / R3 71 /
+R4 155, 65 multi-region vertebrae, or a 94-vertebra R2-xor-R3 population is
+using the superseded rule; the corrected values are 78 / 72 / 158, 70
+multi-region vertebrae, and 95.
+
+The primary region result is therefore the **four-component per-region AP vector**
+with patient-bootstrap CIs and paired excess over the corresponding level-only
+floor (`delta_AP_r = AP_model_r - AP_level-only_r`). Raw macro-AP is secondary and
+descriptive only: heterogeneous prevalences and shortcut floors make it possible
+for one region's performance to conceal failure in another. If one adjusted
+summary is useful, report the mean ceiling-normalized excess
+`mean_r(delta_AP_r / (1 - AP_level-only_r))` beside, never instead of, the four
+region results.
+
+Fracture-negative vertebrae are used for training and false-positive evaluation.
+They are **not** added to the per-region AP population: doing so collapses the AP
+scale (level-only floor drops 0.451 -> 0.218 -> 0.086 as negatives go 0 -> 268 ->
+1072) and measures fracture detection rather than localization.
+
+Left/right mirror-symmetry weight sharing is admissible as a **training** mechanism
+for the foramen head (2.2x labeled positive sides, 59 -> 130); original laterality
+must be retained and R2/R3 predictions remapped and evaluated separately. The 130
+labels are clustered within vertebrae/patients rather than 130 independent cases.
+Use patient-grouped folds and compare strict sharing with a side-specific head or
+lightweight side-specific calibration/adapter on identical OOF splits. Diagnose a
+failed symmetry assumption through per-side AP/calibration/sensitivity gaps, a
+side or side-by-score effect after conditioning on level, and reproducible OOF
+improvement from the side-specific alternative. This sharing applies only to bone
+fracture detection; it does not assert symmetry of vertebral-artery injury or its
+clinical consequences.
+
+#### Confirmatory interpretation contract
+
+The strongest confirmatory regional claim is absolute, not comparative: for every
+region whose multiplicity-controlled gate passes, the corresponding model provides
+fracture-localization information beyond that region's prespecified level-only
+anatomical-prior AP floor. A significant vertebra-level AUROC advantage of the
+four-model fusion over the whole-vertebra baseline is a separate confirmatory claim
+on the full cohort. Pairwise regional-AP rankings, claims that fusion improves
+localization, and claims that better localization mediates any vertebra-level AUROC
+gain remain exploratory regardless of their point estimates. If regional arm
+comparisons are null but the fusion improves vertebra-level AUROC, the supported
+conclusion is that the region-decomposed fusion improves vertebra-level
+discrimination; it does not establish superior regional localization. Null regional
+comparisons are not evidence of equivalence at the current MDE.
+
+#### Slice count (DECIDED 2026-08-07: fixed 15 planes for all experiments)
+
+User decision on 2026-08-07 (explicit choice among 15-fixed / full-z-first /
+variable-length-capable): **all experiments run on the existing
+`fracture_dataset_blind` 15-plane format**. This is the frozen preprocessing
+contract for every arm; it must not change once the arm comparison starts.
+
+Registered limitations accepted with this decision (from measured data): the 15
+planes cover only **77.5% (median) of the vertebra SI extent** (p5 62.5%) and
+systematically drop the superior/inferior ends, so endplate-involving fractures
+can be invisible. Consequences to keep in mind when interpreting results: (a) R1
+(body) performance is structurally disadvantaged; (b) in Proposed B, the
+"vertebra-positive => some region positive" constraint is label noise for
+positives whose evidence lies outside the 15 planes (Codex 2026-08-06 called this
+forced hallucination for weak positives); (c) results must not be compared
+against any future full-z rerun without rerunning all arms on the new manifest.
+
+#### Still open
+
+- Whether training uses vertebra-level labels for all 14,133 vertebrae jointly with
+  the 268 region labels, or the region task is trained on 268 + negatives only. Must
+  be identical across arms either way.
+- Proposed-B aggregation choice (max / smooth-max / noisy-OR): implement all three,
+  smooth-max as the working primary, decide by comparison before pre-registration.
+- The vertebra-level aggregation rule, which must be identical across arms or the
+  comparison measures the aggregation rule rather than the architecture.
+- Pseudo-label details for Proposed A (hard vs soft labels, confidence
+  thresholding, loss weight) -- consult the fundus-paper read
+  (`.claude/docs/codex/20260806-fundus-semisup-multitask-paper-read.md`) at
+  implementation time.
+
+### Legacy/Discarded: Stage3 Hierarchical Weak-Label Model
 
 ```text
 15 planes × (5-channel 2.5D CT + vertebra mask)
@@ -55,6 +237,8 @@ fracture probabilities.
 
 | Decision | Rationale | Alternatives Considered | Date |
 |----------|-----------|------------------------|------|
+| Reset the four-region fracture-localization project to a from-scratch fully supervised design and prohibit every mask-average-pooling design; treat the previous Stage1--Stage4 2.5D/MIL systems as discarded historical work, keep the ~1,300 unannotated fracture-positive vertebrae's *inferred region labels* out of the core phase (their ground-truth vertebra-level fracture label is still used), and admit region-label weak/semi-supervision only as a later attachment | The PI explicitly reset the project and mask pooling has been rejected. A clean boundary prevents accidental architectural reuse and makes the 268-label result interpretable | Reuse or fine-tune Stage1--Stage4; build region weak-labels into the initial model; pool features through anatomical masks | 2026-08-04 |
+| Evaluate per-region detection with patient-grouped five-fold pooled OOF AP computed separately for each of the 4 regions on only the 268 annotated fracture-positive vertebrae, each tested against its own region-specific level-only floor (R1 0.59, R2 0.37, R3 0.45, R4 0.72); use sampled fracture-negative vertebrae for training and report their false-positive behavior separately, never mixed into the per-region AP population | Adding thousands of all-negative vertebrae to AP changes its no-skill prevalence and allows easy fracture-vs-normal separation to dominate the anatomical-localization endpoint. Regions have very different anatomical-prior floors, so a single macro-AP number can hide a region that fails its own floor | Primary AP over an arbitrary mixture of positives and sampled negatives; a single macro-AP headline number; fold-mean t-tests; comparison only against the pooled no-skill floor | 2026-08-04, revised 2026-08-05 |
 | Align `line_2p5d` evaluation and output artifacts with `line_only`: use adaptive thresholding (`mode=adaptive`, `min=0.10`, `peak_ratio=0.4`), evaluate every epoch, report configured angle/rho outlier rates, save VAL/TEST heatmap examples, and save TEST-wide line comparison images plus prediction JSON. Apply `line_extend_ratio` to GT-length prediction segments only for rendering | The new experiment must remain directly inspectable beside the established line detector. The extension ratio changes rendered endpoints but not moment-derived angle/rho metrics, while matching output artifacts makes broken heatmaps and line geometry visually auditable | Metrics-only evaluation; add an unused line extension setting; depend directly on `line_only` implementation files | 2026-08-04 |
 | Manage `line_2p5d` experiments with required `experiment.phase` and `experiment.name`, deriving the output root as `Unet/outputs/{phase}/{name}` just like `line_only` | Phase groups comparable experiment variants and the name uniquely identifies each run without repeating or manually coordinating an output directory | Keep `experiment.output_dir + name`; use only one flat experiment name; require a CLI output path | 2026-08-04 |
 | Give `line_2p5d` the same config-driven W&B surface as `line_only` (`enabled`, `project`, `run_name`), derive null project/run names from `phase + name` and fold, and log scalar epoch metrics plus best-checkpoint and test summaries | Filesystem experiment naming and online tracking must identify the same run, while scalar-only logging avoids sending nested per-line payloads unintentionally | No W&B integration; hard-code project names; log only training loss; send the full nested metrics object | 2026-08-04 |
@@ -346,6 +530,14 @@ fracture probabilities.
 
 | Date | Changes |
 |------|---------|
+| 2026-08-07 | Fixed the anatomical term for R2/R3 in both annotation tools and the region-mask code: the Japanese UI text and comments said 椎間孔 (intervertebral foramen) where the study means 横突孔 (transverse foramen), the vertebral-artery canal. The annotator confirmed the 268 labels are transverse-foramen judgments, so this was a wording-only fix with no label change; English identifiers (`right_foramen` etc.) were left alone because they are dictionary keys and report names and are not wrong. Both tool legends now also state that right/left are image-side, which is the patient's opposite side |
+| 2026-08-07 | Corrected the region-label aggregation rule. `run_id` was misread as a repeated annotation of the same vertebra, so a keep-latest-run deduplication was used; the annotation tool actually splits each vertebra's fracture bboxes into runs of contiguous slices, making multiple runs separate fracture sites (5-50 slice gaps) that the annotator judged separately, and the annotator confirmed every run's labels are correct as recorded. The per-vertebra label is now the OR across runs, which changes R1 77->78, R3 71->72, R4 155->158, multi-region vertebrae 65->70, and the R2-xor-R3 population 94->95; bag and study counts are unchanged. Folds were regenerated on the corrected labels. The shortcut floors, level-only macro-AP 0.451, and power MDEs still derive from the superseded counts and are flagged for recomputation before any gate is pre-registered |
+| 2026-08-07 | Adopted `memo/計画書/提案手法.md` as the active study definition: four arms (Baseline 1 vertebra CNN+LSTM, Baseline 2 four independent region models, Proposed A semi-supervised pseudo-label multitask, Proposed B weakly supervised OR-constrained multitask), superseding the 2026-08-04 "no pseudo-labels in the core method" restriction. Two user decisions recorded: slice count fixed at 15 planes (existing `fracture_dataset_blind`) for all experiments with endplate-clipping limitations registered, and Baseline 2 trains on 268 annotated bags plus vertebra-negative entailed negatives |
+| 2026-08-06 | Reverted a Codex-authored "Design-review recommendations" section added while the same `--full-auto`/`--sandbox read-only` override from 2026-08-05 let Codex patch this file directly again. The section was never PI-reviewed and was written against an unverified synthesis (a same-session architecture proposal) that the PI subsequently rejected in full; removed rather than partially merged |
+| 2026-08-05 | Corrected two Codex-authored edits made while a sandbox override (`--full-auto` silently upgrading `--sandbox read-only` to `workspace-write`) let Codex patch this file directly: (1) slice count per vertebra was wrongly asserted as fixed at 15; the PI listed it as open, and the current 15 planes cover only 77.5% median of vertebra SI extent, so this is restored to open. (2) The design-reset decision-log row wrongly recorded a "label-blind 3D vertebra crop" as the accepted classifier input; that recommendation was proposed and withdrawn within the same 2026-08-04 session once the bbox-forced-plane leak it addressed turned out to already be fixed, and 2.5D on the existing dataset was confirmed instead |
+| 2026-08-05 | Synchronized the study contract to 2.5D, 268 region-annotated vertebrae from 160 patients, and a correlation-dependent paired regional-AP MDE of 0.027-0.059 |
+| 2026-08-05 | Added the confirmatory interpretation contract: regional claims are limited to multiplicity-controlled superiority over prespecified anatomical-prior floors, vertebra-level fusion superiority is tested separately, and regional arm rankings or localization-mediated explanations remain exploratory; a null regional ranking does not imply equivalence at the current MDE |
+| 2026-08-04 | Superseded the old 2.5D/MIL and mask-pooling fracture models with the PI-mandated from-scratch fully supervised design boundary; recorded delayed weak-label use and per-region OOF AP against region-specific level-only floors as the recommended first validation contract |
 | 2026-08-04 | Aligned `line_2p5d` evaluation config with adaptive heatmap thresholding and added configured angle/rho outlier rates; kept line extension out because this project does not render finite segments |
 | 2026-08-04 | Moved the `line_2p5d` fold execution range into validated `folds.start/end` config fields while retaining optional CLI overrides |
 | 2026-08-04 | Restored `line_2p5d` supervised heatmap learning to the same plain mean MSE used by `line_only`; removed weighted-MSE and Dice terms from implementation and configs |
@@ -540,3 +732,6 @@ fracture probabilities.
 | 2026-08-04 | Added `line_only`-style post-training heatmap examples, TEST-wide line comparison images, heatmap/line panels, prediction JSON, and functional `line_extend_ratio` rendering to `line_2p5d` |
 | 2026-08-04 | Switched `line_2p5d` experiment management from `output_dir + name` to required `phase + name` with automatic `Unet/outputs/{phase}/{name}` derivation |
 | 2026-08-04 | Added config-driven fold-level W&B initialization, scalar epoch logging, best-checkpoint summaries, and test summaries to `line_2p5d` |
+| 2026-08-04 | Recorded the completed `line_2p5d` MSE-only fold0 result: angle outliers were unchanged versus matched `line_only`, rho error/outliers regressed (especially `line_4`), and the next gate is a same-split geometry-enabled fold0 run before any five-fold expansion |
+| 2026-08-05 | Refined the transverse-foramen symmetry-sharing policy: retain/remap original side, use patient-grouped validation, evaluate R2/R3 separately, and test side-specific calibration/adapters for symmetry failure |
+| 2026-08-05 | Defined the primary region endpoint as four per-region pooled-OOF APs with patient-bootstrap CIs and paired excess over each region's level-only floor; retained raw macro-AP as secondary descriptive reporting only |

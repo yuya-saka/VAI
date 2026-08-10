@@ -32,12 +32,13 @@
 ### 4. **Fracture Detection and Risk Evaluation（骨折検出とリスク評価）**(計画段階)
 - **Input:** 領域別マスク + 骨折検出結果。
 - **Process:** 横突孔領域内の皮質断裂（Cortical Discontinuity）を検知。
-- **Output:** VAIリスクの提示、およびCTA推奨アラートの出力。
+- **Output:** 領域別の骨折検出。また、VAIリスクの提示、およびCTA推奨アラートの出力。
 
 ## 各プロジェクトの概要
 
-- @Unet/: 領域分割法の実験。詳細は、@context/Unet_plan.mdを確認。
-- @context/: 過去の指示書や進捗管理、計画書
+- @data/: 使用する前処理済みデータセット、また元データ。
+- @Unet/: 領域分割法の実験。
+- @memo/: 過去の指示書や進捗管理、計画書
 
 ## python環境
 uvで管理

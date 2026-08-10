@@ -51,8 +51,8 @@ from eval_region_seg import (  # noqa: E402
 REGION_COLORS_RGB = np.array([
     [0, 0, 0],       # 0: 背景
     [0, 200, 0],     # 1: 椎体 body (緑)
-    [200, 0, 0],     # 2: 右椎間孔 right foramen (赤)
-    [0, 0, 200],     # 3: 左椎間孔 left foramen (青)
+    [200, 0, 0],     # 2: 右横突孔 right foramen (赤)
+    [0, 0, 200],     # 3: 左横突孔 left foramen (青)
     [200, 200, 0],   # 4: 後方要素 posterior (黄)
 ], dtype=np.float32)
 OVERLAY_ALPHA = 0.45
@@ -222,7 +222,7 @@ def visualize_vertebra(sample: str, vertebra: str, slice_preds: dict, out_path: 
     fig.text(0.01, 0.72, "真値 GT", fontsize=13, rotation=90, va="center")
     fig.text(0.01, 0.28, "予測 伝播", fontsize=13, rotation=90, va="center")
 
-    legend = "緑=椎体  赤=右椎間孔  青=左椎間孔  黄=後方要素"
+    legend = "緑=椎体  赤=右横突孔  青=左横突孔  黄=後方要素"
     fig.suptitle(f"{sample}/{vertebra}   領域分割: 真値 vs 予測伝播\n{legend}", fontsize=13)
     fig.tight_layout(rect=(0.02, 0, 1, 0.94))
     out_path.parent.mkdir(parents=True, exist_ok=True)

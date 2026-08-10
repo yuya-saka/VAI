@@ -50,7 +50,7 @@ def _setup(Path, json, np, pd):
         3: np.array([220, 80, 80]) / 255,     # tomato
         4: np.array([255, 215, 0]) / 255,     # gold
     }
-    REGION_NAMES = {1: "R1（椎体）", 2: "R2（右椎間孔）", 3: "R3（左椎間孔）", 4: "R4（後方要素）"}
+    REGION_NAMES = {1: "R1（椎体）", 2: "R2（右横突孔）", 3: "R3（左横突孔）", 4: "R4（後方要素）"}
 
     # 対象リスト構築
     bbox_df = pd.read_csv(BBOX_CSV)

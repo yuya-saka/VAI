@@ -49,8 +49,8 @@ OUTLIER_THRESH_DEG = 10.0
 _REGION_COLORS_BGR = (
     (0, 0, 0),       # 0: 背景
     (0, 200, 0),     # 1: 椎体 body
-    (0, 0, 200),     # 2: 右椎間孔 right foramen
-    (200, 0, 0),     # 3: 左椎間孔 left foramen
+    (0, 0, 200),     # 2: 右横突孔 right foramen
+    (200, 0, 0),     # 3: 左横突孔 left foramen
     (0, 200, 200),   # 4: 後方要素 posterior
 )
 _OVERLAY_ALPHA = 0.45

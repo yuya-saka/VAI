@@ -10,7 +10,7 @@
 出力:
   fracture_dataset/{study_id}/{level}/region_4class.npy
     - dtype: uint8
-    - values: 0=背景, 1=椎体, 2=右椎間孔, 3=左椎間孔, 4=後方要素
+    - values: 0=背景, 1=椎体, 2=右横突孔, 3=左横突孔, 4=後方要素
 """
 
 from __future__ import annotations

@@ -42,8 +42,8 @@ DEFAULT_RUN_ID = "run_00"  # run_id列がない旧CSV行の扱い
 # 4領域の色 (RGB)。data_preprocessing/rsna_pipeline/visualize_bbox_centered.py と揃える。
 REGION_COLORS: dict[int, tuple[int, int, int]] = {
     1: (100, 149, 237),  # R1 椎体: cornflower blue
-    2: (50, 205, 50),  # R2 右椎間孔: lime green
-    3: (220, 80, 80),  # R3 左椎間孔: tomato
+    2: (50, 205, 50),  # R2 右横突孔: lime green
+    3: (220, 80, 80),  # R3 左横突孔: tomato
     4: (255, 215, 0),  # R4 後方要素: gold
 }
 NO_REGION_TINT = (80, 180, 255)  # region_4class.npy が無い場合の椎体強調色
