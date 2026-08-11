@@ -14,13 +14,24 @@
 
 ## 1. 本日のユーザー決定（AskUserQuestionで確定）
 
-1. **入力面数: 15面固定で全実験**（既存 `fracture_dataset_blind` をそのまま使う）
+1. **入力面数: 15面固定で全実験**（2026-08-11以降はblind実体を統合した`fracture_dataset`を使う）
    - full-z移行・可変長対応の選択肢を提示した上で15面固定を選択
    - 受容した制約: SIカバー median 77.5%、終板骨折の系統的欠落、R1が構造的に不利、
      提案Bの OR 制約が範囲外骨折でラベルノイズ化
    - 全アーム共通の前処理契約。比較開始後は変更不可
-2. **Baseline 2 の学習データ: 268 bag + 椎体陰性bag（entailed negatives）を追加**
-   - 計画書の「領域アノテ症例のみ」から拡張。領域APの評価母集団は従来通り268のみ（陰性混入なし）
+2. **Baseline 1 matched / Baseline 2 は同一の固定536 bag・428患者**
+   - 領域アノテ268 bag・160患者 + 椎体陰性268 bag・268患者
+   - 陰性はアノテ患者と重複しない患者から1患者1椎体を選ぶ
+   - fold別・椎体レベル別の件数をアノテ側と完全一致させる
+   - exact IDを固定manifestとして保存し、両baselineで共有する
+   - 領域APの評価母集団は従来通り268のみ（陰性混入なし）
+3. **2026-08-11改訂: Baseline 2は通常BCEを使用**
+   - P/H/N層別損失はベースラインとして過剰なため主計画から削除
+   - `pos_weight`とfocal lossも使用しない
+   - 他領域に骨折がある陰性例は、アノテbag内の通常の陰性targetとして自然に含める
+4. **Baseline 1は`matched` / `full`を切り替え可能にする**
+   - `matched`: Baseline 2と同じ536 bag・428患者。直接比較の主設定
+   - `full`: 完備データ全13,928 bag・2,010患者。別名の全数学習設定
 
 ---
 
@@ -51,9 +62,9 @@ CT 5ch + mask 5ch（全体+4領域）= 10ch/面 を 2-stem（image stem / mask s
 | Phase | 内容 | 検証 |
 |---|---|---|
 | 0 | データ契約固定: 患者単位層別5-fold新規作成、268読込チェック、mask版数pin | 全数読込 |
-| 1 | 共通基盤: dataset(10ch構成・flip時R2/R3同時swap) / 2-stemモデル / losses / eval | 1バッチ過学習・swap単体テスト |
-| 2 | Baseline 1 | 旧Stage1 OOF AUROC 0.921 が参照値 |
-| 3 | Baseline 2（268+陰性、P/H/N層別損失） | 領域AP vs 床（R2 0.37が最易） |
+| 1 | 共通基盤: manifest / dataset(10ch構成・flipなし) / 汎用BCE / eval | 全数manifest・向き保持単体テスト |
+| 2 | Baseline 1（matched/full切替） | matchedはB2と同一cohort、fullは全数。旧Stage1 OOF AUROC 0.921が参照値 |
+| 3 | Baseline 2（アノテbag+同数陰性、通常BCE） | 領域AP vs 床（R2 0.37が最易） |
 | 4 | 教師ありマルチタスク（AのStudent骨格 兼 Teacher） | |
 | 5 | 提案A: fold内teacher → pseudo-label → student | リーク検査 |
 | 6 | 提案B: smooth-max主、max/noisy-ORアブレーション | |
@@ -62,12 +73,11 @@ CT 5ch + mask 5ch（全体+4領域）= 10ch/面 を 2-stem（image stem / mask s
 ## 4. 実装の不変条件（過去分析より、コードに焼き込む）
 
 - 全アームで fold / seed / 入力manifest / 集約規則 / 学習予算を統一
-- flip時に R2/R3 の target・maskチャンネル・validity を**同時**swap（過去に事故あり）
+- flip / transpose augmentationは使用せず、保存済み画像の方向を維持
 - 領域AP母集団に陰性を混ぜない。床ゲート: R1 0.59 / R2 0.37 / R3 0.45 / R4 0.72
 - SideAcc は balanced accuracy、94 bag、単群ゲート 0.65
 - 提案Aの teacher / pseudo-label は outer fold 内で完結（全データteacherはOOF全滅）
-- 領域損失は P（領域陽性）/H（骨折ありだが他領域）/N（椎体陰性）の層別平均。
-  pos_weight≈215 は禁止。H が本当の localization hard negative
+- Baseline 2の領域損失は通常BCE。P/H/N層別重み、`pos_weight`、focal lossは使用しない
 - noisy-OR は主方式にしない（R4飽和で全枝の正勾配が消える）
 
 ## 5. 未決（実装中に決める）

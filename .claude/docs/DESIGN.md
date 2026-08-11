@@ -31,10 +31,12 @@ remains the foundation (it is Baseline 2 and the Proposed-A teacher).
 
 #### Fixed by the PI (2026-08-04)
 
-- **Input is 2.5D**, using the existing `fracture_dataset_blind` format. An earlier
-  recommendation of a from-scratch 3D crop layer was **withdrawn**: the bbox-forced
-  plane leak it was meant to fix is already fixed, and the existing data is 0.4 mm
-  in-plane over an 89.6 mm FOV, which resolves the transverse foramen at 10-11 px.
+- **Input is 2.5D**, using the unified `fracture_dataset` format. On 2026-08-11,
+  the 234 real bbox-study directories from `fracture_dataset_blind` were overlaid
+  onto the full 2,012-study `fracture_dataset`; the other 1,778 entries in the
+  blind view had only been symlinks back to the full dataset. The rebuilt
+  bbox-study files take precedence because they remove bbox-informed plane
+  assignment. Runtime code no longer reads `fracture_dataset_blind`.
 - **Four-region mask generation stays as-is** (line detection cutting the vertebra
   mask). Improvements to the line model proceed in parallel and are not a blocker.
 - **Region annotation is capped at 268** and cannot be increased.
@@ -49,11 +51,36 @@ CNN+LSTM trunk and two heads (whole-vertebra, 4 regions). Note the plan document
 "6ch" is per-plane 5 CT channels + 5 mask channels = 10ch in the existing 2.5D
 format; the two-stem split absorbs this.
 
+**Augmentation decision (2026-08-11):** horizontal/vertical reflection and
+transpose augmentation are not used in this study. The common dataset preserves
+the stored image orientation and intentionally exposes no flip/remapping path.
+Consequently, R2/R3 masks, targets, and validity flags are never swapped during
+training. Any later augmentation must be non-reflective, must preserve the common
+15-plane geometry, and must be applied consistently across arms.
+
+**Phase-1 common foundation (2026-08-11):** the shared manifest is assembled from
+the frozen fold file, complete-bag inventory, vertebra labels, and OR-aggregated
+region labels, then pinned by SHA256. The deterministic dataset returns separate
+`CT[15,5,224,224]` and `masks[15,5,224,224]` tensors, where mask channels are
+whole/R1/R2/R3/R4. Exact-region supervision uses ordinary unweighted BCE over
+available labels and entailed all-zero targets from sampled fracture-negative
+vertebrae. The evaluation harness reports vertebra AUROC/AP, four separate region
+APs, and R2/R3 discordant-case balanced accuracy with study-cluster bootstrap
+support. `fracture_detection/common/` contains no model or model-specific loss;
+each experiment project owns its architecture and training objective.
+
 1. **Baseline 1**: CT + whole-vertebra mask -> vertebra-level classification.
+   It has a required data-mode switch: `matched` uses exactly the same pinned
+   536-bag / 428-patient cohort as Baseline 2 for the direct comparison, while
+   `full` uses all 13,928 complete bags / 2,010 patients as a separately named
+   full-data experiment.
 2. **Baseline 2**: four independent per-region CNN+LSTM models. Training data:
-   268 annotated bags **plus vertebra-negative bags as entailed negatives**
-   (decided 2026-08-07; extends the plan document's "annotated cases only"
-   wording).
+   one pinned cohort containing 268 annotated bags from 160 patients plus 268
+   vertebra-negative bags from 268 distinct non-annotated patients. Select one
+   negative vertebra per patient and exactly match the annotated fold-by-level
+   counts. Use ordinary unweighted `BCEWithLogitsLoss`; annotated other-region
+   negatives enter naturally as zero targets. Do not use P/H/N weighting,
+   `pos_weight`, or focal loss in the baseline.
 3. **Proposed A** (semi-supervised): teacher trained on the 268 region labels
    generates pseudo-labels for unannotated positives; student is the multitask
    model trained on true vertebra labels + true region labels + pseudo-labels.
@@ -163,9 +190,12 @@ comparisons are not evidence of equivalence at the current MDE.
 #### Slice count (DECIDED 2026-08-07: fixed 15 planes for all experiments)
 
 User decision on 2026-08-07 (explicit choice among 15-fixed / full-z-first /
-variable-length-capable): **all experiments run on the existing
-`fracture_dataset_blind` 15-plane format**. This is the frozen preprocessing
-contract for every arm; it must not change once the arm comparison starts.
+variable-length-capable), corrected on 2026-08-11 for dataset provenance:
+**all experiments run on the unified `fracture_dataset` 15-plane format**. The
+234 bbox-study directories use the rebuilt label-blind plane assignment formerly
+stored as real directories under `fracture_dataset_blind`; all remaining studies
+retain their existing 15-plane data. This is the frozen preprocessing contract
+for every arm and must not change once the arm comparison starts.
 
 Registered limitations accepted with this decision (from measured data): the 15
 planes cover only **77.5% (median) of the vertebra SI extent** (p5 62.5%) and
@@ -190,6 +220,50 @@ against any future full-z rerun without rerunning all arms on the new manifest.
   thresholding, loss weight) -- consult the fundus-paper read
   (`.claude/docs/codex/20260806-fundus-semisup-multitask-paper-read.md`) at
   implementation time.
+
+#### Proposed-B design consultation recommendation (2026-08-10; pending PI acceptance)
+
+This recommendation is recorded as pending because it conflicts with the
+2026-08-04 blanket prohibition on mask-average pooling. If accepted, that older
+prohibition must be revised explicitly for Proposed B before pre-registration.
+
+- Use one full-context CNN pass per plane, followed by anatomically grounded,
+  mask-normalized pooling from a stride-16 spatial feature map. Use a fixed soft
+  support (region interior plus a small distance-decayed halo constrained to the
+  whole-vertebra mask), then one weight-shared BiLSTM and scalar head for all four
+  regions. Do not concatenate a shared global feature into each branch. Keep the
+  ungrounded four-logit head and four hard-masked weight-shared passes as
+  architecture ablations.
+- Treat the I3Dr paper as the source of the weight-shared, anatomically separated
+  evidence principle, not as an algebra that transfers unchanged. I3Dr's linear
+  identity distributes a linear layer and its bias over an additive sum; a
+  nonlinear OR / normalized log-mean-exp has no literal train/inference swap.
+- Aggregate valid plane logits with normalized log-mean-exp at fixed
+  `tau_plane=1`; aggregate valid region logits with the already selected
+  normalized log-mean-exp at fixed `tau_region=1` plus a learnable scalar bias.
+  These are independent fixed constants even though their primary values match.
+- Use asymmetric entailment while retaining aggregate supervision on negative
+  bags so that the learnable aggregate bias is identifiable: balanced positive
+  and negative class means; positive bags receive aggregate BCE only; the
+  negative term is the normalized average of aggregate-negative BCE and direct
+  per-region negative BCE. Never repeat a positive vertebra label over planes.
+- Do not add a global bypass head to primary Proposed B. A Baseline-1-driven
+  common logit shift may be evaluated only as a separately named secondary
+  ensemble, never as the Proposed-B primary result.
+- A plane whose raw region mask is empty is removed from that region's temporal
+  sequence and plane aggregation, rather than represented as a zero-evidence
+  observation. An entirely absent region is excluded from whole aggregation and
+  loss, receives an explicit validity flag and the lowest score for the
+  all-annotated-bag primary region evaluation, and is reported in a valid-only
+  sensitivity analysis.
+- The 268 region labels remain fully hidden from epoch monitoring, model
+  selection, thresholding, and hyperparameter choice. In particular, neither
+  region AP nor SideAcc may be logged on train-fold annotated bags. They are
+  evaluated only from locked OOF predictions after each fold model is finalized.
+- Region outputs are weakly supervised evidence scores, not calibrated
+  probabilities: with only one vertebra bit, regional attribution is not
+  identifiable, and the 15-plane observation can miss anatomy responsible for a
+  positive vertebra label.
 
 ### Legacy/Discarded: Stage3 Hierarchical Weak-Label Model
 
@@ -530,6 +604,13 @@ fracture probabilities.
 
 | Date | Changes |
 |------|---------|
+| 2026-08-11 | Unified the fracture input under `data/rsna_data/fracture_dataset/`. `fracture_dataset_blind` was a composite view containing 234 real rebuilt bbox-study directories plus 1,778 symlinks to `fracture_dataset`; the 234 real directories were overlaid onto the full dataset with blind content taking precedence, transferring 1,712 content-different files (2.27 GB) without deleting target-only bags. All fracture runtime paths now use the unified dataset; the complete modeling cohort remains 13,928 bags/2,010 studies |
+| 2026-08-11 | Fixed the Baseline-1/Baseline-2 data comparison contract. Both primary matched runs use the exact same pinned 536 bags from 428 patients: 268 annotated bags/160 patients plus 268 vertebra-negative bags from 268 distinct, non-overlapping patients, selected one vertebra per patient with fold-by-level counts matched exactly. Baseline 1 additionally supports a separately named `full` mode using all 13,928 bags/2,010 patients. In five-fold CV the matched training folds contain 340-345 patients; full training folds contain 1,608 patients |
+| 2026-08-11 | Restricted `fracture_detection/common/` to invariant infrastructure only: manifest, dataset, ordinary reusable region BCE, metrics, and tests. Removed the prematurely added two-stem model and multitask-loss wrapper; every model and model-specific objective must live in its own experiment project |
+| 2026-08-11 | Simplified Baseline 2 to preserve its role as a baseline: four independent region models use ordinary unweighted BCE on all outer-training annotated bags plus the matched cohort's fixed equal number of level-matched vertebra-negative bags. Removed P/H/N weighting from the primary plan and common loss; other-region fractures remain ordinary negative labels within the annotated cohort |
+| 2026-08-11 | Completed the fracture-detection Phase-1 common foundation: SHA256-pinned 13,928-row manifest, deterministic 10-channel dataset contract, ordinary reusable region BCE, and study-clustered vertebra/region/side evaluation |
+| 2026-08-11 | Fixed the fracture-detection augmentation contract: no horizontal/vertical flip or transpose augmentation in any arm. The common dataset preserves stored orientation and contains no R2/R3 remapping path; any later augmentation must be non-reflective and shared across arms |
+| 2026-08-10 | Recorded a pending Proposed-B consultation recommendation: one full-context CNN pass with soft mask-normalized regional pooling and a shared temporal/scalar head; normalized log-mean-exp over planes and regions; asymmetric entailed-negative loss with aggregate-negative calibration for the learnable bias; no global bypass; explicit missing-region handling; and strict separation of the 268 eval-only labels from all training-time monitoring. Also recorded that I3Dr's linear sum/layer swap and patient-model rescaling do not transfer literally to nonlinear binary OR aggregation. This does not yet override the 2026-08-04 no-mask-pooling PI decision |
 | 2026-08-07 | Fixed the anatomical term for R2/R3 in both annotation tools and the region-mask code: the Japanese UI text and comments said 椎間孔 (intervertebral foramen) where the study means 横突孔 (transverse foramen), the vertebral-artery canal. The annotator confirmed the 268 labels are transverse-foramen judgments, so this was a wording-only fix with no label change; English identifiers (`right_foramen` etc.) were left alone because they are dictionary keys and report names and are not wrong. Both tool legends now also state that right/left are image-side, which is the patient's opposite side |
 | 2026-08-07 | Corrected the region-label aggregation rule. `run_id` was misread as a repeated annotation of the same vertebra, so a keep-latest-run deduplication was used; the annotation tool actually splits each vertebra's fracture bboxes into runs of contiguous slices, making multiple runs separate fracture sites (5-50 slice gaps) that the annotator judged separately, and the annotator confirmed every run's labels are correct as recorded. The per-vertebra label is now the OR across runs, which changes R1 77->78, R3 71->72, R4 155->158, multi-region vertebrae 65->70, and the R2-xor-R3 population 94->95; bag and study counts are unchanged. Folds were regenerated on the corrected labels. The shortcut floors, level-only macro-AP 0.451, and power MDEs still derive from the superseded counts and are flagged for recomputation before any gate is pre-registered |
 | 2026-08-07 | Adopted `memo/計画書/提案手法.md` as the active study definition: four arms (Baseline 1 vertebra CNN+LSTM, Baseline 2 four independent region models, Proposed A semi-supervised pseudo-label multitask, Proposed B weakly supervised OR-constrained multitask), superseding the 2026-08-04 "no pseudo-labels in the core method" restriction. Two user decisions recorded: slice count fixed at 15 planes (existing `fracture_dataset_blind`) for all experiments with endplate-clipping limitations registered, and Baseline 2 trains on 268 annotated bags plus vertebra-negative entailed negatives |

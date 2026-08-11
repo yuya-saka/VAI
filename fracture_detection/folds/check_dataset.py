@@ -1,18 +1,18 @@
-"""Phase 0 data-contract check for fracture_dataset_blind.
+"""統合済み fracture_dataset のフェーズ0データ契約を検証する。
 
-Verifies, before any model code exists:
-1. Every one of the 268 region-annotated bags loads with the expected shapes
-   and dtypes, and gets a sha256 fingerprint (mask/CT version pin).
-2. A full inventory of all bags (file presence + sizes, no array loads).
-3. Cross-checks against train.csv (studies without image data, and the
-   vertebra-label population actually available for training).
+モデル実装前に次の項目を検証する。
+1. 領域アノテーション済みの全268 bagを想定した形状・データ型で読み込み、
+   SHA256フィンガープリントを付与する（マスク・CTのバージョン固定）。
+2. 全bagについてファイルの有無とサイズを棚卸しする（配列は読み込まない）。
+3. train.csvと照合し、画像データのないstudyと、実際に学習へ使用できる
+   椎体ラベルの母集団を確認する。
 
-Outputs (under fracture_detection/folds/outputs/):
-- annotated_bag_manifest.csv  268 rows: labels, shapes, sha256 fingerprints
-- bag_inventory.csv           one row per (study, level) directory
-- check_report.json           summary counts for the work log
+出力先（fracture_detection/folds/outputs/）:
+- annotated_bag_manifest.csv: 268行のラベル、形状、SHA256フィンガープリント
+- bag_inventory.csv: 各(study, level)ディレクトリにつき1行
+- check_report.json: 作業ログ用の集計値
 
-Run: uv run python fracture_detection/folds/check_dataset.py
+実行方法: uv run python fracture_detection/folds/check_dataset.py
 """
 
 import hashlib
@@ -24,7 +24,7 @@ import pandas as pd
 from load_labels import LEVELS, load_region_labels, load_vertebra_labels
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DATASET_DIR = REPO_ROOT / "data/rsna_data/fracture_dataset_blind"
+DATASET_DIR = REPO_ROOT / "data/rsna_data/fracture_dataset"
 TRAIN_CSV = REPO_ROOT / "data/rsna_data/train.csv"
 REGION_CSV = REPO_ROOT / "data/rsna_data/fracture_region_labels_dicom.csv"
 OUTPUT_DIR = Path(__file__).resolve().parent / "outputs"
@@ -45,7 +45,7 @@ def sha256_of_file(path: Path) -> str:
 
 
 def inventory_dataset() -> pd.DataFrame:
-    """List every (study, level) directory with file presence and sizes."""
+    """全(study, level)ディレクトリのファイル有無とサイズを一覧化する。"""
     rows: list[dict[str, object]] = []
     for study_dir in sorted(DATASET_DIR.iterdir()):
         if not study_dir.is_dir():
@@ -66,7 +66,7 @@ def inventory_dataset() -> pd.DataFrame:
 
 
 def check_annotated_bag(bag_dir: Path) -> dict[str, object]:
-    """Load one annotated bag fully and return shape checks + fingerprints."""
+    """アノテーション済みbagを読み込み、形状検査結果と指紋を返す。"""
     result: dict[str, object] = {}
 
     ct = np.load(bag_dir / "ct.npy")
@@ -81,8 +81,8 @@ def check_annotated_bag(bag_dir: Path) -> dict[str, object]:
     result["region_values_ok"] = set(np.unique(region_mask)).issubset(
         REGION_MASK_ALLOWED_VALUES
     )
-    # Region classes present in this bag (transverse foramina are absent on
-    # some planes and occasionally in the whole bag; recorded, not enforced).
+    # このbagに存在する領域クラスを記録する。横突孔は一部の面、まれにbag全体に
+    # 存在しないため、検査条件として強制はしない。
     for region_value in (1, 2, 3, 4):
         result[f"region_{region_value}_present"] = bool(
             (region_mask == region_value).any()
@@ -99,7 +99,7 @@ def main() -> None:
     region_df = load_region_labels(REGION_CSV)
     vertebra_df = load_vertebra_labels(TRAIN_CSV)
 
-    print("== inventory scan ==")
+    print("== データセットの棚卸し ==")
     inventory = inventory_dataset()
     inventory.to_csv(OUTPUT_DIR / "bag_inventory.csv", index=False)
     complete = inventory[
@@ -107,10 +107,10 @@ def main() -> None:
             axis=1
         )
     ]
-    print(f"bags found: {len(inventory)} (complete: {len(complete)})")
-    print(f"studies with data: {inventory['study_id'].nunique()}")
+    print(f"検出したbag数: {len(inventory)}（完備: {len(complete)}）")
+    print(f"データが存在するstudy数: {inventory['study_id'].nunique()}")
 
-    print("== annotated bag full read check (268 bags) ==")
+    print("== アノテーション済みbagの全読み込み検査（268 bag） ==")
     manifest_rows: list[dict[str, object]] = []
     failures: list[str] = []
     for row in region_df.itertuples(index=False):
@@ -125,7 +125,7 @@ def main() -> None:
             "region_4": row.region_4,
         }
         if not bag_dir.is_dir():
-            failures.append(f"missing bag dir: {bag_dir}")
+            failures.append(f"bagディレクトリがありません: {bag_dir}")
             manifest_rows.append(entry)
             continue
         checks = check_annotated_bag(bag_dir)
@@ -134,12 +134,12 @@ def main() -> None:
         if failed_checks:
             failures.append(f"{row.study_id}/{row.level}: {failed_checks}")
         if not checks["vertebra_mask_nonzero"]:
-            failures.append(f"{row.study_id}/{row.level}: empty vertebra mask")
+            failures.append(f"{row.study_id}/{row.level}: 椎体マスクが空です")
         manifest_rows.append(entry)
     manifest = pd.DataFrame(manifest_rows)
     manifest.to_csv(OUTPUT_DIR / "annotated_bag_manifest.csv", index=False)
 
-    print("== cross-checks against train.csv ==")
+    print("== train.csvとの照合 ==")
     studies_with_data = set(inventory["study_id"])
     studies_in_train = set(vertebra_df["study_id"])
     missing_studies = sorted(studies_in_train - studies_with_data)
@@ -158,19 +158,18 @@ def main() -> None:
     annotated_not_fractured = annotated_in_train[annotated_in_train["fractured"] != 1]
     if len(annotated_not_fractured):
         failures.append(
-            "annotated bags without positive vertebra label: "
-            f"{len(annotated_not_fractured)}"
+            f"椎体陽性ラベルのないアノテーション済みbag: {len(annotated_not_fractured)}"
         )
 
-    # Transverse-foramen mask availability vs labels: a bag labeled positive
-    # for R2/R3 whose region mask lacks that class cannot be learned from.
+    # 横突孔マスクの有無とラベルを照合する。R2/R3が陽性でも領域マスクに
+    # 該当クラスがなければ、そのbagから対象領域を学習できない。
     for region_value, column in ((2, "region_2"), (3, "region_3")):
         labeled = manifest[manifest[column] == 1]
         mask_absent = labeled[~labeled[f"region_{region_value}_present"].fillna(False)]
         if len(mask_absent):
             failures.append(
-                f"{column} positive but mask class absent: "
-                f"{len(mask_absent)} bags: "
+                f"{column}は陽性ですがマスククラスがありません: "
+                f"{len(mask_absent)} bag: "
                 + ", ".join(f"{r.study_id}/{r.level}" for r in mask_absent.itertuples())
             )
 
@@ -190,11 +189,11 @@ def main() -> None:
 
     print(json.dumps({k: v for k, v in report.items() if k != "failures"}, indent=2))
     if failures:
-        print(f"FAILURES ({len(failures)}):")
+        print(f"検査失敗（{len(failures)}件）:")
         for failure in failures:
             print(f"  - {failure}")
         raise SystemExit(1)
-    print("all checks passed")
+    print("すべての検査に合格しました")
 
 
 if __name__ == "__main__":

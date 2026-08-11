@@ -108,3 +108,9 @@ scripts/
 !train_models/stage4/scripts/*.py
 !train_models/stage4/tests/
 !train_models/stage4/tests/*.py
+
+# fracture_detection Phase 1 common foundation
+!fracture_detection/common/tests/
+!fracture_detection/common/tests/*.py
+!fracture_detection/common/outputs/input_manifest.csv
+!fracture_detection/common/outputs/input_manifest_meta.json

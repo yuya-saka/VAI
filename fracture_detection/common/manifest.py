@@ -1,0 +1,142 @@
+"""凍結foldとラベルから全アーム共通manifestを構築する。"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+
+import pandas as pd
+
+from fracture_detection.common.constants import (
+    BAG_FILE_COLUMNS,
+    FOLDS_CSV,
+    INVENTORY_CSV,
+    MANIFEST_COLUMNS,
+    REGION_COLUMNS,
+    REGION_CSV,
+    TRAIN_CSV,
+)
+from fracture_detection.folds.load_labels import (
+    load_region_labels,
+    load_vertebra_labels,
+)
+
+
+def _assert_unique(frame: pd.DataFrame, columns: list[str], name: str) -> None:
+    if frame.duplicated(columns).any():
+        raise ValueError(f"{name}に重複キーがあります: {columns}")
+
+
+def assemble_manifest(
+    inventory: pd.DataFrame,
+    vertebra_labels: pd.DataFrame,
+    region_labels: pd.DataFrame,
+    folds: pd.DataFrame,
+) -> pd.DataFrame:
+    """読み込み済み表を結合し、1行1椎体の共通manifestを返す。"""
+    required_inventory = {"study_id", "level", *BAG_FILE_COLUMNS}
+    if not required_inventory.issubset(inventory.columns):
+        missing = sorted(required_inventory - set(inventory.columns))
+        raise ValueError(f"棚卸し表に必要な列がありません: {missing}")
+
+    complete = inventory[(inventory[list(BAG_FILE_COLUMNS)] > 0).all(axis=1)][
+        ["study_id", "level"]
+    ].copy()
+    complete["study_id"] = complete["study_id"].astype(str)
+    complete["level"] = complete["level"].astype(str)
+
+    vertebra_labels = vertebra_labels.copy()
+    region_labels = region_labels.copy()
+    folds = folds.copy()
+    for frame in (vertebra_labels, region_labels, folds):
+        frame["study_id"] = frame["study_id"].astype(str)
+
+    _assert_unique(complete, ["study_id", "level"], "完備bag一覧")
+    _assert_unique(vertebra_labels, ["study_id", "level"], "椎体ラベル")
+    _assert_unique(region_labels, ["study_id", "level"], "領域ラベル")
+    _assert_unique(folds, ["study_id"], "fold一覧")
+
+    manifest = complete.merge(
+        vertebra_labels,
+        on=["study_id", "level"],
+        how="left",
+        validate="one_to_one",
+    )
+    if manifest["fractured"].isna().any():
+        raise ValueError("椎体骨折ラベルのない完備bagがあります")
+
+    manifest = manifest.merge(
+        folds[["study_id", "fold"]],
+        on="study_id",
+        how="left",
+        validate="many_to_one",
+    )
+    if manifest["fold"].isna().any():
+        raise ValueError("fold未割り当ての完備bagがあります")
+
+    manifest = manifest.merge(
+        region_labels[["study_id", "level", *REGION_COLUMNS]],
+        on=["study_id", "level"],
+        how="left",
+        validate="one_to_one",
+        indicator="region_merge",
+    )
+    manifest["has_region_target"] = manifest["region_merge"].eq("both")
+    manifest = manifest.drop(columns="region_merge")
+    manifest[list(REGION_COLUMNS)] = manifest[list(REGION_COLUMNS)].fillna(0)
+    manifest = manifest.rename(columns={"fractured": "vertebra_target"})
+
+    integer_columns = ["fold", "vertebra_target", *REGION_COLUMNS]
+    manifest[integer_columns] = manifest[integer_columns].astype(int)
+    manifest = manifest[list(MANIFEST_COLUMNS)]
+    return manifest.sort_values(["study_id", "level"]).reset_index(drop=True)
+
+
+def build_manifest(
+    inventory_csv: Path = INVENTORY_CSV,
+    train_csv: Path = TRAIN_CSV,
+    region_csv: Path = REGION_CSV,
+    folds_csv: Path = FOLDS_CSV,
+) -> pd.DataFrame:
+    """確定済み入力ファイルから共通manifestを構築する。"""
+    inventory = pd.read_csv(inventory_csv, dtype={"study_id": str, "level": str})
+    vertebra_labels = load_vertebra_labels(train_csv)
+    region_labels = load_region_labels(region_csv)
+    folds = pd.read_csv(folds_csv, dtype={"study_id": str})
+    return assemble_manifest(inventory, vertebra_labels, region_labels, folds)
+
+
+def write_manifest(manifest: pd.DataFrame, output_dir: Path) -> tuple[Path, Path]:
+    """manifestとSHA256を含むメタデータを安全に書き出す。"""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = output_dir / "input_manifest.csv"
+    temporary_path = output_dir / "input_manifest.csv.tmp"
+    manifest.to_csv(temporary_path, index=False)
+    temporary_path.replace(manifest_path)
+
+    digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    metadata = {
+        "rows": int(len(manifest)),
+        "studies": int(manifest["study_id"].nunique()),
+        "region_annotated_rows": int(manifest["has_region_target"].sum()),
+        "sha256": digest,
+    }
+    metadata_path = output_dir / "input_manifest_meta.json"
+    metadata_path.write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return manifest_path, metadata_path
+
+
+def main() -> None:
+    """既定パスから共通manifestを生成する。"""
+    output_dir = Path(__file__).resolve().parent / "outputs"
+    manifest = build_manifest()
+    manifest_path, metadata_path = write_manifest(manifest, output_dir)
+    print(f"共通manifestを書き込みました: {manifest_path}")
+    print(f"メタデータを書き込みました: {metadata_path}")
+
+
+if __name__ == "__main__":
+    main()

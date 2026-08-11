@@ -1,24 +1,22 @@
-"""Label loading utilities for the fracture_detection study.
+"""fracture_detection研究用のラベル読み込み機能。
 
-Two label sources:
-- data/rsna_data/train.csv: vertebra-level fracture labels (wide, C1-C7 columns).
-- data/rsna_data/fracture_region_labels_dicom.csv: 4-region labels, one row per
-  annotation run.
+ラベルは次の2箇所から読み込む。
+- data/rsna_data/train.csv: 椎体単位の骨折ラベル（C1〜C7列の横持ち形式）
+- data/rsna_data/fracture_region_labels_dicom.csv: アノテーションrunごとに1行の4領域ラベル
 
-A `run` is NOT a repeated annotation of the same thing. The annotation tool
-(Unet/dicom_bbox_annotation_tool) groups each vertebra's fracture bboxes into
-runs of contiguous DICOM slices, so two runs on one vertebra are two disjoint
-fracture sites, each shown and judged separately (gaps between them are 5-50
-slices). The annotator confirmed (2026-08-07) that every run's labels are
-correct as recorded.
+`run`は同じ対象への再アノテーションではない。アノテーションツール
+（Unet/dicom_bbox_annotation_tool）は、各椎体の骨折bboxを連続するDICOMスライスの
+runにまとめる。そのため、1椎体に2つのrunがある場合、それらは互いに離れた骨折部位であり、
+個別に表示・判定されている（run間は5〜50スライス空く）。アノテータは2026-08-07に、
+各runのラベルが記録どおり正しいことを確認済みである。
 
-Therefore the per-vertebra region label is the OR across that vertebra's runs:
-a vertebra has a fracture in region r if any of its fracture sites reaches r.
-Taking only one run would silently discard a real fracture site.
+したがって、椎体単位の領域ラベルには、その椎体に属する全runの論理和を用いる。
+いずれかの骨折部位が領域rに達していれば、その椎体の領域rを陽性とする。
+1つのrunだけを採用すると、実在する骨折部位が暗黙に失われる。
 
-This yields 268 bags / 160 studies, R1=78 R2=59 R3=72 R4=158. Earlier documents
-recorded R1=77 R3=71 R4=155 from a keep-latest-run rule that dropped sites;
-those counts are superseded.
+この集約による件数は268 bag、160 study、R1=78、R2=59、R3=72、R4=158である。
+以前の文書にあるR1=77、R3=71、R4=155は、骨折部位を落とす最新run採用規則による
+旧集計値であり、現在はこの集計値で置き換える。
 """
 
 from pathlib import Path
@@ -31,19 +29,19 @@ LEVELS = ["C1", "C2", "C3", "C4", "C5", "C6", "C7"]
 EXPECTED_ANNOTATED_BAGS = 268
 EXPECTED_ANNOTATED_STUDIES = 160
 EXPECTED_REGION_POSITIVES = {
-    "region_1": 78,  # vertebral body
-    "region_2": 59,  # right transverse foramen
-    "region_3": 72,  # left transverse foramen
-    "region_4": 158,  # posterior elements
+    "region_1": 78,  # 椎体
+    "region_2": 59,  # 右横突孔
+    "region_3": 72,  # 左横突孔
+    "region_4": 158,  # 後方要素
 }
 
 
 def load_region_labels(csv_path: Path) -> pd.DataFrame:
-    """Load region labels as one row per vertebra, OR-aggregated over its runs.
+    """全runの論理和を取り、椎体ごとに1行の領域ラベルを読み込む。
 
-    Returns columns: study_id, level, n_runs, region_1..region_4.
-    Raises ValueError if the counts differ from the confirmed values, which
-    would mean the CSV changed and every downstream number must be re-derived.
+    study_id、level、n_runs、region_1〜region_4列を返す。
+    件数が確認済みの値と異なる場合はValueErrorを送出する。この不一致はCSVが変更され、
+    後続処理で使うすべての数値を再導出する必要があることを意味する。
     """
     raw = pd.read_csv(csv_path)
     df = raw.groupby(["study_id", "level"], as_index=False).agg(
@@ -56,21 +54,25 @@ def load_region_labels(csv_path: Path) -> pd.DataFrame:
     df = df.sort_values(["study_id", "level"]).reset_index(drop=True)
 
     if len(df) != EXPECTED_ANNOTATED_BAGS:
-        raise ValueError(f"expected {EXPECTED_ANNOTATED_BAGS} bags, got {len(df)}")
+        raise ValueError(
+            f"想定bag数は{EXPECTED_ANNOTATED_BAGS}ですが、実際は{len(df)}です"
+        )
     if df["study_id"].nunique() != EXPECTED_ANNOTATED_STUDIES:
         raise ValueError(
-            f"expected {EXPECTED_ANNOTATED_STUDIES} studies, "
-            f"got {df['study_id'].nunique()}"
+            f"想定study数は{EXPECTED_ANNOTATED_STUDIES}ですが、"
+            f"実際は{df['study_id'].nunique()}です"
         )
     for column, expected in EXPECTED_REGION_POSITIVES.items():
         actual = int(df[column].sum())
         if actual != expected:
-            raise ValueError(f"{column}: expected {expected} positives, got {actual}")
+            raise ValueError(
+                f"{column}: 想定陽性数は{expected}ですが、実際は{actual}です"
+            )
     return df
 
 
 def load_vertebra_labels(csv_path: Path) -> pd.DataFrame:
-    """Load train.csv into long form: study_id, level, fractured (0/1)."""
+    """train.csvをstudy_id、level、fractured（0/1）の縦持ち形式で読み込む。"""
     wide = pd.read_csv(csv_path)
     long = wide.melt(
         id_vars=["StudyInstanceUID"],
