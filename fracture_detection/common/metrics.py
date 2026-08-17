@@ -171,13 +171,8 @@ def evaluate_prediction_frame(
     missing = required - set(predictions.columns)
     if missing:
         raise ValueError(f"予測表に必要な列がありません: {sorted(missing)}")
-    if predictions.duplicated(["study_id", "level"]).any():
-        raise ValueError("予測表に重複したstudy_id・levelがあります")
-
-    vertebra = binary_metrics(
-        predictions["vertebra_target"].to_numpy(),
-        predictions["vertebra_score"].to_numpy(),
-        groups=predictions["study_id"].to_numpy(),
+    vertebra = evaluate_vertebra_prediction_frame(
+        predictions,
         n_bootstrap=n_bootstrap,
     )
     annotated = predictions[predictions["has_region_target"].astype(bool)]
@@ -199,3 +194,22 @@ def evaluate_prediction_frame(
         "regions": regions,
         "side_balanced_accuracy": side_accuracy,
     }
+
+
+def evaluate_vertebra_prediction_frame(
+    predictions: pd.DataFrame,
+    n_bootstrap: int = 1000,
+) -> dict[str, Any]:
+    """椎体スコアだけを持つOOF予測表から標準二値指標を計算する。"""
+    required = {"study_id", "level", "vertebra_target", "vertebra_score"}
+    missing = required - set(predictions.columns)
+    if missing:
+        raise ValueError(f"予測表に必要な列がありません: {sorted(missing)}")
+    if predictions.duplicated(["study_id", "level"]).any():
+        raise ValueError("予測表に重複したstudy_id・levelがあります")
+    return binary_metrics(
+        predictions["vertebra_target"].to_numpy(),
+        predictions["vertebra_score"].to_numpy(),
+        groups=predictions["study_id"].to_numpy(),
+        n_bootstrap=n_bootstrap,
+    )

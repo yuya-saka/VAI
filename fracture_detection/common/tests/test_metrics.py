@@ -3,7 +3,10 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from fracture_detection.common.metrics import evaluate_prediction_frame
+from fracture_detection.common.metrics import (
+    evaluate_prediction_frame,
+    evaluate_vertebra_prediction_frame,
+)
 
 
 def test_evaluate_prediction_frame_reports_perfect_predictions() -> None:
@@ -38,3 +41,27 @@ def test_evaluate_prediction_frame_reports_perfect_predictions() -> None:
     assert metrics["vertebra"]["auroc"] == 1.0
     assert metrics["regions"]["macro_average_precision"] == 1.0
     assert metrics["side_balanced_accuracy"] == 1.0
+
+
+def test_evaluate_vertebra_prediction_frame_requires_no_region_scores() -> None:
+    predictions = pd.DataFrame(
+        [
+            {
+                "study_id": "study-a",
+                "level": "C1",
+                "vertebra_target": 0,
+                "vertebra_score": 0.1,
+            },
+            {
+                "study_id": "study-b",
+                "level": "C2",
+                "vertebra_target": 1,
+                "vertebra_score": 0.9,
+            },
+        ]
+    )
+
+    metrics = evaluate_vertebra_prediction_frame(predictions, n_bootstrap=20)
+
+    assert metrics["auroc"] == 1.0
+    assert metrics["average_precision"] == 1.0

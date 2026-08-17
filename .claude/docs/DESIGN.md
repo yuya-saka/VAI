@@ -71,14 +71,34 @@ each experiment project owns its architecture and training objective.
 
 1. **Baseline 1**: CT + whole-vertebra mask -> vertebra-level classification.
    It has a required data-mode switch: `matched` uses exactly the same pinned
-   536-bag / 428-patient cohort as Baseline 2 for the direct comparison, while
-   `full` uses all 13,928 complete bags / 2,010 patients as a separately named
-   full-data experiment.
+   2,655-bag / 1,498-patient cohort as Baseline 2 for the direct comparison. It
+   keeps all 268 annotated positive bags and deterministically samples 2,387
+   negative bags so its 10.094% prevalence and negative fold-by-level
+   distribution match the `full` source. The `full` mode uses all 13,928
+   complete bags / 2,010 patients as a separately named
+   full-data experiment. The implementation sequence, file boundaries, tests,
+   and rollback plan are recorded in
+   `.claude/docs/work-logs/2026-08/2026-08-11-baseline1-implementation-plan.md`
+   and code implementation is complete; training has not begun. Both modes use
+   broadcast `BCEWithLogitsLoss` with a fixed `pos_weight=2.0`; other values are
+   rejected by config validation. Experiment management follows the
+   `Unet/line_only` pattern: required phase/name fields
+   derive isolated local output paths, the effective config is saved locally,
+   and each fold maps to one optional W&B run with epoch logs and best/final
+   summaries. Local checkpoints and prediction files remain authoritative.
+   The total split count stays fixed at `data.n_folds=5`, while required
+   `data.start_fold` and `data.end_fold` select the inclusive training range;
+   CLI fold flags only override those recorded config values temporarily. The
+   training entry point supports both module execution and direct repository-root
+   execution of `fracture_detection/baseline1/train.py` by adding only the
+   resolved project root to the import path. Startup stages are printed with
+   immediate flushing, and train/validation/final-checkpoint passes expose
+   per-batch progress plus running BCE so DataLoader startup and NFS latency are
+   distinguishable from a stalled process.
 2. **Baseline 2**: four independent per-region CNN+LSTM models. Training data:
-   one pinned cohort containing 268 annotated bags from 160 patients plus 268
-   vertebra-negative bags from 268 distinct non-annotated patients. Select one
-   negative vertebra per patient and exactly match the annotated fold-by-level
-   counts. Use ordinary unweighted `BCEWithLogitsLoss`; annotated other-region
+   the same pinned 2,655-bag natural-prevalence cohort as Baseline 1 matched,
+   containing 268 annotated positives and 2,387 vertebra-negative bags. Use
+   ordinary unweighted `BCEWithLogitsLoss`; annotated other-region
    negatives enter naturally as zero targets. Do not use P/H/N weighting,
    `pos_weight`, or focal loss in the baseline.
 3. **Proposed A** (semi-supervised): teacher trained on the 268 region labels
@@ -503,6 +523,9 @@ fracture probabilities.
 | Train the strict-plane experiment by fine-tuning each fold's own baseline-v1 checkpoint with masked central heatmap loss retained throughout, delayed plane-projected loss, annotation-uncertainty-weighted tilt-vector loss, and low-weight virtual extrapolation at `+/-4 mm`. Treat unreliable surfaces as operational vertical fallbacks but down-weight their tilt-vector term and use a near-zero dead zone. Define reliability independently per surface from annotation count/span, movement, slope significance or strong movement, leave-one-out/odd-even sign agreement, and plane residual QC | Fine-tuning gives the small-data experiment a controlled central-accuracy starting point. Sparse labels must never become negatives; annotation-derived uncertainty should weight rather than be learned away; and full-strength zero labels on roughly 40% near-flat surfaces would encourage trivial tilt collapse. Per-surface decisions retain trustworthy boundaries when another boundary on the same vertebra is ambiguous | Retrain from scratch first; supervise unlabeled slices as background; give every fitted nonzero slope equal weight; apply reliability at whole-vertebra level; use long-range synthetic extrapolation as if it were observed anatomy | 2026-08-03 |
 | Select strict-plane checkpoints by reliable-surface symmetric virtual line-position error at `+/-4 mm`, subject to central-band non-inferiority gates, and judge image-dependent signed tilt against training-fold-only zero/global/per-line/per-level/per-level-plus-line priors using pooled sample-clustered OOF inference. Require paired cluster-bootstrap superiority, not fold-mean significance, before considering any 3D escalation | Central rho noise can hide or mimic the small tilt signal, and five folds are not independent replicates. The virtual metric magnifies signed slope error, central gates protect the clinically visible anatomy, and per-level-plus-line priors test whether the network uses image evidence rather than memorizing anatomy. If the 2.5D model cannot beat that prior, greater 3D capacity on the same subjects is not evidence-based | Select by raw heatmap MSE or unguarded tilt loss; compare only with `k=0`; treat surfaces/windows as independent; proceed to 3D after a null 2.5D result | 2026-08-03 |
 
+| Redesign Baseline 1 `matched` optimization around the current 2,122--2,125 training bags/fold: no backbone freeze, two-epoch all-layer warmup from 0.1x, differential initial LR `backbone=1e-4` / `head=3e-4`, then `ReduceLROnPlateau` on `val_bce` (factor 0.5, patience 4, relative threshold 0.1%, cooldown 1, minima `1e-6` / `3e-6`), with a 100-epoch safety cap, checkpoint eligibility from epoch 1, AUROC patience 15, and global-norm clip 5.0 | The superseded 10-epoch freeze generated about 1,330 head-only updates, then reset head LR by 33x while unfreezing. Fold 0 learned (`train_bce 0.619 -> 0.064`) but overfit after its epoch-21 AUROC peak (`0.737`; final val BCE `1.781`). The eventual useful epoch count is unknown, so validation-driven LR reduction is safer than fixing a cosine horizon; `val_bce` is smoother for scheduling while `val_auroc` remains the model-selection endpoint. The revised pilot stopped at epoch 22 with best epoch 7 (`AUROC 0.738`, `AP 0.310`) | Resume `matched_b0_test/08_12`; retain 200 epochs / 10-epoch freeze / clip 1.0; fix a 40-epoch cosine horizon before the pilot; drive LR reductions from noisy AUROC; change data, loss, or architecture simultaneously | 2026-08-14 |
+| Force Baseline 1 multiprocessing temporary files to `/tmp/vai-baseline1-{uid}` by setting `TMPDIR`, `TEMP`, `TMP`, and `tempfile.tempdir` before DataLoader construction | The project environment points `TMPDIR` at NFS-backed `.tmp`; worker finalizers then emit repeated `_remove_temp_dir` tracebacks when `.nfs*` files remain open. Local `/tmp` avoids NFS unlink semantics without changing training or saved artifacts | Ignore the shutdown traceback; set only `tempfile.tempdir`; use zero DataLoader workers | 2026-08-14 |
+
 ## TODO
 
 <!-- Features to implement -->
@@ -604,6 +627,18 @@ fracture probabilities.
 
 | Date | Changes |
 |------|---------|
+| 2026-08-14 | Redirected Baseline 1 multiprocessing temporary files from NFS-backed `.tmp` to `/tmp/vai-baseline1-{uid}` after the completed revised fold-0 run emitted repeated DataLoader finalizer cleanup tracebacks. The run artifacts were intact; this is an exit-cleanup fix for subsequent runs. |
+| 2026-08-14 | Completed and then user-refined the Baseline 1 `matched` parameter audit. The diagnostic fold-0 run learned but severely overfit after epoch 21. The final revision removes the stale 10-epoch freeze, uses two-epoch all-layer warmup followed by `ReduceLROnPlateau(val_bce)`, keeps AUROC-based checkpointing/early stopping, raises global clip from 1.0 to 5.0, saves scheduler state for exact resume, adds clip-rate and validation score-gap diagnostics, and isolates the revised B0 run under `test-2/matched_b0_v2`. The old checkpoint is incompatible and must not be resumed. |
+| 2026-08-12 | Deferred Baseline 1 schedule changes to the next session by user decision. The next review must jointly reconsider freeze duration, differential backbone/head LR, warmup transitions, cosine horizon, epoch budget, early-stopping eligibility/patience, and total optimizer updates. The current fold-0 partial run is a diagnostic smoke run and must not be used as an experimental result or resumed under a revised schedule. |
+| 2026-08-12 | Flagged the Baseline 1 `matched` optimization schedule for revalidation: it was selected for the superseded 536-bag cohort (about 430 training bags, 27 steps/epoch), but the natural-prevalence cohort now supplies 2,122-2,125 training bags per fold (about 133 steps/epoch) while retaining the same 200-epoch schedule. No LR behavior was changed pending an explicit experiment-design decision. |
+| 2026-08-12 | Added immediate Baseline 1 startup-stage logs and per-batch train/validation/final-checkpoint progress with running BCE. Epoch-start output explicitly identifies first-batch worker startup and prefetch, making NFS/data-augmentation latency observable instead of leaving the terminal silent after W&B initialization. |
+| 2026-08-12 | Made the Baseline 1 training entry point directly executable as `uv run python fracture_detection/baseline1/train.py` from the repository root. The script derives and adds the project root before package imports, preserves module execution, and has a subprocess `--help` regression test. |
+| 2026-08-11 | Added fixed `pos_weight=2.0` to every Baseline 1 configuration after restoring the matched cohort to the full-data prevalence. The same weight is applied to broadcast plane BCE during training and validation, saved in local/W&B effective configs and checkpoints, and config validation rejects missing or alternative values. Baseline 2 remains a separate unimplemented decision and is not changed by this entry. |
+| 2026-08-11 | Replaced the unused 50:50 Baseline-1/Baseline-2 comparison cohort with a natural-prevalence cohort. It retains all 268 annotated positive bags and deterministically samples 2,387 negative bags in proportion to the full manifest's fold-by-level negative distribution, allows multiple vertebrae per patient, and matches full prevalence (10.094% versus 10.095%). The new frozen cohort has 2,655 bags/1,498 patients and SHA256 `91de42ca0475b570efb9392218c9aca0b43ce05373ecf9ec761f8527c99c6bb1`; it supersedes the never-trained 536-bag artifact. |
+| 2026-08-11 | Implemented and verified the fixed matched cohort and Baseline 1. The cohort is SHA256-pinned at `b120cc7593e439ae58c44d4b8eb607505cb4b4a64120a951c32ab6feab058cb4` and enforces `train.csv` `patient_overall == 0` for every sampled negative. Baseline 1 now provides six-channel CT/whole-mask loading, non-reflective bag-coherent augmentation, timm EfficientNetV2 + BiLSTM, broadcast plain BCE with mean-sigmoid scoring, matched/full schedules, shared full-data staging, fold-safe local/W&B management, and pooled vertebra-only OOF evaluation. Related unit tests, static checks, and one real-bag forward/loss/backward smoke test pass; no training run has started |
+| 2026-08-11 | Added the user-requested Baseline 1 experiment-management contract based on `Unet/line_only`: `experiment.phase/name` derive isolated local outputs, the CLI-resolved effective config is saved, each fold is one optional W&B run, epoch metrics and best/final summaries are logged, and local checkpoints/predictions remain the source of truth rather than W&B artifacts |
+| 2026-08-11 | Made Baseline 1's inclusive execution range mandatory in YAML as `data.start_fold` / `data.end_fold`, kept `data.n_folds=5` as the frozen split count, validated the range explicitly, and changed the CLI fold arguments into optional recorded overrides |
+| 2026-08-11 | Drafted the approval-gated Baseline 1 implementation plan: first freeze the shared matched cohort, then implement the six-channel data adapter, CNN+BiLSTM objective, staged optimizer/trainer, shared full-data staging cache, and pooled OOF evaluator. The audit also identified two contract fixes required before training: fracture-free patients must be verified against `train.csv` rather than the complete-bag manifest alone, and Baseline 1 needs a vertebra-only common evaluation entry point instead of dummy region scores |
 | 2026-08-11 | Unified the fracture input under `data/rsna_data/fracture_dataset/`. `fracture_dataset_blind` was a composite view containing 234 real rebuilt bbox-study directories plus 1,778 symlinks to `fracture_dataset`; the 234 real directories were overlaid onto the full dataset with blind content taking precedence, transferring 1,712 content-different files (2.27 GB) without deleting target-only bags. All fracture runtime paths now use the unified dataset; the complete modeling cohort remains 13,928 bags/2,010 studies |
 | 2026-08-11 | Fixed the Baseline-1/Baseline-2 data comparison contract. Both primary matched runs use the exact same pinned 536 bags from 428 patients: 268 annotated bags/160 patients plus 268 vertebra-negative bags from 268 distinct, non-overlapping patients, selected one vertebra per patient with fold-by-level counts matched exactly. Baseline 1 additionally supports a separately named `full` mode using all 13,928 bags/2,010 patients. In five-fold CV the matched training folds contain 340-345 patients; full training folds contain 1,608 patients |
 | 2026-08-11 | Restricted `fracture_detection/common/` to invariant infrastructure only: manifest, dataset, ordinary reusable region BCE, metrics, and tests. Removed the prematurely added two-stem model and multitask-loss wrapper; every model and model-specific objective must live in its own experiment project |
