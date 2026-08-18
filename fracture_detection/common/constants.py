@@ -6,9 +6,15 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DATASET_DIR = REPO_ROOT / "data/rsna_data/fracture_dataset"
 TRAIN_CSV = REPO_ROOT / "data/rsna_data/train.csv"
 REGION_CSV = REPO_ROOT / "data/rsna_data/fracture_region_labels_dicom.csv"
+EXCLUDED_STUDIES_CSV = REPO_ROOT / "data/rsna_data/excluded_studies.csv"
+EXCLUDED_LEVELS_CSV = REPO_ROOT / "data/rsna_data/excluded_levels.csv"
 FOLD_OUTPUT_DIR = REPO_ROOT / "fracture_detection/folds/outputs"
 INVENTORY_CSV = FOLD_OUTPUT_DIR / "bag_inventory.csv"
 FOLDS_CSV = FOLD_OUTPUT_DIR / "folds.csv"
+INPUT_MANIFEST_CSV = REPO_ROOT / "fracture_detection/common/outputs/input_manifest.csv"
+INPUT_MANIFEST_META_JSON = (
+    REPO_ROOT / "fracture_detection/common/outputs/input_manifest_meta.json"
+)
 
 LEVELS = ("C1", "C2", "C3", "C4", "C5", "C6", "C7")
 REGION_COLUMNS = ("region_1", "region_2", "region_3", "region_4")
@@ -26,6 +32,8 @@ MASK_CHANNELS = 5
 CT_CHANNELS = 5
 N_PLANES = 15
 N_REGIONS = 4
+EXPECTED_MANIFEST_ROWS = 13_432
+EXPECTED_MANIFEST_STUDIES = 2_009
 
 BAG_FILE_COLUMNS = ("ct_bytes", "vertebra_mask_bytes", "region_4class_bytes")
 MANIFEST_COLUMNS = (

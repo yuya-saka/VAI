@@ -5,13 +5,12 @@ import torch
 from fracture_detection.common.losses import region_bce
 
 
-def test_region_bce_uses_entailed_negatives() -> None:
-    region_logits = torch.zeros((4, 4), requires_grad=True)
+def test_region_bce_uses_only_explicitly_valid_targets() -> None:
+    region_logits = torch.zeros((3, 4), requires_grad=True)
     region_targets = torch.tensor(
         [
             [1.0, 0.0, 0.0, 1.0],
             [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0],
             [0.0, 0.0, 0.0, 0.0],
         ]
     )
@@ -20,15 +19,24 @@ def test_region_bce_uses_entailed_negatives() -> None:
             [True, True, True, True],
             [True, True, True, True],
             [False, False, False, False],
-            [False, False, False, False],
         ]
     )
-    vertebra_targets = torch.tensor([1.0, 1.0, 0.0, 1.0])
 
-    loss = region_bce(region_logits, region_targets, region_valid, vertebra_targets)
+    loss = region_bce(region_logits, region_targets, region_valid)
     loss.backward()
 
     assert torch.isclose(loss, torch.tensor(0.6931472), atol=1e-6)
     assert region_logits.grad is not None
-    assert torch.any(region_logits.grad[2] != 0)
-    assert torch.all(region_logits.grad[3] == 0)
+    assert torch.any(region_logits.grad[:2] != 0)
+    assert torch.all(region_logits.grad[2] == 0)
+
+
+def test_region_bce_returns_differentiable_zero_without_annotations() -> None:
+    logits = torch.ones((2, 4), requires_grad=True)
+
+    loss = region_bce(logits, torch.zeros_like(logits), torch.zeros_like(logits).bool())
+    loss.backward()
+
+    assert loss.item() == 0.0
+    assert logits.grad is not None
+    assert torch.all(logits.grad == 0)

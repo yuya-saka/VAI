@@ -115,3 +115,24 @@ scripts/
 !fracture_detection/common/tests/*.py
 !fracture_detection/common/outputs/input_manifest.csv
 !fracture_detection/common/outputs/input_manifest_meta.json
+!fracture_detection/common/outputs/level_floor_predictions.csv
+!fracture_detection/common/outputs/level_floor_metrics.json
+!fracture_detection/common/outputs/region_floor_power.json
+
+# fracture_detection reproducibility inputs and tests
+!fracture_detection/folds/outputs/
+!fracture_detection/folds/outputs/*.csv
+!fracture_detection/folds/outputs/*.json
+!fracture_detection/baseline0/config/
+!fracture_detection/baseline0/config/*.yaml
+!fracture_detection/baseline0/config/*.py
+!fracture_detection/baseline0/cli/
+!fracture_detection/baseline0/cli/*.py
+!fracture_detection/baseline0/data/
+!fracture_detection/baseline0/data/*.py
+!fracture_detection/baseline0/modeling/
+!fracture_detection/baseline0/modeling/*.py
+!fracture_detection/baseline0/training/
+!fracture_detection/baseline0/training/*.py
+!fracture_detection/baseline0/tests/
+!fracture_detection/baseline0/tests/*.py

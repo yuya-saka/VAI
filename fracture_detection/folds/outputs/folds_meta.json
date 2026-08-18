@@ -1,0 +1,14 @@
+{
+  "seed": 20260807,
+  "n_folds": 5,
+  "feature_columns": [
+    "region_2",
+    "region_3",
+    "region_1",
+    "region_4",
+    "annotated_bags",
+    "positive_vertebrae",
+    "bags"
+  ],
+  "n_studies": 2010
+}

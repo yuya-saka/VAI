@@ -1,4 +1,4 @@
-"""Baseline 1のAdamWパラメータ群と段階的な学習率制御。"""
+"""Baseline 0のAdamWパラメータ群とRSNA準拠の学習率制御。"""
 
 from __future__ import annotations
 
@@ -85,7 +85,7 @@ def create_optimizer(
 
 @dataclass(frozen=True)
 class LearningRateController:
-    """ReduceLROnPlateau前の差分学習率warmupをstep単位で適用する。"""
+    """任意のfreeze/warmupをscheduler前にstep単位で適用する。"""
 
     steps_per_epoch: int
     freeze_backbone_epochs: int
@@ -169,34 +169,24 @@ class LearningRateController:
         return backbone_lr, head_lr
 
 
-def create_plateau_scheduler(
+def create_cosine_scheduler(
     optimizer: torch.optim.Optimizer,
-    factor: float,
-    patience: int,
-    threshold: float,
-    cooldown: int,
+    max_epochs: int,
     backbone_min_learning_rate: float,
     head_min_learning_rate: float,
-) -> torch.optim.lr_scheduler.ReduceLROnPlateau:
-    """val BCEを監視する差分minimum LR付きplateau schedulerを返す。"""
-    minimum_learning_rates: list[float] = []
-    for parameter_group in optimizer.param_groups:
-        category = parameter_group.get("category")
-        if category == "backbone":
-            minimum_learning_rates.append(backbone_min_learning_rate)
-        elif category == "head":
-            minimum_learning_rates.append(head_min_learning_rate)
-        else:
-            raise ValueError("optimizer parameter groupのcategoryが不正です")
-    return torch.optim.lr_scheduler.ReduceLROnPlateau(
+) -> torch.optim.lr_scheduler.CosineAnnealingLR:
+    """75 epochでrestartしないRSNA Type1相当のcosine schedulerを返す。"""
+    if max_epochs < 1:
+        raise ValueError("max_epochsは1以上である必要があります")
+    if backbone_min_learning_rate != head_min_learning_rate:
+        raise ValueError("cosine schedulerではbackbone/headのminimum LRを一致させます")
+    minimum_learning_rate = backbone_min_learning_rate
+    if not math.isfinite(minimum_learning_rate) or minimum_learning_rate < 0:
+        raise ValueError("minimum learning rateは0以上の有限値である必要があります")
+    return torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        mode="min",
-        factor=factor,
-        patience=patience,
-        threshold=threshold,
-        threshold_mode="rel",
-        cooldown=cooldown,
-        min_lr=minimum_learning_rates,
+        T_max=max_epochs,
+        eta_min=minimum_learning_rate,
     )
 
 

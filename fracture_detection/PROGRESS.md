@@ -4,44 +4,60 @@
 > 学習モデル・fold定義などは**プロジェクト単位のサブディレクトリ**に分けて作っていく。
 > このファイルは各プロジェクトの状態を一覧する進捗台帳。詳細な経緯は
 > `.claude/docs/work-logs/2026-08/` と `.claude/docs/DESIGN.md` を参照。
+>
+> **現行計画は2026-08-17の設計転換以降のもの。**
+> それ以前の旧4アーム計画（Baseline 2 / 提案A / 提案B / matched学習）の記録は
+> `PROGRESS_ARCHIVE_4arm.md` に分離した。やっていることが根本的に異なるため、
+> 旧ファイルの設計判断・数値・タスクは現行計画には適用しない。
+>
+> 🔧 **2026-08-18に設計凍結・未決事項ゼロ。実装フェーズに入る。**
+> 実装だけなら
+> `.claude/docs/work-logs/2026-08/2026-08-18-implementation-handoff.md`
+> と `memo/計画書/提案手法.md` を読めば足りる（設計の経緯は読まなくてよい）。
 
 ---
 
 ## 全体像
 
-4アームの比較実験（詳細は `memo/計画書/提案手法.md`）:
+**設計転換（2026-08-17）**: 一部症例だけでの学習（matched 2,655 bag）は過学習することが
+fold 0診断runで実測されたため、**品質除外済み全13,432 bagを使う hard parameter sharing型MTL +
+missing-label masking** へ切り替えた（詳細は `memo/計画書/提案手法.md`）。
 
-| アーム | 内容 | 領域ラベル268の扱い |
-|---|---|---|
-| Baseline 1 | CT+全体mask → 椎体分類（CNN+LSTM） | 不使用 |
-| Baseline 2 | 4領域独立モデル | 教師あり |
-| 提案A | 半教師あり（teacher → pseudo-label → student） | 教師あり + pseudo-label |
-| 提案B | 弱教師あり（y_whole = OR(y_regions)） | 評価専用 |
+| アーム | 入力 | 4領域の扱い | 出力 | 領域ラベル268の扱い |
+|---|---|---|---|---|
+| Baseline 0 | CT + whole mask（6ch） | なし（single task） | whole | 不使用 |
+| **Control** | **CT + whole mask（6ch）** | **MTLのみ・領域maskを与えない** | 4 regions + whole | region loss教師（masking） |
+| Baseline 1 | CT + whole + 4 masks（10ch） | 6ch Early Fusion（shared backbone + region head 4 logits） | 4 regions + whole | region loss教師（masking） |
+| Proposed | CT + whole + 4 masks（10ch） | mask-guided 4 branches（PMGAN式attention制約） | 4 regions + whole | region loss教師（masking） |
 
-## 確定済みの前提（2026-08-11更新）
+**Controlは交絡分離用の対照アーム**（2026-08-17追加）。Baseline 0とBaseline 1は入力・
+region head・region supervision・samplerが同時に変わるため、両者の差では
+「4領域maskの効果」を主張できない。Controlを挟むと1段につき1要素だけが変わる:
+
+```text
+Baseline 0 → Control    差 = マルチタスク化の効果（入力は同一6ch）
+Control    → Baseline 1 差 = 4領域mask入力の効果（入力チャンネル以外すべて同一）
+```
+
+Baseline 0はregion logitを出さないため領域エンドポイントで比較できないが、Controlは出せる。
+Control vs Baseline 1 は rho≈0.9 / macro-AP MDE 0.027 で、268の母数で唯一検出力のある比較型
+（Baseline 1 vs Proposed は構造差のため rho 0.5〜0.7 / MDE 0.047〜0.059）
+
+* 学習は全アームとも **品質除外済みfull 13,432 bag**。損失は `L = L_whole + λ·m·L_region`
+  （mは領域ラベル有無のマスク。missing labelを0扱いしない）
+* 領域ラベル268 bagは全体の約2%のため **two-stream sampling** で各バッチに混入させる
+* Control / Baseline 1 / Proposed は whole出力を **方式A（region aggregation）/
+  方式B（独立whole head）** の2通りで比較する
+* ⚠️ 名称注意: 旧Baseline 1（CT+whole mask）は**新Baseline 0**。
+  実装は `baseline0/` へ移行済みで、full設定のみを受け付ける
+
+## 確定済みの前提
+
+### 入力・データ（旧計画から継続、変更不可）
 
 - 入力は統合済み `data/rsna_data/fracture_dataset/`（2.5D、**15面固定**、全アーム共通・変更不可）
-- **bag母集団は3ファイル完備の13,928 bag / 2,010 study**（region_4class.npyのみ欠落の127 bagを全アームから除外。うち陽性椎体29。完備bagが0件の2 studyはfold外）
+- **bag母集団はStage1と同じ品質除外を適用した13,432 bag / 2,009 study / 陽性1,332**。3ファイル完備13,928 bagから`excluded_studies.csv` / `excluded_levels.csv`と交差する496 bagを除外し、除外CSVのSHA256もmanifest metadataへ固定する。領域注釈268 bagは維持
 - 領域ラベルCSVは同一椎体の全runを **OR集約**する。`folds/load_labels.py` が唯一の実装
-- 「6ch入力」は実データでは各面 5CT ch + 5mask ch = 10ch。2-stemで吸収
-- Baseline 1 matched / Baseline 2 は同じ固定2,655 bag・1,498患者を使用する。
-  内訳は領域アノテーション済み陽性268 bag・160患者 + 椎体陰性2,387 bag。
-  陽性率10.094%は`full`の10.095%と一致し、陰性のfold別level別件数も`full`の陰性分布に比例させる
-- Baseline 1は`matched`（2,655 bag・1,498患者）と`full`（13,928 bag・2,010患者）を切替可能にする
-- Baseline 1の`BCEWithLogitsLoss`は`matched`・`full`とも`pos_weight=2.0`に固定する
-- Baseline 2の損失は通常BCE（P/H/N重み・pos_weight・focalなし）
-- **bag確率は 15面 broadcast + 面ごとBCE + mean-sigmoid**（2026-08-11ユーザー決定。
-  Codex推奨のbag-level log-mean-exp は却下）。対応する単一尤度が存在しない点は登録済み限界
-- **モデル選択は val AUROC の early stopping**（2026-08-11ユーザー決定。
-  Codex推奨の固定epoch+EMAは却下）。OOFの楽観バイアスは登録済み限界
-- **held-out test は作らない**。5-fold OOFのみ（268という領域評価の母数を削れないため）
-- **matchedのbackboneは `tf_efficientnetv2_b0` が主解析**、`tf_efficientnetv2_s` は感度分析。
-  fullは `tf_efficientnetv2_s`
-- **回転augmentationは ±40°まで**（2026-08-11ユーザー決定。Codex推奨の±10-12°は不採用）。
-  境界は constant fill（反射境界は四隅に鏡像解剖を作るため使わない）。
-  distortion / cutout / mixup は全設定OFF
-- **ステージングは `full` のみ**。`matched`（2.8 GB）はページキャッシュに乗るため直読み
-- **各プロジェクトに `README.md` を置き、モデル内容を記載する。仕様変更のたびに更新する**
 - **領域ラベルは run をまたいだ OR 集約**。run = 同一椎体内で連続するbboxのかたまり＝別々の骨折部位
   （17椎体が複数run、うち6椎体は別部位が別領域に及ぶ）。アノテータ確認済み（2026-08-07）で各runのラベルは正しい。
   確定値 **268 bag / 160 study / R1 78 / R2 59 / R3 72 / R4 158**、複数領域陽性70、R2 xor R3 = 95
@@ -49,175 +65,311 @@
   ラベル自体は横突孔として判定されていることをアノテータが確認（2026-08-07）。文言のみ修正済み
 - **R2/R3 の「右」「左」は画像基準**。class2は画像右（平均x=155、class3は66）＝患者の左。
   ラベル・マスク・クラス番号は相互整合しており学習/評価に影響なし。臨床的な左右の記述時のみ反転が必要
-- 評価: 椎体AUROC（**13,928 bag / 陽性1,406**、確証的）/ 領域AP（268のみ、床ゲート）/
-  SideAcc balanced（95、ゲート0.65）
-  ⚠️ **床（R1 0.59 / R2 0.37 / R3 0.45 / R4 0.72）と検出力は旧ラベル（77/71/155）で算出されたもの。
-  事前登録前に補正ラベルで再計算が必要**
+- **flip / transpose augmentation は使用しない**。格納済みの画像方向とR2/R3対応を全アームで維持する
+  （SideAcc廃止後も、R2/R3のラベルとmaskの対応は領域別AP評価に必要なため方針は不変）
+- **augmentationはStage1準拠、flip系だけ除外**（2026-08-18ユーザー決定）。horizontal/vertical flipとtransposeは使わず、brightness、Affine（shift 0.3 / scale 0.7–1.3 / rotate ±45° / `BORDER_REFLECT_101`）、blur/noise、distortion、cutoutを同じ確率で使う。natural streamのbatch-level mixupも`p=0.2`、`λ∼U(0,1)`
+- ステージングはfull学習用のinput-manifest SHA256単位共有`/dev/shm` cacheを使用
+
+### モデルと損失（2026-08-17設計転換で確定）
+
+- **学習は全アームとも品質除外済み full 13,432 bag**（一部症例のみでの学習は廃止）
+- 「6ch入力」は実データでは各面 5CT ch + 5mask ch = 10ch。
+  **単純early fusion（入力convでconcat）**とする（旧2-stem案は廃止）
+- **損失は `L = L_whole + λ·m·L_region`**。領域ラベルのないbagはregion lossをマスクし、
+  missing labelを0扱いしない。region lossは通常BCEの4領域平均
+- **椎体陰性bagへの論理的0教師は使わない**。region lossは領域ラベルのある268 bagのみで計算する
+- **two-stream sampling**: annotated 268 bagが約2%しかないため、
+  Whole用/Detail用の2 streamで各バッチにannotated bagを一定割合混入させる
+- **whole lossの`pos_weight=2.0`は全アームで固定**。Stage1と同じく陽性損失を2倍し、重み合計で正規化する
+- **方式Aの集約関数は max のみ。noisy-ORは全アームから削除**（2026-08-18確定）
+- **Proposedのmask注入はPMGAN方式のattention制約**（参考論文:
+  `memo/research_paper/胸部疾患分類のための部位認識型マスク誘導型アテンション.pdf`）。
+  各領域branchのMask-Guided Attentionが出すspatial attention mapを対応領域maskへ
+  RMSE損失で回帰させ、特徴は残差形式 `(1+m)⊗f` で再重み付けする。
+  maskの直接乗算・poolingをしないためhard pooling禁止と整合。損失重みβはloss-balance実測
+- **mask-average pooling / per-region hard pooling は全アーム禁止**（PI決定2026-08-04、継続有効）
+- **bag確率は 15面 broadcast + 面ごとBCE + mean-sigmoid**（2026-08-11ユーザー決定。
+  Codex推奨のbag-level log-mean-exp は却下）。対応する単一尤度が存在しない点は登録済み限界
+- backboneは `tf_efficientnetv2_s`
+
+### 評価プロトコル（2026-08-17確定）
+
+- **fold分割は凍結済み `folds/outputs/folds.csv` を全アームでそのまま使用**（再生成しない）。
+  監査済み: 患者リークなし、fold別prevalence 10.08〜10.13%、level別bag数399〜402、
+  annotated bag 53〜56、R1〜R4も層別済み
+- **outer foldは評価専用。モデル選択は cyclic single-inner-fold**
+  （2026-08-11の「outer foldでval AUROC early stopping」は廃止）:
+  outer=k / inner=(k+1)%5 / 残り3 fold（8,048〜8,074 bag / annotated 159〜162）で学習し
+  innerでcheckpoint選択（early stopping）→ 事前指定したAUROC-best / PR-AUC-bestを
+  outerへ各1回だけ適用しpooled OOFへ
+- **1構成あたり5 run**（2026-08-17ユーザー決定）。
+  Stage 2再fit（4 foldで固定epoch再学習）を行う10 run版は計算資源とのトレードオフで**不採用**
+- checkpoint選択metricは全アーム共通で**innerの椎体AUROC**（innerのR2陽性11-12件では領域AP選択が不安定）
+- early stoppingは**innerの椎体BCE**で判定し、15 epoch連続で改善しなければ停止する
+- LRはRSNA Type1準拠の固定cosine（`2.3e-4`→`2.3e-5`、75 epoch単一周期）。innerはAUROC checkpoint選択とBCE early stoppingだけに使う
+- 計算量は旧方式（4 fold学習＋outerでearly stopping）の**0.75倍**。fold数が4→3に減るだけ
+- ⚠️ **登録すべき限界**: 報告する全モデルは3 fold（全データの60%）学習で、
+  領域教師は各fold 215→約160 bagへ25%減る。**絶対性能の主張はしない**。
+  主張は全アーム同条件での比較（相対差）に限定する。handicapは全アームに等しくかかる
+- **held-out test は作らない**。上記nested選択でバイアスを断つ。
+  ランダム患者20% testは領域母数を268→214（R2 59→47）に削るため不可。
+  **「非annotated studyのみからtest抽出」案も採用不可**（annotated studyはprevalence 31.50% /
+  骨折椎体2.19本、非annotatedは8.24% / 1.34本と別集団。positivity違反で補正不能。
+  詳細は [[project-annotation-selection-bias]]）。独立外部cohort検証は将来課題として登録。
+  研究の表現は「patient-grouped nested internal cross-validationによる評価」とする
+- 評価: 椎体AUROC（**13,432 bag / 陽性1,332**、確証的）/
+  **領域別AP を R1 / R2 / R3 / R4 個別に**（268のみ、床ゲート付き。macro平均へ潰さない）
+- **SideAcc（左右balanced accuracy）は使用しない**（2026-08-17ユーザー決定）。
+  左右の判別能は R2 / R3 それぞれのAPで見る。
+  `common/metrics.py::side_balanced_accuracy` は実装・返り値から削除済み
+  ⚠️ **旧記録の床（R1 0.59 / R2 0.37 / R3 0.45 / R4 0.72）は使わない。**
+  確定仕様（**cross-fitted OOF: 3 training foldsからJeffreys平滑化
+  `(x+0.5)/(n+1)`**）で再計算し、**R1 0.4946 / R2 0.2863 /
+  R3 0.4222 / R4 0.7059**を凍結した。macro値は正式endpointとして出さない。
+  APのtie処理はscikit-learn 1.9.0の`average_precision_score`（同一thresholdを一括処理）に固定。
+  成果物は`common/outputs/level_floor_metrics.json`と`level_floor_predictions.csv`
+- **領域別APの評価母集団は 268陽性のみ**（2026-08-18確定）。
+  椎体陰性12,522 bagを混ぜるとlevel-only floorが macro 0.5026→0.0105 まで機械的に潰れ、
+  異なる母集団間のAP比較が無意味になる（実測）。局在（どの領域か）と検出（骨折の有無か）は
+  別エンドポイントに分ける
+  領域別MDEは補正ラベルとcross-fitted床の患者cluster bootstrap SEから再計算済み。
+  近似方法・rho別・Holm最悪順序の値は`common/outputs/region_floor_power.json`へ固定
   ⚠️ 旧記載の母数 14,133 / 陽性1,444 は誤り（2026-08-11修正）。確証的評価の分母・陽性数・検出力は
   凍結manifest `common/outputs/input_manifest.csv` から導出すること
 - fold / seed / 入力manifest / 集約規則 / 学習予算は全アームで統一
-- 提案Aの teacher・pseudo-label は outer fold 内で完結させる
-- **flip / transpose augmentation は使用しない**。格納済みの画像方向とR2/R3対応を全アームで維持する
+
+### 運用
+
+- **各プロジェクトに `README.md` を置き、モデル内容を記載する。仕様変更のたびに更新する**
+
+### 検定計画・損失構成・λ校正（2026-08-18確定）
+
+Codexの回答（全文 `.claude/docs/codex/20260818-remaining-four-decisions.md`）を
+ユーザー承認のうえ採用。詳細は `memo/計画書/提案手法.md` 第2・4〜7節。
+
+**実行構成は6つ / 30 run**（旧11構成・55 runから削減）:
+
+| # | 構成 | 役割 |
+|---|---|---|
+| 1 | Baseline 0 | はしごの起点 |
+| 2 | Control–B | MTL化の効果 |
+| 3 | Baseline 1–B | **primary対比の相手** |
+| 4 | Proposed–B, β>0 | 明示的対応 / **床ゲート対象** |
+| 5 | Proposed–max, β>0 | whole出力方式 / **secondary対比** |
+| 6 | Proposed–max, β=0 | attention回帰の新規性 |
+
+- **noisy-ORは全アームから削除**。whole lossをregion logitsへ直接流すため、
+  単なる推論時集約ではなく弱いregion supervision経路まで変えてしまう。方式Aはmaxのみ
+- Controlはmethod Bのみ。method Bをはしご全アームの基準にする
+
+**検定計画（固定順序2仮説のみが確証的）**:
+- `H1: AUROC(Baseline 1–B) > AUROC(Control–B)` — 4領域mask入力そのものの効果
+- `H2: AUROC(Proposed–max, β>0) > AUROC(Proposed–max, β=0)` — attention回帰の新規性
+- endpointは両方とも13,432 bagのpaired pooled-OOF椎体AUROC
+- **固定順序 H1→H2**。H1が有意なときだけH2を確証的に検定。H1が落ちたらH2は探索的
+- 判定は patient-cluster bootstrap の paired差 95%両側CI下限 > 0
+- key-secondary: Control–B vs Baseline 1–B の領域別AP差 / 床ゲートfamily
+- ⚠️ 領域APをprimaryにしない理由: macro廃止で4仮説familyになり、
+  **既存MDEはmacro-APの値なので各領域の検出力を保証しない**（要再計算）
+
+**two-stream損失構成**:
+- `A_t`（annotated、**1 bag/step固定**）は **`L_region` にのみ寄与**。`L_whole`にも`L_att`にも寄与させない
+- `L_att`はnatural stream上で計算（maskは全bagにあるため）
+- **Baseline 0も同一natural sampler・同一 `W_t`・同一optimizer step数**を使う
+  （annotated streamのforwardをしないだけ）→ whole taskの分布・勾配が全アーム完全一致
+- epoch長はnatural streamの一巡で定義。`L_whole`は常に `B_W` でmean（`B_W+1`で割らない）
+- 全アームで同じnatural-stream seed / 順序
+- annotated samplerはbag単位のshuffle-without-replacement cycle
+
+**λ / β 校正（grid探索なし・追加full run 0）**:
+- 各outer foldで、optimizer更新前に3 training foldsから決定論的に64 calibration batch。
+  eval mode（BN統計もparameterも更新しない）、最後のshared CNN blockで損失別gradient L2 norm
+- `λ_k = clip_[1e-2,1e2]( 0.5·exp( median_b log((g_whole+ε)/(g_region+ε)) ) )`、reference Baseline 1–B
+- `β_k` も同型、reference Proposed–B、`g_att` を使用。ε = 1e-12
+- **同一λ_kを全アーム・全構成へ適用。arm別チューニングは禁止**（ControlとB1でλが違えば交絡）
+- 混合比は調整しない。非有限gradientが出たらrunを開始せず停止。
+  clipping到達はログするが結果を見て変更しない
+- 追加コストは5 fold × (64+64) = 640 calibration batchのみ
+
+## 未決事項
+
+なし（2026-08-18に全て解消）。ただし**学習開始前に必ず実施する作業**が次タスク1にある。
+
+## 廃止済み（2026-08-17設計転換）
+
+詳細な記録は `PROGRESS_ARCHIVE_4arm.md`。
+
+- Baseline 1 `matched`設定（固定2,655 bag・1,498患者コホートでの学習）→ 過学習のため廃止。
+  `cohorts/`の凍結成果物（SHA256 `91de42ca…`）は削除せず保持するが学習には使わない
+- Baseline 2（4領域独立モデル）・提案A（teacher→pseudo-label→student）・
+  提案B（弱教師あり、268評価専用）→ 全廃。268はregion lossの教師として直接使用する
+- matched用backbone `tf_efficientnetv2_b0` 主解析・V2-S感度分析の区分 → matched自体の廃止に伴い失効
+- 2-stem（image stem / mask stem）→ 単純early fusionへ置換
+- outer foldでのval AUROC early stopping → outer評価専用化とnested選択へ置換
 
 ## プロジェクト一覧
 
 | プロジェクト | ディレクトリ | 状態 | メモ |
 |---|---|---|---|
 | fold定義 | `folds/` | **完了(検証済)** | folds.csv凍結（seed 20260807）。再生成禁止 |
-| 共通基盤 | `common/` | **完了(検証済)** | manifest / dataset / 標準BCE / 評価。モデルなし |
-| matched cohort | `cohorts/` | **完了(検証済)** | 2,655 bag・1,498患者を凍結。SHA256 `91de42ca0475b570efb9392218c9aca0b43ce05373ecf9ec761f8527c99c6bb1` |
-| Baseline 1 | `baseline1/` | **改訂fold 0完了** | ReduceLROnPlateau runはepoch 22停止、best epoch 7、AUROC 0.738、AP 0.310。旧Stage1 OOF AUROC 0.921は再現目標ではない |
-| Baseline 2 | （未作成） | 未着手 | 4独立モデル / 通常BCE / 固定2,655 bag |
-| 教師ありマルチタスク | （未作成） | 未着手 | 提案AのStudent骨格 兼 Teacher |
-| 提案A | （未作成） | 未着手 | pseudo-label詳細は眼底論文読解を参照 |
-| 提案B | （未作成） | 未着手 | smooth-max主 / max・noisy-ORアブレーション |
+| 共通基盤 | `common/` | **完了(検証済)** | manifest / dataset / 明示ラベルのみのregion BCE / 領域別AP / deterministic two-stream sampler / nested split / λ・β校正 / cross-fitted床・MDE |
+| matched cohort | `cohorts/` | **廃止(成果物保持)** | 2026-08-17設計転換で学習不使用に。凍結CSVは削除しない |
+| Baseline 0 | `baseline0/` | **完了(検証済)** | 品質除外済みfull 13,432 bag専用。Stage1準拠augmentation（flip系除外）・mixup・重み合計正規化BCE・bag一括変換・uint8転送、RSNA Type1 V2-S + BiLSTM + 75 epoch cosine、3 fold学習、val BCE early stopping。旧`08_18/v1`〜`v3`はv7正式runに使わない |
+| Control (no-region-mask MTL) | （未作成） | 未着手 | 入力6chはBaseline 0と同一、head/損失/samplerはBaseline 1と同一。交絡分離用の対照 |
+| Baseline 1 (Early Fusion MTL) | （未作成） | 未着手 | 6ch early fusion / whole head + region head 4 logits / 方式A・B比較 |
+| Proposed (Mask-guided Branch) | （未作成） | 未着手 | shared CNN → 4 mask-guided branches。mask注入はPMGAN式attention制約（RMSE回帰、学習時のみ） |
 
 状態は 未着手 / 実装中 / 学習中 / 完了(検証済) / 保留 のいずれかで更新する。
 
+## 既存基盤（旧計画から引き継ぎ・現在も有効）
+
+旧4アーム計画の下で構築したが、設計転換後も**そのまま使う**成果物。
+構築経緯は `PROGRESS_ARCHIVE_4arm.md` を参照。
+
+- `folds/outputs/folds.csv` — 患者単位層別5-fold、seed 20260807、凍結・上書きガード実装済み
+- `common/outputs/input_manifest.csv` — 品質除外済み13,432 bag / 2,009 study、SHA256 `9bc0b8b91a5ff719519a63a3b2a7aa7f14476b45fade5582efb58a258ef21ac3`
+- `folds/load_labels.py` — 領域ラベルのOR集約（唯一の実装）
+- `common/` の dataset（CT 5ch + mask 5chを別テンソルで返す）・評価（椎体AUROC/AP、
+  領域別AP、患者cluster bootstrap）。
+  SideAccとmacro-APはendpoint・返り値から削除済み
+- `baseline0/` の実装基盤 — 6ch adapter、同期augmentation、timm EfficientNetV2-S + BiLSTM、
+  15面broadcast BCE / mean-sigmoid、nested outer単位の実験管理、
+  full用の共有`/dev/shm` staging、checkpoint別outer 1回制約、pooled OOF整合検証
+
 ## 進捗ログ
 
-### 2026-08-07
+### 2026-08-17（設計転換: 全データMTL + missing-label masking）
 
-- 実装計画を確定（4アーム、フェーズ順: fold定義 → 共通基盤 → B1 → B2 → 教師ありMTL → A → B）
-- ユーザー決定: 15面固定 / Baseline 2 は 268+椎体陰性bag / 実装場所は `fracture_detection/`
-- **Phase 0 完了**（`folds/`）:
-  - `check_dataset.py`: 268 annotated bag 全読込PASS（形状・dtype・mask非空・R2/R3陽性のmaskクラス存在）。
-    SHA256指紋を `outputs/annotated_bag_manifest.csv` に記録（mask版数pin）
-  - 当時のblind viewの全bag棚卸し: 14,054 bag / 2,012 study。**126 bagがregion_4class.npyのみ欠落**（アノテ済みとの重複0）
-    → bag母集団を完備13,928 bagに確定。train.csvの7 studyは画像データなし
-  - `make_folds.py`: 患者単位・貪欲層別5-fold生成。バランス実績:
-    studies 402×5 / bags 2784-2787 / 陽性椎体 281-282 / アノテstudy 31-33 /
-    アノテbag 53-54 / R1 15-16 / R2 11-12 / R3 14-15 / R4 31×5
-  - 再実行で同一出力を確認（決定性）。`outputs/folds.csv` は凍結（上書きガード実装済み）
-  - 途中、貪欲法のコスト関数バグ（限界変化でなく絶対偏差を最小化→3 foldに崩壊）を検出し修正
-- **領域ラベルdedup規則の訂正**（同日、Phase 0完了後）:
-  - 当初 `run_id` を「アノテーションのやり直し」と誤解し keep last run を採用していた
-  - ツール実装（`Unet/dicom_bbox_annotation_tool`）とbboxスライス範囲を確認した結果、
-    run = **同一椎体内の連続bboxグループ＝別々の骨折部位**（run間の空きは5〜50スライス）と判明。
-    アノテータがrunごとに画像を見て判定している
-  - ユーザー確認（各runのラベルは目視判定で正しい）を受け、**OR集約に修正**
-  - 影響: R1 77→78 / R3 71→72 / R4 155→158（R2 59は不変）、複数領域陽性 65→70、R2 xor R3 94→95。
-    bag数268・study数160は不変
-  - `load_labels.py` をOR集約に書き換え、268 bag再チェックPASS、**foldを再生成**（バランス:
-    アノテbag 53-56 / R1 15-16 / R2 11-12 / R3 14-15 / R4 31-32）
+- ユーザー決定により研究設計を全面改訂。`memo/計画書/提案手法.md` を書き換え
+- 転換理由: 一部症例（matched 2,655 bag）での学習は過学習
+  （fold 0診断run: best val AUROC 0.738、epoch 21以降val BCE悪化）
+- 新構成: 品質除外済み全13,432 bagで学習する hard parameter sharing型MTL
+  - Baseline 0: CT+whole mask → CNN+LSTM → whole（現行`baseline0/`）
+  - Baseline 1: 6ch early fusion → shared CNN+LSTM → whole head + region head 4 logits
+  - Proposed: shared CNN → mask-guided 4 branches → 各LSTM → 4 region出力
+  - whole出力は方式A（region aggregation: max / noisy-OR）と方式B（独立head）を比較
+- 学習方法は全アーム固定: `L = L_whole + λ·m·L_region`（missing region labelはloss maskで無視、
+  0扱いしない）+ two-stream sampling（annotated 268 bagをバッチへ一定割合混入）
+- 廃止: Baseline 2 / 提案A（pseudo-label）/ 提案B（弱教師）/ matched学習 / 2-stem
 
-### 2026-08-11
+### 2026-08-17（続き・未確定事項のユーザー決定）
 
-- ユーザー決定により、全アームで **flip / transpose augmentationを使用しない**方針へ変更
-- R2/R3のswap処理は共通datasetに実装せず、保存済み画像の方向をそのまま維持する
-- `fracture_dataset_blind/`の構造を再監査し、234 studyがbbox症例の再生成実体、残り1,778 studyが`fracture_dataset/`へのsymlinkであることを確認
-- blind実体234 studyを`fracture_dataset/`へ統合。内容差分1,712ファイル（2.27 GB）を上書きし、既存側だけのbagは保持
-- 全実装の入力参照を統合済み`fracture_dataset/`へ変更。統合後は14,055 bag中13,928 bagが3ファイル完備で、学習母集団13,928 bag / 2,010 studyは不変
-- **Phase 1 完了**（`common/`）:
-  - fold・棚卸し・椎体ラベル・OR集約領域ラベルから共通manifestを生成
-  - 13,928 bag / 2,010 study / 領域アノテーション268 bagを再確認し、SHA256で固定
-  - CT 5chと全体+R1〜R4 mask 5chを別テンソルで返すdatasetを実装
-  - 有効な領域targetと椎体陰性の論理的0 targetへ通常BCEを適用
-  - 椎体AUROC/AP・領域別AP・SideAcc balanced・患者bootstrap評価を実装
-  - 単体テスト4件、ruff、mypy、実データ読込を確認
-  - モデルとモデル固有損失は`common/`へ置かず、各実験プロジェクトで実装する
-- **Baseline 2計画を単純化**（陰性268 bag案は後続変更で廃止）:
-  - 4領域それぞれの独立モデルに通常の`BCEWithLogitsLoss`を使用
-  - アノテ268 bagと、別患者から1椎体ずつ選ぶ固定陰性268 bagを使用
-  - P/H/N層別重み、`pos_weight`、focal lossは使用しない
-- **Baseline間のデータ数を統一**（536 bag案は後続変更で廃止）:
-  - Baseline 1 matchedとBaseline 2は同じ固定536 bag・428患者を使用
-  - fold別・椎体level別の陰性件数をアノテーション側と一致させる
-  - Baseline 1のみ全13,928 bag・2,010患者を使う`full`設定も用意する
+- **論理的0教師は使わない**: region lossは領域ラベルのある268 bagのみ。
+  `common/losses.py`の椎体陰性への論理的0適用は実装時に削除・整合が必要
+- **方式Aの集約関数（max / noisy-OR）はアブレーション**として両方比較
+- **Proposedのmask注入はPMGAN方式**（参考論文を精読済み）。
+  領域ごとのMask-Guided Attentionのspatial attention mapを対応maskへRMSE回帰
+  （L_att、学習時のみ）、特徴再重み付けは残差形式 `(1+m)⊗f`。
+  全体損失は `L = L_whole + λ·m·L_region + β·L_att`
+- **pos_weight=2.0は全アーム固定**
+- **fold分割は凍結folds.csvを全アームで再利用**することを確認。
+  提案A廃止でfold内teacher制約は消滅
 
-### 2026-08-11（続き・Baseline 1 設計確定）
+### 2026-08-17（続き・fold設計とtest分離のレビュー）
 
-- Codexへ設計相談（`.claude/docs/codex/20260811-2100-baseline1-design.md`）。
-  ユーザーが7論点のうち4件を決定:
-  - bag確率は**旧方式維持**（15面broadcast + mean-sigmoid）。Codexのbag-level log-mean-exp案は却下
-  - モデル選択は**旧方式維持**（val AUROC early stopping）。Codexの固定epoch+EMA案は却下
-  - matchedのbackboneは**B0が主・V2-Sを感度分析**
-  - fold分割は現状のまま（held-out test を作らない）
-- 陰性プールを**骨折なし患者のみ**に確定。全35セル充足を実測で確認
-- Codexが採用された推奨: 回転±10-12°、distortion/cutout/mixup OFF、
-  matchedの3段階LR・drop 0.1/0.1/0.4・grad clip 1.0、maskはnearest-neighbor+強度変換なし
-- **母数の誤りを修正**: 確証的評価の母数 14,133 / 陽性1,444 → **13,928 / 1,406**
-- Codex CLIが `--full-auto` により `--sandbox read-only` を上書きして `DESIGN.md` を無断編集。
-  該当セクションと changelog 1行を削除。以後 `--full-auto` は使わない
+- ユーザー依頼でfold分けとtest分離の妥当性を検証。Codex相談＋凍結manifestの実測
+- **fold分割自体は健全と確認**（患者リークなし、prevalence 10.08〜10.13%、level均等、
+  annotated bag 53〜56層別済み）。再生成しない
+- **アノテーション160 studyが陽性患者のランダム標本でないことを実測**
+  （prevalence 31.50% vs 8.24%、骨折椎体2.19本 vs 1.34本、level別annotated比率 C3 42.5%〜C7 9.4%）。
+  これにより「非annotated studyのみからtest抽出」案は positivity違反で不可と確定
+- **ユーザー承認により4点を確定**:
+  1. fold分割は現状維持（再生成なし）
+  2. held-out testは切り出さない
+  3. outer foldを評価専用にし、cyclic single-inner-foldで選択
+  4. Control（no-region-mask MTL）アームを追加
+- Codexの数値主張（SideAcc内訳 both=18 / R2-only=41 / R3-only=54）は実データと一致を確認
+- 残る未決4点（primary contrast / two-stream損失分離 / SideAcc集計と0.65ゲート定義 /
+  λ・β・混合比の決定規則）を「未決事項」へ登録
 
-### 2026-08-11（Baseline 1 初回実装完了・旧50:50コホート）
+### 2026-08-17（続き・nested選択を5 run版に確定）
 
-- `cohorts/make_matched_cohort.py` により、`patient_overall == 0` を二重確認した固定matched cohortを生成
-  - 536 bag / 428患者、annotated 268 + negative 268
-  - fold×level件数一致、negative 1患者1椎体、annotated患者との重複0
-  - frozen CSV SHA256: `b120cc7593e439ae58c44d4b8eb607505cb4b4a64120a951c32ab6feab058cb4`
-- `baseline1/` にCT 5ch + whole-mask 1chの6ch adapter、同期augmentation、timm EfficientNetV2 + BiLSTM、
-  15面broadcast BCE / mean-sigmoid、matched/fullの固定LR schedule、checkpoint resumeを実装
-- `Unet/line_only`準拠のexperiment管理を実装
-  - `experiment.phase/name`でローカル出力を分離し、実効configを保存
-  - 1 fold = 1 W&B run。epoch BCE/AUROC/AP/LR/grad normとbest/final summaryを記録
-  - checkpoint・OOF predictionはローカル正本で、W&B artifactへアップロードしない
-- full用のstagingはinput-manifest SHA256単位の共有`/dev/shm` cacheとし、同時foldが再利用する
-- OOF評価は入力ID、fold、target、score範囲、checkpointのfold設定を検証してからpoolし、
-  椎体AUROC/APと患者cluster bootstrap CIを計算する
-- 検証: related pytest **27 passed**、ruff format/check、mypy PASS、実データ1 bagのforward/loss/backward PASS
+- 「1構成10 run」の内訳を確認した結果、**Stage 2の再fitを省く5 run版を採用**（ユーザー決定）
+- 採用形: outer=k / inner=(k+1)%5 / 残り3 foldで学習しinnerでcheckpoint選択 → outer推論1回
+- **実装が単純化**: 再fitがなく、RSNA Type1準拠の固定cosineを全アームで共有する。
+  validation依存のLR軌跡の記録・再生は不要になり、「Stage 2のstep数1.33倍」の登録仕様も消滅
+- 計算量は旧方式の**0.75倍**（fold数4→3のみの差）。run数は5で従来と同じ
+- ⚠️ 代償として登録: 全報告モデルが3 fold（60%）学習、領域教師は215→約160 bagへ25%減。
+  **絶対性能の主張はしない**。主張は全アーム同条件の相対比較に限定
+- 併せて、以前の「学習コスト約2倍」という記述は run数と計算量を混同した誤りだったため訂正。
+  10 run版でも計算量は `0.75 + E_best/E_stop` 倍（実測値で約1.07〜1.45倍）であり2倍ではなかった
 
-### 2026-08-11（matched cohort自然分布化）
+### 2026-08-17（続き・SideAcc廃止）
 
-- ユーザー決定により、陽性・陰性を268件ずつにした人工的な50:50分布を廃止
-- アノテーション済み陽性268 bagを維持し、`full`の陽性1,406 / 13,928に対応する陰性2,387 bagを決定的に抽出
-- 陰性のfold×level分布を`full`の陰性分布に比例させ、同一患者の複数椎体を許可
-- 固定コホートは2,655 bag・1,498患者、陽性率10.094%、SHA256 `91de42ca0475b570efb9392218c9aca0b43ce05373ecf9ec761f8527c99c6bb1`
-- 旧536 bag・428患者の固定成果物は学習未使用のため廃止し、新しい成果物へ置換
+- ユーザー決定により **SideAcc（左右balanced accuracy）を評価指標から削除**。
+  左右の判別能を含め、局在の評価は **R1〜R4それぞれのAP** で見る（macro平均へ潰さない）
+- これに伴い未決事項の「SideAcc集計と0.65ゲート定義」は消滅し、
+  代わりに「領域別APの床ゲートと多重性補正（4検定Holm）」を未決事項3として登録
+- **帰結**: 近道（レベル情報だけで領域を当てる戦略。実測でlevel-only macro-AP 0.451）への
+  耐性は、領域別APの床ゲートだけが担うことになった。床の補正ラベル再計算（次タスク8）は
+  事前登録の前提条件として必須度が上がった
+- `common/metrics.py::side_balanced_accuracy` はendpointから外す。
+  実装の整理は次タスク2（`common/`改修）にまとめて行う
 
-### 2026-08-11（Baseline 1 pos_weight追加）
+### 2026-08-18（未決4点をCodex回答で確定）
 
-- ユーザー決定により、Baseline 1の全設定へ固定`pos_weight=2.0`を追加
-- 15面へ複製したターゲットに同じ重みを適用し、学習・検証BCEの両方で使用
-- `config.py`は2.0以外や欠落を拒否し、3つのYAMLとW&B実効設定へ値を保存
+- Codexへ未決4点＋構成削減＋妥当性確認を相談（`.claude/docs/codex/20260818-remaining-four-decisions.md`）
+- **ユーザー決定（案1）により、Codex推奨をそのまま採用**:
+  - primary は `AUROC(Baseline 1–B) > AUROC(Control–B)`、secondary は
+    `Proposed–max β>0 > β=0`、固定順序 H1→H2
+  - annotated streamは `L_region` のみ。Baseline 0も同一natural sampler・同一step数
+  - 床は cross-fitted OOF（3 foldsからJeffreys平滑化）、対象は Proposed–B β>0 のみ、
+    母集団は268陽性のみ、R1〜R4にHolm補正
+  - λ/βは outer-training のみの固定初期勾配校正、**全アームで同一λ_k**、追加full run 0
+  - **6構成 / 30 run へ削減**、noisy-ORは全アーム削除
+- **床を補正ラベルで暫定再計算**したところ旧記録値と一致しないことが判明
+  （in-sample: R1 0.5303 / R2 0.3243 / R3 0.4298 / R4 0.7259。旧値 0.59/0.37/0.45/0.72）。
+  旧値は使わず、Codex仕様どおり実装し直した値を凍結する
+- 椎体陰性を混ぜると床がmacro 0.5026→0.0105まで機械的に潰れることを実測し、
+  「268陽性のみ」という母集団指定を数値で裏付け
+- ⚠️ **macro廃止により既存MDEが失効**していることが判明（既存値はmacro-AP基準）。
+  per-region MDEの再計算を次タスク1に追加
+- Codex Q6の6つの表現制限（60% training / 268の非ランダム性 / 1 seed /
+  laterality主張の条件 / floorのleakage / 凍結タイミング）を計画書へ登録
 
-### 2026-08-11（Baseline 1 fold実行範囲の設定化）
+### 2026-08-17（続き・進捗台帳の分離）
 
-- 3つのYAMLへ`data.start_fold`と`data.end_fold`を追加し、包含範囲で学習対象foldを指定
-- `data.n_folds=5`は固定済み分割の総数、`start_fold`/`end_fold`は今回実行する範囲として分離
-- CLIの`--start-fold`/`--end-fold`は既定値を持たず、YAMLを一時的に上書きする場合だけ使用
-- 範囲外、逆順、bool、欠落したfold範囲を設定検証で拒否
+- 旧4アーム計画（Baseline 2 / 提案A / 提案B / matched学習）の記録を
+  `PROGRESS_ARCHIVE_4arm.md` へ分離。現行計画とやっていることが根本的に異なるため
+- `PROGRESS.md` は現行計画（全データMTL）のみを扱い、確定済みの前提を
+  入力・データ / モデルと損失 / 評価プロトコル / 運用 に再編
+- 旧計画から引き継ぐ成果物を「既存基盤」節に明示
 
-### 2026-08-12（Baseline 1 学習スクリプトの直接実行対応）
+### 2026-08-18（共通基盤・Baseline 0実装完了）
 
-- リポジトリルートから`uv run python fracture_detection/baseline1/train.py`で起動可能に変更
-- 直接実行時だけ不足するプロジェクトルートをimport検索パスへ追加し、`-m`実行も維持
-- `--help`を使うsubprocess回帰テストを追加し、学習を開始せず起動経路を検証
-
-### 2026-08-12（Baseline 1 学習進捗の可視化）
-
-- マニフェスト読込、fold分割、DataLoader、モデル、W&Bの各初期化段階を即時flushで表示
-- 各epoch開始時に、初回batchではworker起動とprefetchが発生することを表示
-- train・validation・最良checkpoint再評価へbatch単位の進捗バーと実行中平均BCEを追加
-- tiny学習で標準出力と進捗バーを検証する回帰テストを追加
-
-### 2026-08-12（Baseline 1 matched学習スケジュール再検討へ）
-
-- 旧536 bag前提の10 epoch凍結・200 epochスケジュールを、2,655 bagへそのまま適用した不整合を確認
-- fold 0部分runはepoch 7でval AUROC 0.697・AP 0.225が最高、epoch 9 checkpointでは0.614・0.166へ低下
-- epoch 9の平均scoreは陰性0.218・陽性0.254で分離が弱く、このrunは診断用smokeとして結果から除外
-- 次セッションで凍結期間、backbone/head LR、warmup、cosine期間、最大epoch、min epoch、patience、総update数をまとめて再設計する
-- スケジュール変更後は現在のfold 0 checkpointをresumeせず、新しい実験名で最初から学習する
-
-### 2026-08-14（Baseline 1 matched学習スケジュール改訂）
-
-- fold 0診断runはepoch 51まで完走し、train BCEは0.619から0.064へ低下したため「未学習」ではなかった
-- val AUROCはepoch 21の0.737が最高、val BCEは同epoch 0.633からepoch 51の1.781へ悪化し、主因を過学習と判定
-- 10 epoch backbone freezeを廃止し、全層を2 epochで0.1倍LRからwarmupする
-- matchedはbackbone LR `1e-4`、head LR `3e-4`から開始し、`val_bce`停滞時に`ReduceLROnPlateau`で0.5倍へ下げる
-- scheduler patience 4、relative threshold 0.1%、cooldown 1、minimum LRはbackbone `1e-6` / head `3e-6`
-- 最大100 epochは安全上限とし、epoch 1からcheckpoint選択、AUROC patience 15、global gradient clip 5.0を使用
-- scheduler stateをcheckpointへ保存し、resume時にoptimizerと一緒に復元する
-- clip率とvalidationの陽性・陰性平均score / score gapをhistory・log・W&Bへ追加
-- 改訂B0は`outputs/test-2/matched_b0_v2`へ新規出力し、旧checkpointはresumeしない
-- 改訂fold 0はepoch 22でearly stoppingし、best epoch 7、val AUROC 0.738、AP 0.310、BCE 0.522
-- 終了時tracebackはNFS上の`TMPDIR=.tmp`をDataLoader workerが削除できない後処理エラーで、checkpoint・履歴・予測は正常保存済み
-- Baseline 1起動時に`TMPDIR` / `TEMP` / `TMP`と`tempfile.tempdir`を`/tmp/vai-baseline1-{uid}`へ切り替える
+- 旧`baseline1/`を現行名称`baseline0/`へ移行し、matched分岐・設定を削除
+- `common/`へcyclic nested split、deterministic natural sampler、annotated cycle sampler、
+  λ/β初期gradient校正、cross-fitted level-only床、患者cluster MDE近似を追加
+- region BCEから椎体陰性の論理的0教師を削除。SideAcc・macro-APを正式返り値から削除
+- Baseline 0をtrain 3 folds / inner checkpoint選択 / best確定後outer 1回推論へ変更。
+  既存outer予測がある場合は再推論を拒否し、旧config checkpointのresumeも拒否
+- level-only床を凍結: R1 0.4946 / R2 0.2863 / R3 0.4222 / R4 0.7059
+- 検証: 45 unit tests、ruff、mypy、実データ1 bagのV2-S forward/loss/backwardが通過
+- Baseline 0のschedulerを旧matched診断由来の`ReduceLROnPlateau`から、RSNA Type1と同じ75 epoch単一cosineへ修正。validation依存の最適化差を全アームから除外
+- `baseline0/`直下の10モジュールを`cli/config/data/modeling/training`へ責務別に再配置。直下はREADMEとpackage定義だけに整理し、成果物pathは維持
+- 共有`/dev/shm` stagingの無表示区間を撤廃。lock、source走査、cache検証、容量、copy bytes/files/current path/speed、marker、atomic確定、再利用をすべて標準出力へ表示
+- NFS→tmpfs copyを設定可能な8 threadへ並列化し、不要なmetadata複製を廃止。同一manifestの中断tmpだけをlock下で自動削除し、完成cacheは再利用
+- Baseline 0 protocolを`baseline0-nested-v3`へ更新。best checkpointはinner AUROCのまま、early stoppingだけをinner BCE patience 15へ分離し、再開checkpointへBCE最良値とbad epoch数を保存
+- 学習DataLoaderを8 workersへ変更。OpenCVは既定32 threads/workerだったためworker初期化時に1 threadへ制限し、256 threads相当の過剰並列を防止。epochごとのdata wait / compute時間も記録
+- `08_18/v1`は旧v2（AUROC停止・4 workers）でouter 0学習が開始されたため、v3の確認用・正式runには再利用しない。成果物は削除せず保持し、新runは`08_18/v2_val_loss_stop`へ分離
+- console、progress bar、`history.csv`、W&B、`fold_metrics.json`、validation予測ファイルの表示を`inner`から`val`へ統一。nested split検証用の内部key `runtime.inner_fold`だけ保持
+- protocol `baseline0-nested-v4`: `best_model.pt`はval AUROC最大・outer推論用のまま維持し、val PR-AUC（average precision）最大を`best_val_prauc_model.pt`へ独立保存。`last_checkpoint.pt`へ両best epoch/metricsを保存してresume可能にした。PR-AUC-bestは診断用でouter推論には使わない
+- protocol `baseline0-nested-v5`: epochログへ固定0.5とval F1最適点のprecision / recall / F1を追加。
+  AUROC-bestをprimary、PR-AUC-bestをsecondary感度分析として事前指定し、各checkpoint自身の
+  valでF1最大閾値（同率は高い閾値）を決め、対応するouterへ固定適用する。両checkpointで
+  AUROC / PR-AUC / precision / recall / F1をfold・pooled OOFに保存し、outer推論は各1回に制限。
+  v4の`08_18/v2`成果物と衝突させないため、v5の設定出力先は`08_18/v3`
+- v5検証: common + Baseline 0の56 unit tests、Ruff check/format、mypy 27 source filesが通過。
+  outerでは最適閾値を再探索せず、valで凍結した閾値の指標だけを正式値として保存する
+- protocol `baseline0-nested-v6`: Stage1と同じ品質除外を共通manifestへ適用し、13,432 bag / 2,009 study / 陽性1,332へ更新。flip・transposeを除くStage1 augmentationとmixup `p=0.2`を移植し、whole BCEをStage1と同じ陽性重み合計正規化へ変更。新規runは`08_18/v4`
+- protocol `baseline0-nested-v7`: Stage1実装どおり15面×5chを75chへstackし、augmentation呼出しを75回/bagから1回/bagへ削減。Baseline 0で不要なregion mask読み込みを止め、入力をuint8のまま転送してGPU側で正規化し、cuDNN fixed-shape autotuneを有効化。ローカルitem生成は約4.0倍、転送payloadは4分の1。出力先は`08_18/v4`
+- 検証: common + Baseline 0の49 tests、Ruff check/format、mypy 27 source filesが通過。sandbox外の軽量DataLoaderで8 workersの起動とbatch取得も通過
+- **正式なv3学習・outer推論は未開始**。6構成・λ/β・code/config hash凍結前のouter推論は禁止
 
 ## 次のタスク
 
-1. 新しい実験名でBaseline 1 matched B0のfold 0をepoch 1から再学習し、改訂scheduleを確認
-2. fold 0で改善を確認後、matched B0の残り4-fold学習とpooled OOF評価
-3. Baseline 1 matched V2-Sの5-fold感度分析とpooled OOF評価
-4. Baseline 1 full V2-Sのstage確認後の5-fold学習とpooled OOF評価
-5. **近道の床と検出力の再計算**（旧ラベル基準のため。事前登録ゲートを固定する前に必須。1-4と並行可）
+1. Control–B / Baseline 1–B を共通sampler・nested契約へ接続して実装
+2. Proposed（PMGAN式mask-guided branch）の3構成を実装
+3. 5 outer分のλ・βをreference modelで校正し、全アーム共通値として凍結
+4. **凍結してからouter推論**: 6構成・重み・検定順序・code hashを固定し、
+   それ以降はouter foldの結果を設計変更に使わない（Codex Q6の必須要件）

@@ -1,6 +1,15 @@
 {
-  "rows": 13928,
-  "studies": 2010,
+  "rows": 13432,
+  "studies": 2009,
   "region_annotated_rows": 268,
-  "sha256": "39d46a6c6d2ddbeb1f0eb6df0a94cb5de09461f68deb8761fd7723c4f58675a3"
+  "sha256": "9bc0b8b91a5ff719519a63a3b2a7aa7f14476b45fade5582efb58a258ef21ac3",
+  "quality_exclusions": {
+    "rows_before": 13928,
+    "rows_removed": 496,
+    "rows_after": 13432,
+    "listed_studies": 1,
+    "listed_levels": 646
+  },
+  "excluded_studies_sha256": "45830a8eb448a49f61af434f066a40342fc2189dbd754decb6e31ab1d5a6e6ab",
+  "excluded_levels_sha256": "3afc3e004a90d8065895eba5360f3f2c9bee15526fefc042d8d04617f64c7d4d"
 }

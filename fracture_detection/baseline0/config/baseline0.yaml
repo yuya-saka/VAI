@@ -1,0 +1,70 @@
+protocol_version: baseline0-nested-v7
+
+experiment:
+  phase: 08_18
+  name: v4
+
+data:
+  random_seed: 20260807
+  n_folds: 5
+  start_outer_fold: 0
+  end_outer_fold: 4
+  dataset_dir: null
+  stage_to_local: true
+  stage_root: /dev/shm/vai-fracture-dataset
+  stage_copy_workers: 8
+  num_workers: 8
+
+model:
+  backbone: tf_efficientnetv2_s
+  pretrained: true
+  in_chans: 6
+  n_planes: 15
+  drop_rate: 0.0
+  drop_path_rate: 0.0
+  head_dropout: 0.30
+  lstm_hidden: 256
+  lstm_layers: 2
+
+training:
+  gpu_id: 1
+  natural_batch_size: 16
+  pos_weight: 2.0
+  max_epochs: 75
+  min_epoch: 1
+  early_stopping_patience: 15
+  early_stopping_metric: val_bce
+  weight_decay: 0.0001
+  gradient_clip_norm: 5.0
+  amp_dtype: bfloat16
+  freeze_backbone_epochs: 0
+  warmup_epochs: 0
+  warmup_start_factor: 1.0
+  backbone_learning_rate: 0.00023
+  head_learning_rate: 0.00023
+  backbone_min_learning_rate: 0.000023
+  head_min_learning_rate: 0.000023
+  lr_scheduler: cosine_annealing
+  mixup_probability: 0.20
+
+augmentation:
+  affine_probability: 0.70
+  shift_limit: 0.30
+  scale_lower: 0.70
+  scale_upper: 1.30
+  rotate_limit: 45.0
+  border_mode: 4
+  brightness_limit: 0.10
+  contrast_limit: 0.0
+  intensity_probability: 0.70
+  blur_noise_probability: 0.50
+  noise_variance_lower: 3.0
+  noise_variance_upper: 9.0
+  distortion_probability: 0.50
+  cutout_probability: 0.05
+  cutout_ratio: 0.50
+
+wandb:
+  enabled: true
+  project: null
+  run_name: null

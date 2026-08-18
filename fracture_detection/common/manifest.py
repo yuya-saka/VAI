@@ -10,6 +10,8 @@ import pandas as pd
 
 from fracture_detection.common.constants import (
     BAG_FILE_COLUMNS,
+    EXCLUDED_LEVELS_CSV,
+    EXCLUDED_STUDIES_CSV,
     FOLDS_CSV,
     INVENTORY_CSV,
     MANIFEST_COLUMNS,
@@ -93,18 +95,68 @@ def assemble_manifest(
     return manifest.sort_values(["study_id", "level"]).reset_index(drop=True)
 
 
+def apply_quality_exclusions(
+    manifest: pd.DataFrame,
+    excluded_studies: pd.DataFrame,
+    excluded_levels: pd.DataFrame,
+) -> pd.DataFrame:
+    """Stage1と同じ品質除外リストをmanifestへ適用する。"""
+    required_study_columns = {"study_uid"}
+    required_level_columns = {"study_uid", "vertebra"}
+    if not required_study_columns.issubset(excluded_studies.columns):
+        raise ValueError("excluded_studies.csvにstudy_uid列がありません")
+    if not required_level_columns.issubset(excluded_levels.columns):
+        raise ValueError("excluded_levels.csvにstudy_uid/vertebra列がありません")
+
+    study_ids = set(excluded_studies["study_uid"].astype(str))
+    level_keys = set(
+        zip(
+            excluded_levels["study_uid"].astype(str),
+            excluded_levels["vertebra"].astype(str),
+            strict=True,
+        )
+    )
+    study_mask = manifest["study_id"].astype(str).isin(study_ids)
+    level_mask = pd.Series(
+        [
+            (str(study_id), str(level)) in level_keys
+            for study_id, level in zip(
+                manifest["study_id"], manifest["level"], strict=True
+            )
+        ],
+        index=manifest.index,
+    )
+    removed = study_mask | level_mask
+    filtered = manifest.loc[~removed].reset_index(drop=True)
+    filtered.attrs["quality_exclusions"] = {
+        "rows_before": int(len(manifest)),
+        "rows_removed": int(removed.sum()),
+        "rows_after": int(len(filtered)),
+        "listed_studies": int(len(study_ids)),
+        "listed_levels": int(len(level_keys)),
+    }
+    return filtered
+
+
 def build_manifest(
     inventory_csv: Path = INVENTORY_CSV,
     train_csv: Path = TRAIN_CSV,
     region_csv: Path = REGION_CSV,
     folds_csv: Path = FOLDS_CSV,
+    excluded_studies_csv: Path = EXCLUDED_STUDIES_CSV,
+    excluded_levels_csv: Path = EXCLUDED_LEVELS_CSV,
 ) -> pd.DataFrame:
     """確定済み入力ファイルから共通manifestを構築する。"""
     inventory = pd.read_csv(inventory_csv, dtype={"study_id": str, "level": str})
     vertebra_labels = load_vertebra_labels(train_csv)
     region_labels = load_region_labels(region_csv)
     folds = pd.read_csv(folds_csv, dtype={"study_id": str})
-    return assemble_manifest(inventory, vertebra_labels, region_labels, folds)
+    excluded_studies = pd.read_csv(excluded_studies_csv, dtype={"study_uid": str})
+    excluded_levels = pd.read_csv(
+        excluded_levels_csv, dtype={"study_uid": str, "vertebra": str}
+    )
+    manifest = assemble_manifest(inventory, vertebra_labels, region_labels, folds)
+    return apply_quality_exclusions(manifest, excluded_studies, excluded_levels)
 
 
 def write_manifest(manifest: pd.DataFrame, output_dir: Path) -> tuple[Path, Path]:
@@ -121,6 +173,13 @@ def write_manifest(manifest: pd.DataFrame, output_dir: Path) -> tuple[Path, Path
         "studies": int(manifest["study_id"].nunique()),
         "region_annotated_rows": int(manifest["has_region_target"].sum()),
         "sha256": digest,
+        "quality_exclusions": manifest.attrs.get("quality_exclusions"),
+        "excluded_studies_sha256": hashlib.sha256(
+            EXCLUDED_STUDIES_CSV.read_bytes()
+        ).hexdigest(),
+        "excluded_levels_sha256": hashlib.sha256(
+            EXCLUDED_LEVELS_CSV.read_bytes()
+        ).hexdigest(),
     }
     metadata_path = output_dir / "input_manifest_meta.json"
     metadata_path.write_text(

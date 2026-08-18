@@ -10,13 +10,13 @@ import pandas as pd
 from numpy.typing import NDArray
 from sklearn.metrics import (
     average_precision_score,
-    balanced_accuracy_score,
     roc_auc_score,
 )
 
 from fracture_detection.common.constants import N_REGIONS, REGION_COLUMNS
 
 Metric = Callable[[NDArray[np.float64], NDArray[np.float64]], float]
+DecisionMetrics = dict[str, float | int]
 
 
 def _as_arrays(
@@ -45,6 +45,104 @@ def safe_average_precision(targets: NDArray[Any], scores: NDArray[Any]) -> float
     if target_array.sum() == 0:
         return float("nan")
     return float(average_precision_score(target_array, score_array))
+
+
+def binary_decision_metrics(
+    targets: NDArray[Any], predictions: NDArray[Any]
+) -> DecisionMetrics:
+    """二値予測から混同行列、precision、recall、F1を返す。"""
+    target_array, prediction_array = _as_arrays(targets, predictions)
+    if target_array.ndim != 1:
+        raise ValueError("targetとpredictionは1次元である必要があります")
+    if len(target_array) == 0:
+        raise ValueError("targetとpredictionは空にできません")
+    if not np.isin(target_array, [0.0, 1.0]).all():
+        raise ValueError("targetは0/1である必要があります")
+    if not np.isin(prediction_array, [0.0, 1.0]).all():
+        raise ValueError("predictionは0/1である必要があります")
+
+    target_positive = target_array == 1.0
+    prediction_positive = prediction_array == 1.0
+    true_positives = int(np.count_nonzero(target_positive & prediction_positive))
+    false_positives = int(np.count_nonzero(~target_positive & prediction_positive))
+    false_negatives = int(np.count_nonzero(target_positive & ~prediction_positive))
+    true_negatives = int(np.count_nonzero(~target_positive & ~prediction_positive))
+    precision_denominator = true_positives + false_positives
+    recall_denominator = true_positives + false_negatives
+    precision = true_positives / precision_denominator if precision_denominator else 0.0
+    recall = true_positives / recall_denominator if recall_denominator else 0.0
+    f1_denominator = precision + recall
+    f1 = 2.0 * precision * recall / f1_denominator if f1_denominator else 0.0
+    return {
+        "true_positives": true_positives,
+        "false_positives": false_positives,
+        "false_negatives": false_negatives,
+        "true_negatives": true_negatives,
+        "predicted_positives": true_positives + false_positives,
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1": float(f1),
+    }
+
+
+def threshold_metrics(
+    targets: NDArray[Any], scores: NDArray[Any], threshold: float
+) -> DecisionMetrics:
+    """指定閾値をscoreへ適用した二値分類指標を返す。"""
+    target_array, score_array = _as_arrays(targets, scores)
+    if not np.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        raise ValueError("thresholdは有限な[0,1]である必要があります")
+    if not ((0.0 <= score_array) & (score_array <= 1.0)).all():
+        raise ValueError("scoreは[0,1]である必要があります")
+    metrics = binary_decision_metrics(
+        target_array,
+        (score_array >= threshold).astype(np.int8),
+    )
+    return {"threshold": float(threshold), **metrics}
+
+
+def select_f1_threshold(targets: NDArray[Any], scores: NDArray[Any]) -> DecisionMetrics:
+    """F1最大の閾値を選び、同率なら最も高い閾値を返す。"""
+    target_array, score_array = _as_arrays(targets, scores)
+    if target_array.ndim != 1:
+        raise ValueError("targetとscoreは1次元である必要があります")
+    if len(target_array) == 0:
+        raise ValueError("targetとscoreは空にできません")
+    if not np.isin(target_array, [0.0, 1.0]).all():
+        raise ValueError("targetは0/1である必要があります")
+    if not ((0.0 <= score_array) & (score_array <= 1.0)).all():
+        raise ValueError("scoreは[0,1]である必要があります")
+    positive_count = int(target_array.sum())
+    if positive_count == 0:
+        raise ValueError("F1閾値の決定には陽性targetが必要です")
+
+    order = np.argsort(-score_array, kind="stable")
+    sorted_scores = score_array[order]
+    sorted_targets = target_array[order]
+    group_ends = np.concatenate(
+        (sorted_scores[1:] != sorted_scores[:-1], np.array([True]))
+    )
+    true_positives = np.cumsum(sorted_targets)[group_ends]
+    predicted_positives = np.arange(1, len(sorted_targets) + 1)[group_ends]
+    false_positives = predicted_positives - true_positives
+    false_negatives = positive_count - true_positives
+    denominators = 2.0 * true_positives + false_positives + false_negatives
+    f1_values = np.divide(
+        2.0 * true_positives,
+        denominators,
+        out=np.zeros_like(denominators, dtype=np.float64),
+        where=denominators > 0,
+    )
+    maximum_f1 = float(f1_values.max())
+    best_index = int(
+        np.flatnonzero(np.isclose(f1_values, maximum_f1, rtol=0.0, atol=1e-12))[0]
+    )
+    candidate_thresholds = sorted_scores[group_ends]
+    return threshold_metrics(
+        target_array,
+        score_array,
+        threshold=float(candidate_thresholds[best_index]),
+    )
 
 
 def cluster_bootstrap_interval(
@@ -123,7 +221,6 @@ def region_metrics(
         raise ValueError(f"領域配列は(N, {N_REGIONS})形状である必要があります")
 
     result: dict[str, Any] = {}
-    average_precisions: list[float] = []
     for index, column in enumerate(REGION_COLUMNS):
         metrics = binary_metrics(
             target_array[:, index],
@@ -132,33 +229,14 @@ def region_metrics(
             n_bootstrap=n_bootstrap,
         )
         result[column] = metrics
-        average_precisions.append(float(metrics["average_precision"]))
-    result["macro_average_precision"] = float(np.nanmean(average_precisions))
     return result
-
-
-def side_balanced_accuracy(targets: NDArray[Any], scores: NDArray[Any]) -> float:
-    """R2/R3の片側だけが陽性の標本で左右balanced accuracyを計算する。"""
-    target_array, score_array = _as_arrays(targets, scores)
-    if target_array.ndim != 2 or target_array.shape[1] != N_REGIONS:
-        raise ValueError(f"領域配列は(N, {N_REGIONS})形状である必要があります")
-    discordant = target_array[:, 1].astype(bool) ^ target_array[:, 2].astype(bool)
-    if not discordant.any():
-        return float("nan")
-    side_targets = target_array[discordant, 2].astype(int)
-    if np.unique(side_targets).size < 2:
-        return float("nan")
-    side_predictions = (score_array[discordant, 2] > score_array[discordant, 1]).astype(
-        int
-    )
-    return float(balanced_accuracy_score(side_targets, side_predictions))
 
 
 def evaluate_prediction_frame(
     predictions: pd.DataFrame,
     n_bootstrap: int = 1000,
 ) -> dict[str, Any]:
-    """標準列を持つOOF予測表から椎体・領域・左右指標をまとめて返す。"""
+    """標準列を持つOOF予測表から椎体・領域別指標をまとめて返す。"""
     required = {
         "study_id",
         "level",
@@ -188,11 +266,9 @@ def evaluate_prediction_frame(
         groups=annotated["study_id"].to_numpy(),
         n_bootstrap=n_bootstrap,
     )
-    side_accuracy = side_balanced_accuracy(region_targets, region_scores)
     return {
         "vertebra": vertebra,
         "regions": regions,
-        "side_balanced_accuracy": side_accuracy,
     }
 
 
@@ -207,9 +283,18 @@ def evaluate_vertebra_prediction_frame(
         raise ValueError(f"予測表に必要な列がありません: {sorted(missing)}")
     if predictions.duplicated(["study_id", "level"]).any():
         raise ValueError("予測表に重複したstudy_id・levelがあります")
-    return binary_metrics(
+    metrics = binary_metrics(
         predictions["vertebra_target"].to_numpy(),
         predictions["vertebra_score"].to_numpy(),
         groups=predictions["study_id"].to_numpy(),
         n_bootstrap=n_bootstrap,
     )
+    if "vertebra_prediction" not in predictions:
+        return metrics
+    return {
+        **metrics,
+        **binary_decision_metrics(
+            predictions["vertebra_target"].to_numpy(),
+            predictions["vertebra_prediction"].to_numpy(),
+        ),
+    }

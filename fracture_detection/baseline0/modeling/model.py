@@ -1,4 +1,4 @@
-"""Baseline 1のtimmバックボーンとBiLSTMモデル。"""
+"""Baseline 0のtimmバックボーンとBiLSTMモデル。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from torch import Tensor, nn
 from fracture_detection.common.constants import N_PLANES
 
 
-class Baseline1Model(nn.Module):
+class Baseline0Model(nn.Module):
     """各面の特徴をBiLSTMで集約し、面ごとの骨折logitを返す。"""
 
     def __init__(
@@ -89,7 +89,7 @@ class Baseline1Model(nn.Module):
             if isinstance(module, nn.modules.batchnorm._BatchNorm):
                 module.eval()
 
-    def train(self, mode: bool = True) -> Baseline1Model:
+    def train(self, mode: bool = True) -> Baseline0Model:
         """学習状態への復帰後も、凍結バックボーンのBatchNormを評価状態に保つ。"""
         super().train(mode)
         if mode and self._backbone_frozen:

@@ -1,4 +1,4 @@
-"""Baseline 1の15面へ複製したBCEとbag確率。"""
+"""Baseline 0の15面へ複製したBCEとbag確率。"""
 
 from __future__ import annotations
 
@@ -32,11 +32,17 @@ def broadcast_bce_loss(
     expanded_targets = broadcast_targets(targets, plane_logits.shape[1]).to(
         dtype=plane_logits.dtype
     )
-    return nn.functional.binary_cross_entropy_with_logits(
+    element_losses = nn.functional.binary_cross_entropy_with_logits(
         plane_logits,
         expanded_targets,
-        pos_weight=plane_logits.new_tensor(pos_weight),
+        reduction="none",
     )
+    weights = torch.where(
+        expanded_targets > 0,
+        plane_logits.new_tensor(pos_weight),
+        plane_logits.new_tensor(1.0),
+    )
+    return (element_losses * weights).sum() / weights.sum()
 
 
 def bag_probabilities(plane_logits: Tensor) -> Tensor:

@@ -29,6 +29,214 @@ and Proposed B (weak supervision from vertebra labels only) are now first-class
 arms alongside the supervised baselines. Supervised region learning on the 268
 remains the foundation (it is Baseline 2 and the Proposed-A teacher).
 
+**2026-08-17 update (user decision, supersedes the 2026-08-07 arm structure):**
+training on the partial cohort overfits (matched fold-0 diagnostic run: best val
+AUROC 0.738, val BCE degrading after epoch 21), so the study switched to
+quality-filtered full-data (13,432-bag) training with standard hard-parameter-sharing multi-task
+learning and missing-label masking. The rewritten `memo/計画書/提案手法.md` is
+the active definition. Arms: **Baseline 0** (CT + whole mask -> CNN+LSTM ->
+whole; implemented in `baseline0/` from the former full configuration), **Baseline 1** (6ch early
+fusion -> shared CNN+LSTM -> whole head + 4-logit region head), **Proposed**
+(shared CNN -> four mask-guided branches, each with its own LSTM). Loss is
+`L = L_whole + lambda * m * L_region` with the region loss masked out wherever
+the 268-bag region labels are absent (missing labels are never treated as 0),
+plus two-stream sampling so annotated bags (~2% of the population) appear in
+every batch. Baseline 1 and Proposed each compare whole-output method A (region
+aggregation: max / noisy-OR) against method B (independent whole head).
+Discarded: Baseline 2 (four independent region models), Proposed A
+(pseudo-labels), Proposed B (weak supervision), all matched-cohort training
+(frozen cohort artifacts are retained but unused), and the two-stem encoder
+(replaced by plain early fusion). The 2026-08-04 ban on mask-average /
+per-region hard pooling still stands.
+
+**Same-day second-round user decisions:** entailed-zero region supervision on
+vertebra-negative bags is NOT used (region loss touches only the 268 annotated
+bags; the existing entailed-zero path in `common/losses.py` must be removed at
+implementation time); the method-A aggregation function (max vs noisy-OR) is an
+ablation, not a single choice; `pos_weight=2.0` on the whole loss is fixed for
+every arm; and the Proposed arm's mask injection follows PMGAN (Zhang et al.,
+"Part-Aware Mask-Guided Attention for Thorax Disease Classification", Entropy
+2021): per-region Mask-Guided Attention modules after the shared CNN whose
+spatial attention maps are regressed to the corresponding region masks by an
+RMSE loss `L_att` (training-time only, residual re-weighting `(1+m)*f`), giving
+`L = L_whole + lambda*m*L_region + beta*L_att` — consistent with the
+hard-pooling ban. **Evaluation-protocol review (2026-08-17, third round; user-approved).** The
+frozen patient-level stratified 5-fold `folds.csv` was audited against the
+frozen manifest and is sound — no patient leakage, per-fold prevalence
+10.08-10.13%, 399-402 bags per level per fold, 53-56 annotated bags per fold
+with R1-R4 stratified — and is reused unchanged for every arm. What changes is
+the fold's *role*:
+
+- **The outer fold is evaluation-only.** The former contract (early stopping on
+  the outer validation fold, then pooling those same predictions into the
+  reported OOF) is retired. Selection now uses a **cyclic single-inner-fold**:
+  for outer fold `k`, inner fold is `(k+1) mod 5`; the model trains on the
+  remaining three folds (8,048-8,074 bags, 159-162 annotated) with early
+  stopping on inner whole-vertebra BCE, and the outer fold is then inferred
+  once. The checkpoint-selection metric is inner whole-vertebra AUROC for all arms,
+  because the inner fold holds only 11-12 R2 positives and region-AP-based
+  selection would be unstable.
+  **A stage-2 refit was considered and rejected (2026-08-17, user decision on
+  compute grounds).** The rejected variant would have retrained on all four
+  non-outer folds for the epoch count chosen on the inner fold, costing 10 runs
+  per configuration instead of 5. Dropping it keeps the count at 5 runs, puts
+  total compute at 0.75x the old protocol (three training folds instead of
+  four), and removes two implementation burdens: the fixed RSNA Type1 cosine
+  trajectory requires no validation-driven LR record/replay, and the "stage 2
+  sees ~1.33x the optimizer steps" caveat disappears.
+  Registered limitation: every reported model is trained on three folds (60% of
+  the data) rather than the usual four (80%), which cuts region supervision from
+  ~215 to ~160 annotated bags per fold on an endpoint whose 268 total is already
+  the binding constraint. **No absolute-performance claims are made**; all
+  claims are relative comparisons under an identical handicap that applies
+  equally to every arm.
+  (An earlier note in this document described the nested protocol as roughly
+  doubling training cost. That conflated run count with compute: even the 10-run
+  variant costs `0.75 + E_best/E_stop` times the old protocol, about 1.07-1.45x
+  in practice, not 2x.)
+- **No held-out test set**, reconfirmed. A random 20% patient test would cut the
+  region endpoint from 268 to 214 (R2 59 -> 47), and the tempting alternative of
+  drawing test patients only from the 1,850 non-annotated studies is
+  **statistically invalid**: measurement shows the 160 annotated studies are not
+  a random sample of positives (31.50% vertebra-level prevalence versus 8.24%;
+  2.19 versus 1.34 fractured vertebrae per positive patient; annotated share of
+  positive vertebrae ranging from 42.5% at C3 to 9.4% at C7). Annotated patients
+  would enter the test set with probability zero, violating positivity, so no
+  IPW or standardization can repair it; it is usable only as a domain-shift
+  subgroup analysis. External-cohort validation is registered as future work,
+  and the study is described as evaluated by patient-grouped nested internal
+  cross-validation, not as evidence of external validity.
+- **A `Control` arm (no-region-mask MTL) is added.** Its input is the same 6
+  channels as Baseline 0 while its heads, region loss, sampler, and budget are
+  identical to Baseline 1, so Baseline 0 -> Control isolates multi-task learning
+  and Control -> Baseline 1 isolates the region-mask input alone. This is
+  required because Baseline 0 emits no region logits and therefore cannot be
+  compared on the region endpoint at all, and because Baseline 0 versus
+  Baseline 1 confounds input channels, region head, region supervision, sampler,
+  and parameter count. Control versus Baseline 1 is also the same-backbone,
+  channels-only contrast that the N=268 power work identified as the only
+  adequately powered region comparison (rho about 0.9, macro-AP MDE 0.027),
+  whereas Baseline 1 versus Proposed differs structurally (rho 0.5-0.7, MDE
+  0.047-0.059).
+
+**SideAcc removed (2026-08-17, user decision).** The balanced side-accuracy
+endpoint over the 95 R2-xor-R3 vertebrae is dropped. Localization, including
+left/right discrimination, is judged by **per-region AP reported separately for
+R1, R2, R3, and R4** rather than collapsed into a macro average or a dedicated
+laterality metric. `common/metrics.py::side_balanced_accuracy` is no longer an
+endpoint; the code cleanup rides along with the planned `common/` modification
+pass. Consequence to register: SideAcc was the only endpoint immune to the
+level-prior shortcut (level-only reaches macro-AP 0.451, and level-only side
+accuracy was 0.511, i.e. chance), so shortcut resistance now rests entirely on
+per-region AP against the level-only floors. Recomputing those floors on the
+corrected labels is therefore a precondition for pre-registration, not an
+optional cleanup. The no-flip/no-transpose rule is unaffected: R2/R3 label and
+mask correspondence is still required for per-region evaluation.
+
+**Analysis plan frozen (2026-08-18, user-approved Codex recommendations).**
+
+*Configurations — six, thirty runs* (down from eleven / fifty-five): Baseline 0;
+Control-B; Baseline 1-B; Proposed-B at beta>0; Proposed-max at beta>0;
+Proposed-max at beta=0. Method B is the ladder-wide default and method A is
+evaluated only on Proposed. **noisy-OR is removed from every arm**: it routes
+the whole-loss gradient directly into the region logits, so it alters a weak
+region-supervision path rather than being a pure inference-time aggregation.
+
+*Testing — two confirmatory hypotheses in fixed sequence*:
+`H1: AUROC(Baseline 1-B) > AUROC(Control-B)` then
+`H2: AUROC(Proposed-max, beta>0) > AUROC(Proposed-max, beta=0)`, both on paired
+pooled-OOF vertebra AUROC over 13,432 bags, decided by a patient-clustered
+bootstrap paired difference whose two-sided 95% CI lower bound exceeds zero. H2
+is only confirmatory if H1 succeeds; otherwise it is exploratory. Region AP is
+deliberately not primary: dropping macro-averaging turns it into a four-hypothesis
+family, and **the existing MDE figures were computed for macro-AP and therefore
+do not establish per-region power** — they must be recomputed. Key-secondary
+families (outside the fixed sequence): Control-B versus Baseline 1-B on
+per-region AP, and the floor gate.
+
+*Two-stream loss composition*: each step draws a natural stream `W_t` (batch
+`B_W`) and an annotated stream `A_t` of exactly one bag. `A_t` contributes to
+`L_region` only, never to `L_whole` or `L_att`; `L_att` is computed on the
+natural stream. **Baseline 0 runs the same natural sampler, the same `W_t`, and
+the same optimizer-step count**, simply skipping the annotated forward pass, so
+the whole-task empirical risk, bag distribution, and per-step whole coefficient
+are identical across every arm and only the added region gradient differs. Epoch
+length is one pass of the natural stream, `L_whole` always reduces over `B_W`,
+and all arms share the natural-stream seed and order.
+
+*lambda / beta calibration*: no grid search and no inner CV. Per outer fold,
+before any optimizer update, 64 deterministic calibration batches drawn from the
+three training folds are run in eval mode (no parameter or BatchNorm update) and
+per-loss gradient L2 norms are taken at the last shared CNN block, giving
+`lambda_k = clip_[1e-2,1e2](0.5 * exp(median_b log((g_whole+eps)/(g_region+eps))))`
+with Baseline 1-B as reference, and `beta_k` in the same form with Proposed-B and
+`g_att`. **The same `lambda_k` applies to every arm and configuration in that
+fold; per-arm tuning is forbidden** because differing lambda between Control and
+Baseline 1 would destroy the channels-only contrast. The mixing ratio is not
+tuned. Non-finite gradients abort the run as an implementation error, and
+clipping is logged but never used to revise the range. Zero additional full runs;
+640 calibration batches total.
+
+*Floor gate*: applied only to the pre-specified Proposed-B at beta>0, never to a
+winner. The floor is a **cross-fitted OOF comparator** — for each outer fold,
+Jeffreys-smoothed level-wise rates `(x+0.5)/(n+1)` estimated from the same three
+training folds, assigned to the outer bags by level, pooled across folds.
+Building the floor from all 268 labels and testing on those same 268 is label
+leakage and is forbidden. The evaluation population is the 268 annotated
+fracture-positive bags only; no whole-negative bags are added, since mixing them
+in collapses AP mechanically (measured: level-only macro floor falls from 0.5026
+at n_neg=0 to 0.0105 with all 12,522 negatives). Four Holm-corrected tests over
+R1-R4, 10,000 patient-clustered bootstrap resamples shared between model and
+floor, no refitting inside the bootstrap. Two descriptive sensitivity analyses
+replace SideAcc without adding an endpoint: a within-level percentile-rank
+recomputation, and an R2/R3 swap negative control whose failure would invalidate
+any laterality claim.
+
+*Floor values are frozen (2026-08-18).* The implemented cross-fitted comparator
+uses only the same three outer-training folds, Jeffreys smoothing, and
+`sklearn.metrics.average_precision_score` 1.9.0 threshold grouping for ties.
+On the 268 annotated fracture-positive bags the frozen AP values are R1
+0.4946387 / R2 0.2863489 / R3 0.4222059 / R4 0.7058684. The old and provisional
+values are discarded. Patient-cluster bootstrap standard errors and per-region
+normal-approximation MDEs are frozen alongside the predictions; no macro-AP
+endpoint is produced.
+
+*Registered limitations*: results hold only under the registered 60%-training
+protocol and do not license claims about rank order at 80%/100% training; region
+AP and floor results are internally valid conditional on the non-randomly
+selected annotated-positive population; one seed per outer fold means the
+bootstrap CIs exclude training stochasticity; high R2/R3 AP shows ranking ability
+per label, not per-case laterality; and the six configurations, weights, testing
+order, and code hash must be frozen before any outer inference, because choosing
+a final set after seeing multiple configurations would turn the outer OOF back
+into a tuning set.
+
+**Implementation checkpoint (2026-08-18).** The former `baseline1/` package is
+now `baseline0/`, supports the quality-filtered full 13,432-bag cohort only, and rejects the
+retired matched configurations. Its root contains only `README.md` and the
+package marker; implementation is separated into `cli/`, `config/`, `data/`,
+`modeling/`, and `training/` by responsibility, while tests remain under
+`tests/`. Shared infrastructure now enforces the cyclic
+nested split, deterministic natural and annotated-cycle samplers, explicit-only
+region validity, one-shot gradient-norm calibration with model/optimizer-state
+invariance, and the frozen cross-fitted floor. Baseline 0 pre-specifies
+validation-AUROC-best as primary and validation-PR-AUC/average-precision-best as
+a secondary sensitivity checkpoint, and stops after 15 consecutive epochs
+without validation-BCE improvement. For each checkpoint independently,
+protocol v6 maximizes F1 on that checkpoint's validation predictions, resolves
+ties toward the highest threshold, freezes the selected threshold, and applies
+it to the corresponding outer predictions. Each checkpoint receives exactly
+one outer inference. AUROC, PR-AUC, precision, recall, and F1 are reported for
+both, but formal arm comparisons remain primary AUROC-checkpoint analyses;
+no outer-optimal threshold is calculated or stored, and outer results may not
+be used to switch checkpoint roles. Resume rejects old
+or configuration-mismatched checkpoints. Protocol v6 uses the RSNA Type1 single
+75-epoch cosine cycle (`2.3e-4` to `2.3e-5`) instead of the retired matched-run
+Plateau schedule, so every arm follows the same validation-independent LR at a
+given epoch. Unit, static, and one-real-bag forward/loss/backward checks pass. No full training or outer inference has
+started because all six configurations, calibrated weights, testing order, and
+code/config hash must be frozen first.
+
 #### Fixed by the PI (2026-08-04)
 
 - **Input is 2.5D**, using the unified `fracture_dataset` format. On 2026-08-11,
@@ -57,6 +265,22 @@ the stored image orientation and intentionally exposes no flip/remapping path.
 Consequently, R2/R3 masks, targets, and validity flags are never swapped during
 training. Any later augmentation must be non-reflective, must preserve the common
 15-plane geometry, and must be applied consistently across arms.
+
+**Stage1 parity update (2026-08-18, user decision):** Baseline 0 and subsequent
+comparison arms use the same quality exclusions as `train_models/stage1`, giving
+13,432 bags / 2,009 studies / 1,332 positives while retaining all 268 annotated
+bags. The frozen fold assignments are filtered, never regenerated. Except for
+horizontal flip, vertical flip, and transpose, the Stage1 augmentation recipe is
+restored: brightness, affine shift/scale/rotation with `BORDER_REFLECT_101`,
+blur/noise, distortion, cutout, and natural-stream batch mixup (`p=0.2`, uniform
+lambda). Whole BCE also matches Stage1 exactly: positive elements receive weight
+2 and the sum is normalized by the sum of weights, with epoch loss reported as
+the mean of batch losses. Protocol `baseline0-nested-v7` additionally matches
+Stage1's fast input path: all 15 planes are channel-stacked for one transform
+call per bag, samples stay uint8 through nonblocking device transfer, unused
+region masks are not loaded by Baseline 0, normalization runs on-device, and
+fixed-shape cuDNN autotuning is enabled. Older runs are
+not resumable and the new output root is `08_18/v4`.
 
 **Phase-1 common foundation (2026-08-11):** the shared manifest is assembled from
 the frozen fold file, complete-bag inventory, vertebra labels, and OR-aggregated
@@ -627,6 +851,23 @@ fracture probabilities.
 
 | Date | Changes |
 |------|---------|
+| 2026-08-18 | Bumped Baseline 0 to `baseline0-nested-v7` for Stage1 input-path parity and non-GPU-parallel speedup. Fifteen planes × five CT channels and fifteen masks are channel-stacked into one Albumentations call per bag instead of 75 replay calls. Baseline 0 skips unused region-mask loading, returns uint8 samples, normalizes after nonblocking device transfer while preserving the whole-mask 0/1 model input, and enables fixed-shape cuDNN autotuning. Local medians improved from 0.440 to 0.145 s for augmentation and 0.434 to 0.109 s for full item creation; per-item transfer payload fell from 17.23 to 4.31 MiB. The run root remains isolated at `08_18/v4`. |
+| 2026-08-18 | Bumped Baseline 0 to `baseline0-nested-v6` to match Stage1 data, augmentation, mixup, and loss semantics. The shared manifest now applies the same study/level quality exclusions and is pinned at 13,432 bags / 2,009 studies / 1,332 positives (SHA256 `9bc0b8b91a5ff719519a63a3b2a7aa7f14476b45fade5582efb58a258ef21ac3`); all 268 region-annotated bags remain. Horizontal/vertical flip and transpose stay forbidden, while brightness, affine, blur/noise, distortion, cutout, and batch mixup `p=0.2` match Stage1. Whole BCE now normalizes the 2x positive-weighted loss by total weight, and epoch BCE is a mean over batch losses. The isolated run root is `08_18/v4`. |
+| 2026-08-18 | Bumped Baseline 0 to `baseline0-nested-v5` for threshold-based formal evaluation. Epoch console/history/W&B logs now include precision, recall, and F1 at 0.5 plus the validation F1-optimal threshold and its metrics. Validation-AUROC-best remains primary and validation-PR-AUC-best is pre-specified as a secondary sensitivity checkpoint; each independently chooses a maximum-validation-F1 threshold with a highest-threshold tie break, then applies that frozen threshold to one corresponding outer inference. Fold and pooled artifacts report AUROC, PR-AUC, precision, recall, and F1 for both checkpoint variants. The new run root is `08_18/v3`, leaving existing v4 `08_18/v2` artifacts untouched. |
+| 2026-08-18 | Added an independent Baseline 0 validation PR-AUC checkpoint by user decision and bumped the contract to `baseline0-nested-v4`. `best_model.pt` remains validation-AUROC-best and is the only checkpoint used for final validation consistency, outer inference, pooled OOF, and formal comparisons. `best_val_prauc_model.pt` stores the maximum validation average precision as a diagnostic artifact only. `last_checkpoint.pt` persists both best epochs/metric dictionaries for exact resume; history and W&B expose separate `is_best_val_auroc` / `is_best_val_prauc` states and `val_prauc`. A regression test forces AUROC and PR-AUC maxima onto different epochs and verifies the PR-AUC checkpoint contents. The user-set execution identifiers `08_18/v2` and GPU 1 are preserved, and no v4 output exists yet. |
+| 2026-08-18 | Standardized Baseline 0 user-facing validation terminology on `val`: console/progress output, `history.csv`, W&B keys and summaries, `fold_metrics.json`, and `val_predictions.csv` no longer expose `inner_*`. The nested-CV structural key `runtime.inner_fold` remains internal because it validates the cyclic split assignment. Regression tests assert both console and W&B naming. |
+| 2026-08-18 | Separated Baseline 0 checkpoint selection from stopping by user decision. Protocol `baseline0-nested-v3` keeps inner vertebra AUROC as the common best-checkpoint metric but drives patience 15 from inner vertebra BCE; resume checkpoints persist both AUROC-best metrics and the independent best-BCE/bad-epoch state. The already-started `08_18/v1` v2 process remains unchanged and is retained only as a superseded operational run; subsequent outputs use a distinct experiment root. W&B profiling of v1 showed train, not validation, dominates each epoch (~347 s versus ~25 s) while GPU utilization averaged only 56-60%, identifying input starvation as the primary throughput bottleneck. DataLoader workers increase from 4 to 8, per-epoch data-wait/compute timing is recorded, and every worker now calls `cv2.setNumThreads(1)` because the host OpenCV default was 32 threads/process. This prevents an 8-worker pool from expanding to roughly 256 OpenCV threads. With batch 16 and prefetch factor 2, input-tensor prefetch is approximately 4.3 GiB per active loader, safely below the measured host RAM and tmpfs margins; an 8-worker startup/batch smoke test passed outside the restricted sandbox, followed by 49 unit tests, Ruff, and mypy over 27 source files. |
+| 2026-08-18 | Optimized the one-time Baseline 0 NFS-to-tmpfs stage after observed serial throughput of roughly 45-60 MiB/s for 68.3 GiB / 41,784 files. Content copies now use a configurable `ThreadPoolExecutor` (`data.stage_copy_workers=8`, validated range 1-32) and `shutil.copyfile` rather than serial `copy2`, avoiding unnecessary timestamp/metadata replication. Clearing all of `/dev/shm` on every launch was rejected because it forces the full transfer every time and removes the fastest path, READY-cache reuse. Instead, while holding the manifest-specific lock, staging deletes only abandoned `.{manifest}.tmp-{pid}` directories; completed hash-addressed caches remain reusable and atomic marker/rename integrity is unchanged. |
+| 2026-08-18 | Made Baseline 0 shared-memory staging fully observable. The staging path now reports the manifest/cache destination, inter-process lock wait/acquire/release, complete source inventory scan with current path and total bytes, existing-cache marker/file-count verification, data/reserve/required/available capacity, copy byte/file/current-path progress, elapsed time and throughput, READY marker creation, atomic finalization, and cache reuse. Progress uses stdout so terminal and captured job logs show the same state. The existing integrity contract remains unchanged: copy into a PID-specific temporary directory, write the marker only after every file succeeds, then atomically rename. |
+| 2026-08-18 | Reorganized `fracture_detection/baseline0/` by responsibility after the root accumulated ten implementation modules. The package root now contains only `README.md` and `__init__.py`; `cli/` owns train/evaluate entry points, `config/` owns the frozen YAML and schema validation, `data/` owns dataset/staging, `modeling/` owns network/loss, and `training/` owns optimizer/trainer/experiment management. Imports, direct CLI tests, README commands, and ignore exceptions were updated together. No compatibility wrappers remain at the root, and experiment outputs still resolve to `baseline0/outputs/`. The concurrently configured `08_18/v1` experiment identifiers were preserved: phase/name are operational output identifiers rather than scientific hyperparameters, so validation requires safe non-empty path components instead of freezing the phase to `baseline0`. |
+| 2026-08-18 | Corrected Baseline 0 scheduling before any full training or outer inference. `ReduceLROnPlateau` had been inherited from the retired matched-cohort diagnostic, where the useful horizon was unknown after observed overfitting; it was not part of the RSNA Type1 full-data recipe and had no evidence base for the new 13,928-bag protocol. Protocol `baseline0-nested-v2` now uses the reference initial LR `2.3e-4`, minimum LR `2.3e-5`, and one 75-epoch cosine cycle. The notebook spells this as `CosineAnnealingWarmRestarts(T_0=75)`, but no restart occurs within its 75-epoch budget, so the implementation uses the equivalent `CosineAnnealingLR(T_max=75)`. This also removes arm/fold-specific validation feedback from the optimizer trajectory: inner AUROC is used only for checkpoint selection and early stopping. |
+| 2026-08-18 | Implemented and verified the shared statistical/training contract and Baseline 0. Renamed the active package from `baseline1/` to `baseline0/`, removed matched-cohort support, froze the full-only RSNA-derived V2-S + BiLSTM configuration, and changed training to three-fold fit / cyclic inner selection / one-time outer inference. Added deterministic natural and annotated-cycle samplers, explicit-validity-only region BCE, nested split checks, state-invariant lambda/beta gradient calibration, cross-fitted Jeffreys level floors, and patient-cluster MDE artifacts. Frozen floor AP is R1 0.4946387 / R2 0.2863489 / R3 0.4222059 / R4 0.7058684 under scikit-learn 1.9.0 tie grouping. Forty-five unit tests, Ruff, mypy, and a real-bag V2-S forward/loss/backward smoke test pass. Full training and outer inference remain intentionally unstarted until the six configurations, weights, test order, and code/config hash are frozen. |
+| 2026-08-18 | Froze the analysis plan on user-approved Codex recommendations, closing the last four open items. Six configurations / thirty runs replace eleven / fifty-five, with noisy-OR removed from every arm because it routes whole-loss gradient into the region logits rather than acting as pure inference-time aggregation. Confirmatory testing is a fixed sequence of `H1: Baseline 1-B > Control-B` then `H2: Proposed-max beta>0 > beta=0`, both on paired pooled-OOF vertebra AUROC judged by a patient-clustered bootstrap CI lower bound above zero; region AP is key-secondary because dropping macro-averaging makes it a four-hypothesis family whose power the existing macro-AP MDEs do not establish. The annotated stream contributes only `L_region`, and Baseline 0 runs the identical natural sampler and optimizer-step count so the whole task is distributionally identical across arms. lambda and beta come from a one-shot gradient-norm calibration on outer-training data (64 batches, eval mode, last shared CNN block), with one shared lambda per fold across all arms and zero additional full runs. The floor gate applies only to the pre-specified Proposed-B beta>0, uses a cross-fitted Jeffreys-smoothed level prior built from the three training folds, evaluates on the 268 annotated positives alone, and applies Holm over R1-R4; two descriptive sensitivity analyses (within-level percentile rank, R2/R3 swap negative control) replace SideAcc. Recomputed floors do not reproduce the recorded values and remain unfrozen pending the cross-fitted implementation and a pinned AP tie convention; per-region MDEs must also be recomputed. Six presentation limits are registered, including that the six configurations, weights, testing order, and code hash must be frozen before any outer inference. |
+| 2026-08-17 | Settled the nested-selection protocol at 5 runs per configuration by dropping the stage-2 refit (user decision, compute trade-off). Each reported model trains on three folds with early stopping on the inner fold and infers the outer fold once; total compute is 0.75x the old protocol. This removes the LR-trajectory record-and-replay requirement (`ReduceLROnPlateau` now just monitors the inner fold) and the "stage 2 sees ~1.33x optimizer steps" caveat. Registered limitation: all reported models are trained on 60% of the data with region supervision cut from ~215 to ~160 annotated bags per fold, so no absolute-performance claims are made and all claims are relative comparisons under a handicap applied equally to every arm. Also corrected an earlier cost statement: the nested protocol was described as roughly doubling training cost, but that conflated run count with compute — even the rejected 10-run variant costs `0.75 + E_best/E_stop`, about 1.07-1.45x, not 2x. |
+| 2026-08-17 | Dropped the SideAcc (balanced side-accuracy) endpoint by user decision; localization including laterality is now judged by per-region AP reported separately for R1-R4, never collapsed into a macro average. `side_balanced_accuracy` leaves the endpoint set and its code cleanup joins the planned `common/` pass. The pending "SideAcc aggregation and 0.65 gate" item is replaced by "per-region floor gates with four Holm-corrected tests on one preselected model". Registered consequence: SideAcc was the only shortcut-immune endpoint (level-only side accuracy was 0.511, chance, while level-only region macro-AP reaches 0.451), so resistance to the level-prior shortcut now rests entirely on per-region AP versus the level-only floors, making the corrected-label floor recomputation a precondition for pre-registration. The no-flip/no-transpose augmentation rule is unchanged because per-region evaluation still requires R2/R3 label-mask correspondence. |
+| 2026-08-17 | *(The nested-protocol details in this row — stage-2 refit, 10 runs, LR replay, "doubles training cost" — were superseded later the same day by the 5-run entry above. The fold audit, no-test-set rationale, and Control arm stand.)* Evaluation-protocol review and four user-approved decisions. The frozen 5-fold was audited against the manifest and kept unchanged (no patient leakage, per-fold prevalence 10.08-10.13%, level counts 399-402, 53-56 annotated bags per fold), but the outer fold becomes evaluation-only: selection moves to a cyclic single-inner-fold (outer `k`, inner `(k+1) mod 5`, three-fold stage-1 epoch selection on inner whole-vertebra AUROC, four-fold stage-2 refit at that fixed epoch count, one outer inference), which doubles training cost, requires replaying stage 1's recorded LR trajectory because `ReduceLROnPlateau` cannot run unmonitored, and registers stage 2's ~1.33x optimizer steps. No held-out test set: a random 20% test would cut the region endpoint 268 -> 214 (R2 59 -> 47), and drawing the test only from non-annotated studies is invalid because the 160 annotated studies are measurably not a random sample of positives (31.50% versus 8.24% vertebra prevalence; 2.19 versus 1.34 fractured vertebrae per positive patient; annotated share of positive vertebrae 42.5% at C3 down to 9.4% at C7), so annotated patients have zero probability of entering the test set and positivity fails. A `Control` (no-region-mask MTL) arm is added to break the Baseline-0/Baseline-1 confound and to supply the only adequately powered region comparison; Baseline 0 emits no region logits and cannot serve that role. Still open before training: the single primary contrast, annotated-stream loss composition, SideAcc aggregation and gate definition, and the lambda/beta/mixing-ratio procedure. |
+| 2026-08-17 | Second-round user decisions on the redesigned study: no entailed-zero region supervision (region loss restricted to the 268 annotated bags; remove the entailed-zero path from `common/losses.py` during implementation), method-A aggregation (max vs noisy-OR) becomes an ablation, `pos_weight=2.0` fixed for all arms, and the Proposed arm adopts PMGAN-style mask-guided attention (per-region MA modules with spatial attention maps RMSE-regressed to region masks, training-time only, `(1+m)*f` residual re-weighting; total loss `L_whole + lambda*m*L_region + beta*L_att`), which satisfies the hard-pooling ban. The frozen patient-level stratified 5-fold `folds.csv` is confirmed reusable unchanged for all arms; nested CV is unnecessary after dropping pseudo-labels. Open: lambda, two-stream mixing ratio, beta (measured loss balancing). |
+| 2026-08-17 | User-directed study redesign: replaced the four-arm plan (Baseline 1/2, Proposed A/B, matched-cohort training) with full-data (13,928-bag) hard-parameter-sharing multi-task learning plus missing-label masking, after the matched fold-0 diagnostic run demonstrated overfitting on the partial cohort. New arms are Baseline 0 (CT + whole mask, the existing `baseline1/` full configuration), Baseline 1 (6ch early-fusion shared backbone with whole + 4-logit region heads), and Proposed (mask-guided four-branch model), each MTL arm compared under whole-output method A (region aggregation) and B (independent head). Region loss uses `L = L_whole + lambda*m*L_region` with masking (missing labels never treated as 0) and two-stream sampling. Discarded: Baseline 2, pseudo-labels, weak supervision, matched training, and the two-stem encoder. Open pre-implementation items: lambda, mixing ratio, entailed-zero handling, aggregation function, and the soft mask-injection mechanism (hard pooling remains banned). |
 | 2026-08-14 | Redirected Baseline 1 multiprocessing temporary files from NFS-backed `.tmp` to `/tmp/vai-baseline1-{uid}` after the completed revised fold-0 run emitted repeated DataLoader finalizer cleanup tracebacks. The run artifacts were intact; this is an exit-cleanup fix for subsequent runs. |
 | 2026-08-14 | Completed and then user-refined the Baseline 1 `matched` parameter audit. The diagnostic fold-0 run learned but severely overfit after epoch 21. The final revision removes the stale 10-epoch freeze, uses two-epoch all-layer warmup followed by `ReduceLROnPlateau(val_bce)`, keeps AUROC-based checkpointing/early stopping, raises global clip from 1.0 to 5.0, saves scheduler state for exact resume, adds clip-rate and validation score-gap diagnostics, and isolates the revised B0 run under `test-2/matched_b0_v2`. The old checkpoint is incompatible and must not be resumed. |
 | 2026-08-12 | Deferred Baseline 1 schedule changes to the next session by user decision. The next review must jointly reconsider freeze duration, differential backbone/head LR, warmup transitions, cosine horizon, epoch budget, early-stopping eligibility/patience, and total optimizer updates. The current fold-0 partial run is a diagnostic smoke run and must not be used as an experimental result or resumed under a revised schedule. |

@@ -1,4 +1,4 @@
-"""Baseline 1の出力パスとW&B実験管理。"""
+"""Baseline 0の出力パスとW&B実験管理。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 
-BASELINE1_DIR = Path(__file__).resolve().parent
+BASELINE0_DIR = Path(__file__).resolve().parents[1]
 
 
 def resolve_experiment_root(config: dict[str, Any]) -> Path:
@@ -24,14 +24,14 @@ def resolve_experiment_root(config: dict[str, Any]) -> Path:
         or "/" in name
     ):
         raise ValueError("experiment.phase/nameにpath区切りは使えません")
-    return BASELINE1_DIR / "outputs" / phase / name
+    return BASELINE0_DIR / "outputs" / phase / name
 
 
 def resolve_fold_dir(config: dict[str, Any], fold: int) -> Path:
     """foldのローカル成果物ディレクトリを作成して返す。"""
     if fold not in range(5):
         raise ValueError(f"foldが不正です: {fold}")
-    fold_dir = resolve_experiment_root(config) / f"fold{fold}"
+    fold_dir = resolve_experiment_root(config) / f"outer{fold}"
     fold_dir.mkdir(parents=True, exist_ok=True)
     return fold_dir
 
@@ -99,23 +99,39 @@ def log_wandb_epoch(
     backbone_lr: float,
     head_lr: float,
     elapsed_seconds: float,
+    early_stopping_best_loss: float,
+    early_stopping_bad_epochs: int,
 ) -> None:
-    """1 epoch分のBaseline 1指標をW&Bへ記録する。"""
+    """1 epoch分のBaseline 0指標をW&Bへ記録する。"""
     wandb_module.log(
         {
             "epoch": epoch,
             "train_bce": train_metrics["loss"],
             "train_grad_norm": train_metrics["grad_norm"],
             "train_gradient_clip_fraction": train_metrics["clip_fraction"],
+            "train_mixup_fraction": train_metrics["mixup_fraction"],
             "val_bce": validation_metrics["loss"],
             "val_auroc": validation_metrics["auroc"],
-            "val_average_precision": validation_metrics["average_precision"],
+            "val_prauc": validation_metrics["average_precision"],
+            "val_precision_at_0_5": validation_metrics["precision_at_0_5"],
+            "val_recall_at_0_5": validation_metrics["recall_at_0_5"],
+            "val_f1_at_0_5": validation_metrics["f1_at_0_5"],
+            "val_f1_optimal_threshold": validation_metrics["f1_optimal_threshold"],
+            "val_precision_at_f1_optimal": validation_metrics[
+                "precision_at_f1_optimal"
+            ],
+            "val_recall_at_f1_optimal": validation_metrics["recall_at_f1_optimal"],
+            "val_f1_optimal": validation_metrics["f1_optimal"],
             "val_negative_score_mean": validation_metrics["negative_score_mean"],
             "val_positive_score_mean": validation_metrics["positive_score_mean"],
             "val_score_gap": validation_metrics["score_gap"],
             "backbone_lr": backbone_lr,
             "head_lr": head_lr,
+            "train_data_wait_seconds": train_metrics["data_wait_seconds"],
+            "train_compute_seconds": train_metrics["compute_seconds"],
             "epoch_seconds": elapsed_seconds,
+            "early_stopping_best_bce": early_stopping_best_loss,
+            "early_stopping_bad_epochs": early_stopping_bad_epochs,
         },
         step=epoch,
     )
@@ -127,10 +143,20 @@ def update_best_summary(
     """最良checkpointの指標をW&B summaryへ保存する。"""
     wandb_module.run.summary["best_epoch"] = epoch
     wandb_module.run.summary["best_val_auroc"] = validation_metrics["auroc"]
-    wandb_module.run.summary["best_val_average_precision"] = validation_metrics[
+    wandb_module.run.summary["auroc_checkpoint_val_prauc"] = validation_metrics[
         "average_precision"
     ]
     wandb_module.run.summary["best_val_bce"] = validation_metrics["loss"]
+
+
+def update_best_prauc_summary(
+    wandb_module: Any, epoch: int, validation_metrics: dict[str, float]
+) -> None:
+    """Store the best validation PR-AUC checkpoint summary."""
+    wandb_module.run.summary["best_val_prauc_epoch"] = epoch
+    wandb_module.run.summary["best_val_prauc"] = validation_metrics["average_precision"]
+    wandb_module.run.summary["prauc_checkpoint_val_auroc"] = validation_metrics["auroc"]
+    wandb_module.run.summary["prauc_checkpoint_val_bce"] = validation_metrics["loss"]
 
 
 def finish_wandb(
@@ -146,7 +172,7 @@ def finish_wandb(
     wandb_module.run.summary["stopped_epoch"] = epoch
     if validation_metrics is not None:
         wandb_module.run.summary["final_val_auroc"] = validation_metrics["auroc"]
-        wandb_module.run.summary["final_val_average_precision"] = validation_metrics[
+        wandb_module.run.summary["final_val_prauc"] = validation_metrics[
             "average_precision"
         ]
     wandb_module.run.summary["train_rows"] = train_rows
