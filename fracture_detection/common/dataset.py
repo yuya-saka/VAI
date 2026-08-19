@@ -1,4 +1,4 @@
-"""反転拡張を行わない共通2.5D dataset。"""
+"""水平反転のみを許可する共通2.5D dataset。"""
 
 from __future__ import annotations
 
@@ -44,6 +44,57 @@ def validate_arrays(
     region_values = set(np.unique(region_mask).tolist())
     if not region_values.issubset({0, 1, 2, 3, 4}):
         raise ValueError(f"領域マスクに不正な値があります: {sorted(region_values)}")
+
+
+#: 水平反転時の領域ラベル並べ替え。R2(右横突孔)とR3(左横突孔)だけを入れ替える。
+LR_SWAPPED_REGION_ORDER = (0, 2, 1, 3)
+_RIGHT_FORAMEN_VALUE = 2
+_LEFT_FORAMEN_VALUE = 3
+
+
+def flip_horizontal(
+    ct: np.ndarray,
+    vertebra_mask: np.ndarray,
+    region_mask: np.ndarray,
+    region_targets: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """水平反転し、左右対称なR2/R3のラベルとマスク値を同時に入れ替える。
+
+    R2=right_transverse_foramenとR3=left_transverse_foramenは左右対称の
+    同種構造なので、鏡像化と同時に入れ替えれば意味論が完全に保存される。
+    R1=vertebral_bodyとR4=posterior_elementsは正中構造なので影響を受けない。
+
+    vertical flipとtransposeは同じ扱いができない。R1とR4は鏡像関係にない
+    別種の構造であり、対応する入れ替えが存在しないためである。
+
+    入れ替えはR2/R3のペアに対して行うので、どちらを名目上「左」と呼ぶかの
+    規約には依存しない。
+
+    引数:
+        ct: (面数, CTチャンネル, 高さ, 幅)
+        vertebra_mask: (面数, 高さ, 幅)
+        region_mask: (面数, 高さ, 幅)、値は0〜4
+        region_targets: (4,) のR1〜R4ラベル
+
+    戻り値:
+        反転済みの (ct, vertebra_mask, region_mask, region_targets)
+    """
+    if region_targets.shape != (N_REGIONS,):
+        raise ValueError(f"領域ラベル形状が不正です: {region_targets.shape}")
+
+    flipped_region = region_mask[..., ::-1]
+    table_size = max(int(flipped_region.max(initial=0)) + 1, N_REGIONS + 1)
+    swap_table = np.arange(table_size, dtype=region_mask.dtype)
+    swap_table[_RIGHT_FORAMEN_VALUE] = _LEFT_FORAMEN_VALUE
+    swap_table[_LEFT_FORAMEN_VALUE] = _RIGHT_FORAMEN_VALUE
+    swapped_region = swap_table[flipped_region]
+
+    return (
+        np.ascontiguousarray(ct[..., ::-1]),
+        np.ascontiguousarray(vertebra_mask[..., ::-1]),
+        np.ascontiguousarray(swapped_region),
+        np.ascontiguousarray(region_targets[list(LR_SWAPPED_REGION_ORDER)]),
+    )
 
 
 def build_mask_channels(

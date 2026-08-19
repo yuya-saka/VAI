@@ -30,7 +30,8 @@ class _TinyModel(nn.Module):
         self.trainable_history.append(trainable)
 
 
-def test_optimizer_excludes_bias_and_norm_from_weight_decay() -> None:
+def test_optimizer_applies_weight_decay_to_all_parameters() -> None:
+    """RSNA Stage1と同じく、bias・BatchNormもweight decayの対象にする。"""
     model = _TinyModel()
 
     optimizer = create_optimizer(
@@ -40,11 +41,16 @@ def test_optimizer_excludes_bias_and_norm_from_weight_decay() -> None:
         head_learning_rate=3e-4,
     )
 
-    assert {group["weight_decay"] for group in optimizer.param_groups} == {0.0, 1e-4}
+    assert {group["weight_decay"] for group in optimizer.param_groups} == {1e-4}
     assert {group["category"] for group in optimizer.param_groups} == {
         "backbone",
         "head",
     }
+    grouped = [
+        parameter for group in optimizer.param_groups for parameter in group["params"]
+    ]
+    assert len(grouped) == len(list(model.parameters()))
+    assert any(parameter.ndim <= 1 for parameter in grouped)
 
 
 def test_learning_rate_controller_can_warm_all_layers() -> None:

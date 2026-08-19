@@ -63,7 +63,7 @@ class _TinyModel(nn.Module):
 
 def _config() -> dict[str, Any]:
     return {
-        "protocol_version": "baseline0-nested-v7",
+        "protocol_version": "baseline0-nested-v8",
         "experiment": {"phase": "baseline0", "name": "trainer"},
         "runtime": {"outer_fold": 0, "inner_fold": 1, "train_folds": [2, 3, 4]},
         "training": {
@@ -74,7 +74,7 @@ def _config() -> dict[str, Any]:
             "pos_weight": 2.0,
             "mixup_probability": 0.2,
             "weight_decay": 1e-4,
-            "gradient_clip_norm": 5.0,
+            "gradient_clip_norm": None,
             "freeze_backbone_epochs": 0,
             "warmup_epochs": 0,
             "warmup_start_factor": 1.0,

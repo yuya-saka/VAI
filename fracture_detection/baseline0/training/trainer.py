@@ -168,6 +168,13 @@ def train_fold(
         head_min_learning_rate=float(training["head_min_learning_rate"]),
     )
     model.to(device)
+    # RSNA Stage1と同じく、nullは「clipしない」を表す実質無限大として扱う。
+    raw_gradient_clip_norm = training["gradient_clip_norm"]
+    gradient_clip_norm = (
+        float("inf")
+        if raw_gradient_clip_norm is None
+        else float(raw_gradient_clip_norm)
+    )
     fold_dir.mkdir(parents=True, exist_ok=True)
     best_path = fold_dir / "best_model.pt"
     best_prauc_path = fold_dir / "best_val_prauc_model.pt"
@@ -209,7 +216,7 @@ def train_fold(
                 controller,
                 global_step,
                 device,
-                float(training["gradient_clip_norm"]),
+                gradient_clip_norm,
                 pos_weight,
                 float(training["mixup_probability"]),
                 f"outer{outer_fold} epoch{epoch}/{max_epochs} 学習",

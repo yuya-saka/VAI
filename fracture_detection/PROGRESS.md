@@ -366,6 +366,77 @@ Codexの回答（全文 `.claude/docs/codex/20260818-remaining-four-decisions.md
 - 検証: common + Baseline 0の49 tests、Ruff check/format、mypy 27 source filesが通過。sandbox外の軽量DataLoaderで8 workersの起動とbatch取得も通過
 - **正式なv3学習・outer推論は未開始**。6構成・λ/β・code/config hash凍結前のouter推論は禁止
 
+### 2026-08-18（続き・v4診断結果とv8正則化改訂）
+
+- `08_18/v4` outer 0の診断結果: epoch 24から train/val BCE が乖離し、
+  epoch 38で early stopping（patience 15）が発火。best val AUROC 0.898 は epoch 17、
+  停止時の cosine LR は 1.29e-4 で **eta_min へのアニールが49%しか進んでいない**
+- 参照Stage1（`train_models/stage1` v1_parity）を実測比較したところ、**全5 foldが75 epoch完走**し
+  early stoppingは一度も発火せず、best val AUROCは **epoch 59 / 61 / 61 / 73 / 74**（=低LR収束後）に集中。
+  最終 train/val gap は +0.021 / -0.027 / +0.031 / -0.035 / +0.003 で過学習していない
+- 差分の主因は **hflip・vflip・transpose（各p=0.5、いずれかが87.5%で発火）の除外**と特定。
+  この3つはR1〜R4の向き依存ラベルを壊すため復活させられない
+- 副次的に判明した非parity 2点: `gradient_clip_norm=5.0`（Stage1はnull）と、
+  weight decayのbias/norm除外（Stage1は全パラメータ一律）
+- **dropoutによる代替は却下**。Stage1は`drop_rate=0.0 / drop_path_rate=0.0`で過学習していないため、
+  参照実装が使っていない別機構で埋めるのは正当化できない。同じ機構（augmentationの多様性）で戻す
+- 領域定義を確認したところ **R2=right_transverse_foramen / R3=left_transverse_foramen は
+  左右対称の同種構造**なので、水平反転と同時にラベルとマスク値を入れ替えれば意味論が完全に保存される。
+  R1=vertebral_body / R4=posterior_elements は正中構造なので水平反転の影響を受けない。
+  一方 vertical flip と transpose は R1 と R4 を入れ替えることになるが、この2つは鏡像関係にない
+  別種の構造であり正しい入れ替えが存在しないため、**恒久的に禁止**（schema.pyで設定キーごと拒否）
+- protocol `baseline0-nested-v8`: **`horizontal_flip_probability=0.5` を復活**（発火率0%→50%、
+  Stage1の87.5%には届かないが3種のうち唯一正当に戻せる）。weight decay をStage1と同じ
+  全trainable parameter一律へ統一。`gradient_clip_norm`は`null`（実質無限大）へ。
+  `early_stopping_patience`は15→**20**。dropout・mixup・head_dropout・LR・T_max=75は据え置き。
+  出力先は`08_18/v5`、GPU 0
+- 領域ラベルを持つアーム用に `common.dataset.flip_horizontal` を追加。
+  CT・椎体マスク・領域マスク・領域ラベルを反転し、R2/R3のマスク値とラベルを同時に入れ替える。
+  Baseline 0はwholeラベルのみで左右依存がないため`A.HorizontalFlip`をそのまま使う
+- ⚠️ `min_epoch`は**上げてはいけない**。`trainer.py`の`eligible = epoch >= min_epoch`が
+  early stoppingとcheckpoint保存の両方を制御しており、上げるとepoch 17のような早期bestが保存対象から外れる
+- ⚠️ この正則化改訂は **inner-valの挙動を見た後のprotocol amendment**。候補グリッド探索は行わず
+  事前指定値1点をfreezeしたが、選択バイアスは消えないため報告時にlimitationとして明記する
+- 検証: common + Baseline 0の**70 tests**、Ruff check/format、mypy（既存のstub不足のみ）が通過。
+  実測で hflip発火率0.5038（4000試行、95%CI [0.488, 0.519]、検出漏れ0）、CTと椎体マスクの同期反転、
+  R2↔R3のマスク値・ラベル入れ替えとdtype保持、optimizer 472/472パラメータ（1次元292個含む）が
+  同一decay対象、clip閾値infでgrad norm無変更を確認
+
+### 2026-08-19（mixup据え置きの確定・LRとバッチの検討）
+
+- **mixup `p=0.2` を確定。増量案は恒久的に却下**（2026-08-19ユーザー決定）。
+  RSNA原典`stage2-type1.ipynb`は`p_mixup=0.5`であり、v5に残るtrain/val gap
+  （ep56で+0.087、Stage1は-0.016）への対処として0.5への復帰を検討したが不採用。
+  理由は`L_att`との相互作用: `L_att`はspatial attention mapを領域maskへRMSE回帰させる
+  **密な空間損失**であり、mixupすると教師が`λ·M_a+(1-λ)·M_b`という別患者2人の
+  重ね合わせになる。空間座標は重ね合わせても意味を持たず、「ここが右横突孔」という
+  空間的対応を教える`L_att`の役目を壊す。さらにmixup発火率を上げると
+  **H2（attention回帰教師の新規性）が検出したい効果そのものを薄める**。
+  加えてnatural stream（`L_whole`/`L_att`）だけにmixupがかかりannotated stream
+  （`L_region`）にはかからないため、増量は3損失項の相対バランスとλ/β校正をずらす
+- **LRは2.3e-4据え置きを確認**。原典`stage2-type1.ipynb`は`batch_size=8`/`init_lr=23e-5`だが、
+  実効batch16への倍増は`stage2/parity.yaml`（8×2GPU DDP）の時点で行われ、LRは据え置かれていた。
+  Stage1（batch16 + 2.3e-4）が5foldでAUROC 0.909〜0.931・75 epoch完走・過学習なしを実測しており、
+  **実効構成としてすでに検証済み**。またmodelはbagを面へ展開するため
+  encoder/BNが見るのは16×15=**240サンプル**で、bag単位2倍のLR感度はさらに小さい
+- v5のval loss挙動はLR問題を示していない: 全foldがep32〜43でval_bce最良（LRは1.07〜1.54e-4）、
+  以降はtrain lossだけ下がりval悪化。val_bceのepoch間変動もLRが高い前半(0.015〜0.030)より
+  低い後半(0.011〜0.016)の方が小さく、発散も振動もない。**残る課題はLRではなく正則化不足**
+- **batch 32案も却下**。GPU utilizationが既に100%で総演算量は不変のため高速化しない。
+  さらにsteps/epochが505→253となり75 epochでの総更新回数が37,875→18,975と半減する。
+  高速化が目的ならfoldを複数GPUへ分割する方が無害（`start_outer_fold`/`end_outer_fold`）
+- v4(v7旧設定)完走: 5fold平均 outer AUROC 0.8949±0.0153、AP 0.7082、Recall 0.5825、F1 0.6641。
+  AUROC-best checkpointはepoch 17/35/37/37/30
+- v5(v8)のouter0〜3: 平均 outer AUROC 0.9059±0.0161、AP 0.7367±0.0218、
+  Recall 0.6383±0.0223、F1 0.7000。AUROC-best checkpointはepoch 53/49/51/39。
+  **精度は全面的に向上しAUROCの安定性は同等**。checkpoint epochが後方へ移動し
+  cosineの低LR収束フェーズを使えるようになった
+- ⚠️ Precisionのfold間stdはv4 0.0511→v5 0.0981と悪化。原因は**F1最適閾値の選択ブレ**
+  （v5で0.342〜0.656）。val陽性が268件でF1曲線が頂点付近で平坦なためargmaxが不安定。
+  ただし**primary endpointはAUROCなので主要な結論には影響しない**
+- ベースライン設定の最終確定は**後続アーム（Control–B / Baseline 1–B / Proposed 3構成）の
+  挙動を見てから判断する**方針（2026-08-19ユーザー決定）。patience・max_epochsは未決
+
 ## 次のタスク
 
 1. Control–B / Baseline 1–B を共通sampler・nested契約へ接続して実装

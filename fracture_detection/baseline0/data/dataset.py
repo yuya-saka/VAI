@@ -26,6 +26,7 @@ from fracture_detection.common.constants import (
 
 def build_train_transform(augmentation: dict[str, float]) -> A.ReplayCompose:
     """CTのみの強度変換とCT・マスク同期の空間変換を構築する。"""
+    horizontal_flip_probability = float(augmentation["horizontal_flip_probability"])
     affine_probability = float(augmentation["affine_probability"])
     shift_limit = float(augmentation["shift_limit"])
     scale_lower = float(augmentation["scale_lower"])
@@ -44,6 +45,10 @@ def build_train_transform(augmentation: dict[str, float]) -> A.ReplayCompose:
 
     return A.ReplayCompose(
         [
+            # Baseline 0はwholeラベルのみで左右依存がないためそのまま適用できる。
+            # 領域ラベルを持つアームはcommon.dataset.flip_horizontalを使い、
+            # R2/R3のラベルとマスク値を同時に入れ替えること。
+            A.HorizontalFlip(p=horizontal_flip_probability),
             A.RandomBrightnessContrast(
                 brightness_limit=brightness_limit,
                 contrast_limit=contrast_limit,
@@ -202,6 +207,7 @@ def _validate_baseline_arrays(ct: np.ndarray, whole_mask: np.ndarray) -> None:
 def default_augmentation() -> dict[str, float]:
     """Baseline 0の凍結augmentation設定を返す。"""
     return {
+        "horizontal_flip_probability": 0.50,
         "affine_probability": 0.70,
         "shift_limit": 0.30,
         "scale_lower": 0.70,

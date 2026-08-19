@@ -73,12 +73,28 @@ def test_validate_config_rejects_removed_matched_mode() -> None:
         validate_config(config)
 
 
-def test_validate_config_rejects_reflection_augmentation() -> None:
-    config = _config()
-    config["augmentation"]["horizontal_flip"] = False
+def test_validate_config_rejects_vertical_flip_and_transpose() -> None:
+    """R1/R4に正しい入れ替えが存在しない反転は恒久的に禁止する。"""
+    for key in (
+        "vertical_flip",
+        "vertical_flip_probability",
+        "transpose",
+        "transpose_probability",
+    ):
+        config = _config()
+        config["augmentation"][key] = 0.5
 
-    with pytest.raises(ValueError, match="禁止augmentation"):
-        validate_config(config)
+        with pytest.raises(ValueError, match="禁止augmentation"):
+            validate_config(config)
+
+
+def test_validate_config_accepts_horizontal_flip() -> None:
+    """R2/R3の入れ替えで意味論が保存されるためhorizontal flipは許可する。"""
+    config = _config()
+
+    validate_config(config)
+
+    assert config["augmentation"]["horizontal_flip_probability"] == 0.5
 
 
 def test_validate_config_rejects_stage1_augmentation_drift() -> None:

@@ -10,7 +10,7 @@ import yaml  # type: ignore[import-untyped]
 
 from fracture_detection.common.splits import resolve_nested_folds
 
-PROTOCOL_VERSION = "baseline0-nested-v7"
+PROTOCOL_VERSION = "baseline0-nested-v8"
 REQUIRED_SECTIONS = {
     "protocol_version",
     "experiment",
@@ -50,10 +50,10 @@ FROZEN_TRAINING: dict[str, object] = {
     "pos_weight": 2.0,
     "max_epochs": 75,
     "min_epoch": 1,
-    "early_stopping_patience": 15,
+    "early_stopping_patience": 20,
     "early_stopping_metric": "val_bce",
     "weight_decay": 1e-4,
-    "gradient_clip_norm": 5.0,
+    "gradient_clip_norm": None,
     "amp_dtype": "bfloat16",
     "freeze_backbone_epochs": 0,
     "warmup_epochs": 0,
@@ -66,6 +66,7 @@ FROZEN_TRAINING: dict[str, object] = {
     "mixup_probability": 0.2,
 }
 FROZEN_AUGMENTATION: dict[str, object] = {
+    "horizontal_flip_probability": 0.5,
     "affine_probability": 0.7,
     "shift_limit": 0.3,
     "scale_lower": 0.7,
@@ -160,10 +161,17 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("training.gpu_idは0以上の整数である必要があります")
 
     augmentation = _section(config, "augmentation")
+    # horizontal flipだけは許可する。R2=right_transverse_foramenと
+    # R3=left_transverse_foramenは左右対称の同種構造なので、鏡像化と同時に
+    # ラベルを入れ替えれば意味論が保存される（common.dataset.flip_horizontal参照）。
+    # vertical flipとtransposeはR1=vertebral_bodyとR4=posterior_elementsを
+    # 入れ替えることになるが、この2つは鏡像関係にない別種の構造のため、
+    # 正しい入れ替えが存在しない。恒久的に禁止する。
     prohibited = {
-        "horizontal_flip",
         "vertical_flip",
+        "vertical_flip_probability",
         "transpose",
+        "transpose_probability",
     }
     present = prohibited & set(augmentation)
     if present:

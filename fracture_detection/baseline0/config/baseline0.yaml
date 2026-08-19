@@ -1,8 +1,8 @@
-protocol_version: baseline0-nested-v7
+protocol_version: baseline0-nested-v8
 
 experiment:
-  phase: 08_18
-  name: v4
+  phase: 08_19
+  name: v6
 
 data:
   random_seed: 20260807
@@ -20,22 +20,22 @@ model:
   pretrained: true
   in_chans: 6
   n_planes: 15
-  drop_rate: 0.0
-  drop_path_rate: 0.0
+  drop_rate: 0.00
+  drop_path_rate: 0.00
   head_dropout: 0.30
   lstm_hidden: 256
   lstm_layers: 2
 
 training:
-  gpu_id: 1
+  gpu_id: 0
   natural_batch_size: 16
   pos_weight: 2.0
   max_epochs: 75
   min_epoch: 1
-  early_stopping_patience: 15
+  early_stopping_patience: 20
   early_stopping_metric: val_bce
   weight_decay: 0.0001
-  gradient_clip_norm: 5.0
+  gradient_clip_norm: null
   amp_dtype: bfloat16
   freeze_backbone_epochs: 0
   warmup_epochs: 0
@@ -48,6 +48,7 @@ training:
   mixup_probability: 0.20
 
 augmentation:
+  horizontal_flip_probability: 0.50
   affine_probability: 0.70
   shift_limit: 0.30
   scale_lower: 0.70

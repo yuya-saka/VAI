@@ -136,6 +136,7 @@ def test_default_augmentation_matches_stage1_except_orientation_changes() -> Non
     transform_names = [item.__class__.__name__ for item in transform.transforms]
 
     assert values == {
+        "horizontal_flip_probability": 0.5,
         "affine_probability": 0.7,
         "shift_limit": 0.3,
         "scale_lower": 0.7,
@@ -153,10 +154,12 @@ def test_default_augmentation_matches_stage1_except_orientation_changes() -> Non
         "cutout_ratio": 0.5,
     }
     assert transform_names == [
+        "HorizontalFlip",
         "RandomBrightnessContrast",
         "Affine",
         "OneOf",
         "OneOf",
         "CoarseDropout",
     ]
-    assert not {"HorizontalFlip", "VerticalFlip", "Transpose"} & set(transform_names)
+    # R1/R4に正しいラベル入れ替えが存在しない反転は使わない。
+    assert not {"VerticalFlip", "Transpose"} & set(transform_names)

@@ -20,18 +20,17 @@ class _ParameterGroupedModel(Protocol):
     def set_backbone_trainable(self, trainable: bool) -> None: ...
 
 
-def _is_no_decay(name: str, parameter: nn.Parameter) -> bool:
-    """bias・正規化パラメータをweight decayの対象外にする。"""
-    return name.endswith(".bias") or parameter.ndim <= 1
-
-
 def create_optimizer(
     model: nn.Module,
     weight_decay: float,
     backbone_learning_rate: float,
     head_learning_rate: float,
 ) -> torch.optim.AdamW:
-    """バックボーン・分類部とdecay・no-decayを分離したAdamWを作る。"""
+    """バックボーン・分類部だけを分離したAdamWを作る。
+
+    weight decayはRSNA Stage1と同じく、bias・正規化パラメータを含む
+    全trainable parameterへ一律に適用する。
+    """
     if any(
         not math.isfinite(learning_rate) or learning_rate <= 0
         for learning_rate in (backbone_learning_rate, head_learning_rate)
@@ -49,12 +48,7 @@ def create_optimizer(
     if backbone_ids & head_ids:
         raise ValueError("backbone/head parameterが重複しています")
 
-    grouped: dict[tuple[str, bool], list[nn.Parameter]] = {
-        ("backbone", True): [],
-        ("backbone", False): [],
-        ("head", True): [],
-        ("head", False): [],
-    }
+    grouped: dict[str, list[nn.Parameter]] = {"backbone": [], "head": []}
     for name, parameter in model.named_parameters():
         if id(parameter) in backbone_ids:
             category = "backbone"
@@ -62,10 +56,10 @@ def create_optimizer(
             category = "head"
         else:
             raise ValueError(f"optimizerへ分類できないparameterがあります: {name}")
-        grouped[(category, not _is_no_decay(name, parameter))].append(parameter)
+        grouped[category].append(parameter)
 
     parameter_groups: list[dict[str, object]] = []
-    for (category, apply_decay), parameters in grouped.items():
+    for category, parameters in grouped.items():
         if not parameters:
             continue
         parameter_groups.append(
@@ -76,7 +70,7 @@ def create_optimizer(
                     if category == "backbone"
                     else head_learning_rate
                 ),
-                "weight_decay": weight_decay if apply_decay else 0.0,
+                "weight_decay": weight_decay,
                 "category": category,
             }
         )
