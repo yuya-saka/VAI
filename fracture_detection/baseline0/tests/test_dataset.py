@@ -64,6 +64,7 @@ def test_apply_bag_transform_keeps_mask_binary_and_geometry_shared() -> None:
     whole_mask[:, 8, 12] = 1.0
     transform = augment_from_config(
         {
+            "horizontal_flip_probability": 0.0,
             "affine_probability": 1.0,
             "shift_limit": 0.0,
             "scale_lower": 1.0,

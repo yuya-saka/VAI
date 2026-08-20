@@ -10,7 +10,7 @@
 > `PROGRESS_ARCHIVE_4arm.md` に分離した。やっていることが根本的に異なるため、
 > 旧ファイルの設計判断・数値・タスクは現行計画には適用しない。
 >
-> 🔧 **2026-08-18に設計凍結・未決事項ゼロ。実装フェーズに入る。**
+> 🔧 **2026-08-19に共有コア・6構成・校正/profile/解析CLIを実装。正式校正・20-step profile・凍結は未実行。**
 > 実装だけなら
 > `.claude/docs/work-logs/2026-08/2026-08-18-implementation-handoff.md`
 > と `memo/計画書/提案手法.md` を読めば足りる（設計の経緯は読まなくてよい）。
@@ -65,9 +65,11 @@ Control vs Baseline 1 は rho≈0.9 / macro-AP MDE 0.027 で、268の母数で�
   ラベル自体は横突孔として判定されていることをアノテータが確認（2026-08-07）。文言のみ修正済み
 - **R2/R3 の「右」「左」は画像基準**。class2は画像右（平均x=155、class3は66）＝患者の左。
   ラベル・マスク・クラス番号は相互整合しており学習/評価に影響なし。臨床的な左右の記述時のみ反転が必要
-- **flip / transpose augmentation は使用しない**。格納済みの画像方向とR2/R3対応を全アームで維持する
-  （SideAcc廃止後も、R2/R3のラベルとmaskの対応は領域別AP評価に必要なため方針は不変）
-- **augmentationはStage1準拠、flip系だけ除外**（2026-08-18ユーザー決定）。horizontal/vertical flipとtransposeは使わず、brightness、Affine（shift 0.3 / scale 0.7–1.3 / rotate ±45° / `BORDER_REFLECT_101`）、blur/noise、distortion、cutoutを同じ確率で使う。natural streamのbatch-level mixupも`p=0.2`、`λ∼U(0,1)`
+- **horizontal flipはlaterality-safe専用実装だけを`p=0.5`で使う**。CT・whole/region maskを同期反転し、
+  R2/R3のmask値と教師を同時交換する。`A.HorizontalFlip`の直接使用は禁止
+- **vertical flip / transposeは恒久禁止**。brightness、Affine（shift 0.3 / scale 0.7–1.3 /
+  rotate ±45° / `BORDER_REFLECT_101`）、blur/noise、distortion、cutoutとnatural stream mixup
+  `p=0.2`、`λ∼U(0,1)`はStage1へ揃える
 - ステージングはfull学習用のinput-manifest SHA256単位共有`/dev/shm` cacheを使用
 
 ### モデルと損失（2026-08-17設計転換で確定）
@@ -90,6 +92,12 @@ Control vs Baseline 1 は rho≈0.9 / macro-AP MDE 0.027 で、268の母数で�
 - **mask-average pooling / per-region hard pooling は全アーム禁止**（PI決定2026-08-04、継続有効）
 - **bag確率は 15面 broadcast + 面ごとBCE + mean-sigmoid**（2026-08-11ユーザー決定。
   Codex推奨のbag-level log-mean-exp は却下）。対応する単一尤度が存在しない点は登録済み限界
+- region headは面単位`[B,15,4]`。方式Aも面ごとにregion logitのmaxを取り、
+  whole lossと評価の両方でmean-sigmoidを使う
+- annotated streamは別forwardとし、BN moduleだけeval、natural backward後にannotated backward、
+  optimizer stepは1回。augmentation / mixup / annotated forwardのRNGを分離してcheckpointする
+- Proposedは`blocks[4]`で分岐し、各branchの`blocks[5]+conv_head+bn2`を独立複製する。
+  `L_att`は14×14 spatial attention `s`へ回帰し、global項と追加SA moduleは使わない
 - backboneは `tf_efficientnetv2_s`
 
 ### 評価プロトコル（2026-08-17確定）
@@ -214,10 +222,10 @@ Codexの回答（全文 `.claude/docs/codex/20260818-remaining-four-decisions.md
 | fold定義 | `folds/` | **完了(検証済)** | folds.csv凍結（seed 20260807）。再生成禁止 |
 | 共通基盤 | `common/` | **完了(検証済)** | manifest / dataset / 明示ラベルのみのregion BCE / 領域別AP / deterministic two-stream sampler / nested split / λ・β校正 / cross-fitted床・MDE |
 | matched cohort | `cohorts/` | **廃止(成果物保持)** | 2026-08-17設計転換で学習不使用に。凍結CSVは削除しない |
-| Baseline 0 | `baseline0/` | **完了(検証済)** | 品質除外済みfull 13,432 bag専用。Stage1準拠augmentation（flip系除外）・mixup・重み合計正規化BCE・bag一括変換・uint8転送、RSNA Type1 V2-S + BiLSTM + 75 epoch cosine、3 fold学習、val BCE early stopping。旧`08_18/v1`〜`v3`はv7正式runに使わない |
-| Control (no-region-mask MTL) | （未作成） | 未着手 | 入力6chはBaseline 0と同一、head/損失/samplerはBaseline 1と同一。交絡分離用の対照 |
-| Baseline 1 (Early Fusion MTL) | （未作成） | 未着手 | 6ch early fusion / whole head + region head 4 logits / 方式A・B比較 |
-| Proposed (Mask-guided Branch) | （未作成） | 未着手 | shared CNN → 4 mask-guided branches。mask注入はPMGAN式attention制約（RMSE回帰、学習時のみ） |
+| Baseline 0 | `baseline0/` | **実装中** | `core/` adapter化とcanonical data pathへの移行中。full trainingは再凍結後のみ |
+| Control (no-region-mask MTL) | `mtl/` | **実装中** | 入力6chはBaseline 0と同一、head/損失/samplerはBaseline 1と同一。学習runは延期 |
+| Baseline 1 (Early Fusion MTL) | `mtl/` | **実装中** | 10ch early fusion / whole head + region head `[B,15,4]` / method B |
+| Proposed (Mask-guided Branch) | `proposed/` | **実装中** | `blocks[4]`分岐 → MA + 独立late branch。3構成を実装 |
 
 状態は 未着手 / 実装中 / 学習中 / 完了(検証済) / 保留 のいずれかで更新する。
 
@@ -237,6 +245,38 @@ Codexの回答（全文 `.claude/docs/codex/20260818-remaining-four-decisions.md
   full用の共有`/dev/shm` staging、checkpoint別outer 1回制約、pooled OOF整合検証
 
 ## 進捗ログ
+
+### 2026-08-19（6構成共有実装とpreflight guard）
+
+- `core/`へarm非依存trainer、optimizer、RNG、artifact、fold-process並列処理を抽出し、Baseline 0 /
+  Control–B / Baseline 1–B / Proposed 3構成をadapter経由で統合
+- canonical 10ch dataset、laterality-safe hflip、per-sample augmentation seed、独立mixup/annotated RNG、
+  BN-only eval、natural→annotatedの逐次2 backward/1 stepを実装
+- λ/β raw artifact、loss weights、20-step resource profile、frozen manifestをimmutable hash chainで接続。
+  source/dependency/input/fold/config hash driftと重複profileを拒否する
+- smoke modeはinner検証とcheckpointまでに限定し、凍結前のouter推論を禁止。正式outer CSVへfrozen manifest
+  SHA256を埋め込み、pooled OOF収集時に5 foldで一致検証する
+- pooled OOF、H1→H2固定順序、領域floor Holm、Control対Baseline 1領域AP、within-level感度、
+  R2/R3 swapのpatient-cluster bootstrap CIを実装
+- 実データ1-step GPU smokeはBaseline 0、Control–B、Baseline 1–B、Proposed–B、
+  Proposed–max β>0/β=0の全6経路で完走。Control–Bは2 GPU × 2 foldの並列実行とresumeも完走し、
+  fold別output/checkpoint/RNGの分離、固定GPU割当、smoke時outer予測なしを確認した
+- resume時に`torch.load(map_location=cuda)`がCPU RNG stateまでCUDA tensorへ移す問題を実機で検出し、
+  復元境界ですべてのtorch RNG stateをCPU `uint8`へ正規化。回帰を含む111 tests、mypy 31 source files、
+  Ruff format/checkが通過
+- 正式64-batch校正、5構成20-step profile、2 GPU × 2 foldの20-step preflight、frozen manifest作成、
+  full trainingは実装完了後の運用工程として未実行
+
+### 2026-08-19（正式pipeline開始）
+
+- 全6 configをA6000 `[0, 1, 2]`、最大3 fold processへ固定し、fold割当を
+  `0→0 / 1→1 / 2→2 / 3→0 / 4→1`へ統一した
+- λ校正をGPU 0、β校正をGPU 1で64 batch × 5 outer foldとして開始。初回実機runでwhole-model eval時の
+  cuDNN LSTM backward失敗と、FP32 Proposed–B校正の48 GB OOMを検出した
+- 校正をrecurrent/Dropout train・BN-only eval、CUDA BF16 autocast、CPU上のstate監査snapshot、
+  global RNG完全復元へ修正。単体・型・Ruff検証後に再開し、GPU使用量約21 GB / 38 GBで安定稼働中
+- 校正完了後はloss weights結合、同一GPUで5構成20-step resource profile、2 GPU × 2 fold preflight、
+  frozen manifest生成、Baseline 0 / Baseline 1–B / Proposed 3構成の正式学習へ自動継続する
 
 ### 2026-08-17（設計転換: 全データMTL + missing-label masking）
 

@@ -12,6 +12,9 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 
+from fracture_detection.core.contexts import batch_norm_eval
+from fracture_detection.core.rng import GlobalRngState
+
 Batch = TypeVar("Batch")
 LossPair = Callable[[Batch], tuple[Tensor, Tensor]]
 
@@ -54,37 +57,42 @@ def calibrate_gradient_weight(
     model_state = _clone_state(model.state_dict())
     optimizer_state = copy.deepcopy(optimizer.state_dict()) if optimizer else None
     was_training = model.training
+    rng_state = GlobalRngState.capture()
     whole_norms: list[float] = []
     auxiliary_norms: list[float] = []
-    model.eval()
     try:
-        for batch_index, batch in enumerate(batches):
-            if batch_index >= expected_batches:
-                break
-            whole_loss, auxiliary_loss = loss_pair(batch)
-            if whole_loss.ndim != 0 or auxiliary_loss.ndim != 0:
-                raise ValueError("校正対象lossはscalarである必要があります")
-            if not torch.isfinite(whole_loss) or not torch.isfinite(auxiliary_loss):
-                raise FloatingPointError("校正lossが非有限値です")
-            whole_gradients = torch.autograd.grad(
-                whole_loss,
-                parameters,
-                retain_graph=True,
-                allow_unused=False,
-            )
-            auxiliary_gradients = torch.autograd.grad(
-                auxiliary_loss,
-                parameters,
-                allow_unused=False,
-            )
-            whole_norms.append(_gradient_l2_norm(whole_gradients))
-            auxiliary_norms.append(_gradient_l2_norm(auxiliary_gradients))
+        model.train(True)
+        with batch_norm_eval(model):
+            for batch_index, batch in enumerate(batches):
+                if batch_index >= expected_batches:
+                    break
+                whole_loss, auxiliary_loss = loss_pair(batch)
+                if whole_loss.ndim != 0 or auxiliary_loss.ndim != 0:
+                    raise ValueError("校正対象lossはscalarである必要があります")
+                if not torch.isfinite(whole_loss) or not torch.isfinite(auxiliary_loss):
+                    raise FloatingPointError("校正lossが非有限値です")
+                whole_gradients = torch.autograd.grad(
+                    whole_loss,
+                    parameters,
+                    retain_graph=True,
+                    allow_unused=False,
+                )
+                whole_norms.append(_gradient_l2_norm(whole_gradients))
+                del whole_gradients
+                auxiliary_gradients = torch.autograd.grad(
+                    auxiliary_loss,
+                    parameters,
+                    allow_unused=False,
+                )
+                auxiliary_norms.append(_gradient_l2_norm(auxiliary_gradients))
+                del auxiliary_gradients, whole_loss, auxiliary_loss
         if len(whole_norms) != expected_batches:
             raise ValueError(
                 f"校正batch数が不足しています: {len(whole_norms)}/{expected_batches}"
             )
     finally:
         model.train(was_training)
+        rng_state.restore()
 
     _assert_state_equal(model_state, model.state_dict(), "model")
     if optimizer is not None and optimizer_state is not None:
@@ -122,8 +130,8 @@ def _gradient_l2_norm(gradients: Sequence[Tensor]) -> float:
 
 
 def _clone_state(state: Mapping[str, Tensor]) -> dict[str, Tensor]:
-    """model stateをdevice上で複製する。"""
-    return {name: value.detach().clone() for name, value in state.items()}
+    """model stateをGPU memoryを圧迫せずCPUへ複製する。"""
+    return {name: value.detach().cpu().clone() for name, value in state.items()}
 
 
 def _assert_state_equal(
@@ -132,7 +140,11 @@ def _assert_state_equal(
     """tensor stateの完全一致を検証する。"""
     if expected.keys() != actual.keys():
         raise RuntimeError(f"校正後に{name} stateのkeyが変化しました")
-    changed = [key for key in expected if not torch.equal(expected[key], actual[key])]
+    changed = [
+        key
+        for key in expected
+        if not torch.equal(expected[key], actual[key].detach().cpu())
+    ]
     if changed:
         raise RuntimeError(f"校正後に{name} stateが変化しました: {changed[:5]}")
 

@@ -100,6 +100,13 @@ class Baseline0Model(nn.Module):
         """異なる学習率の設定に使うバックボーンのパラメータを返す。"""
         return list(self.encoder.parameters())
 
+    def shared_parameters(self) -> list[nn.Parameter]:
+        """共有trainerの勾配監査対象`blocks[4]`を返す。"""
+        blocks = getattr(self.encoder, "blocks", None)
+        if not isinstance(blocks, nn.Sequential) or len(blocks) <= 4:
+            raise ValueError("backboneにblocks[4]がありません")
+        return list(blocks[4].parameters())
+
     def head_parameters(self) -> list[nn.Parameter]:
         """異なる学習率の設定に使うLSTMと分類部のパラメータを返す。"""
         return [*self.lstm.parameters(), *self.head.parameters()]

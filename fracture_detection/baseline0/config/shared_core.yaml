@@ -1,0 +1,16 @@
+arm:
+  name: baseline0
+  kind: baseline0
+  package: baseline0
+  input_channels: 6
+  whole_method: independent
+  region_enabled: false
+  attention_enabled: false
+  beta_mode: zero
+experiment:
+  phase: 08_19
+  name: baseline0_shared_core
+parallel:
+  mode: fold
+  gpu_ids: [0, 1, 2]
+  max_concurrent_folds: 3
