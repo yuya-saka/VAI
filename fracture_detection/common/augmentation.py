@@ -10,7 +10,11 @@ import albumentations as A
 import cv2
 import numpy as np
 
-from fracture_detection.common.dataset import build_mask_channels, flip_horizontal
+from fracture_detection.common.dataset import (
+    LR_SWAPPED_REGION_ORDER,
+    build_mask_channels,
+    flip_horizontal,
+)
 
 
 @dataclass(frozen=True)
@@ -89,13 +93,19 @@ def apply_canonical_augmentation(
     vertebra_mask: np.ndarray,
     region_mask: np.ndarray,
     region_targets: np.ndarray,
+    region_target_valid: np.ndarray,
     augmentation: CanonicalAugmentation,
     seed: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """75ch imageと30ch maskを1回で変換する。"""
+    if region_target_valid.shape != region_targets.shape:
+        raise ValueError("region targetとvalidityの形状が一致しません")
     if random.Random(seed).random() < augmentation.horizontal_flip_probability:
         ct, vertebra_mask, region_mask, region_targets = flip_horizontal(
             ct, vertebra_mask, region_mask, region_targets
+        )
+        region_target_valid = np.ascontiguousarray(
+            region_target_valid[list(LR_SWAPPED_REGION_ORDER)]
         )
     plane_count, channel_count, height, width = ct.shape
     image_stack = ct.transpose(2, 3, 0, 1).reshape(
@@ -123,7 +133,13 @@ def apply_canonical_augmentation(
     values = set(np.unique(transformed_region).tolist())
     if not values.issubset({0, 1, 2, 3, 4}):
         raise ValueError(f"augmentation後のregion mask値が不正です: {values}")
-    return transformed_ct, transformed_whole, transformed_region, region_targets
+    return (
+        transformed_ct,
+        transformed_whole,
+        transformed_region,
+        region_targets,
+        region_target_valid,
+    )
 
 
 def build_uint8_inputs(

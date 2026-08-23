@@ -9,6 +9,7 @@ import torch
 from fracture_detection.common.constants import (
     EXPECTED_CT_SHAPE,
     EXPECTED_MASK_SHAPE,
+    REGION_TARGET_VALID_COLUMNS,
 )
 from fracture_detection.common.dataset import (
     FractureDataset,
@@ -34,7 +35,7 @@ def _write_sample(dataset_dir: Path) -> pd.DataFrame:
     np.save(bag_dir / "vertebra_mask.npy", vertebra_mask)
     np.save(bag_dir / "region_4class.npy", region_mask)
 
-    return pd.DataFrame(
+    frame = pd.DataFrame(
         [
             {
                 "study_id": "study-a",
@@ -42,6 +43,7 @@ def _write_sample(dataset_dir: Path) -> pd.DataFrame:
                 "fold": 0,
                 "vertebra_target": 1,
                 "has_region_target": True,
+                "annotation_complete": False,
                 "region_1": 1,
                 "region_2": 1,
                 "region_3": 0,
@@ -49,6 +51,11 @@ def _write_sample(dataset_dir: Path) -> pd.DataFrame:
             }
         ]
     )
+    for column, value in zip(
+        REGION_TARGET_VALID_COLUMNS, [True, True, False, False], strict=True
+    ):
+        frame[column] = value
+    return frame
 
 
 def test_dataset_preserves_orientation_and_builds_ten_channels(
@@ -67,7 +74,10 @@ def test_dataset_preserves_orientation_and_builds_ten_channels(
     assert sample["masks"][0, 2, 8, 14] == 1.0
     assert sample["masks"][0, 3, 9, 15] == 1.0
     assert sample["masks"][0, 4, 10, 16] == 1.0
-    assert torch.equal(sample["region_target_valid"], torch.ones(4, dtype=torch.bool))
+    assert torch.equal(
+        sample["region_target_valid"],
+        torch.tensor([True, True, False, False]),
+    )
 
 
 def _region_bag() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:

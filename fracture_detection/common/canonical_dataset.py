@@ -17,9 +17,9 @@ from fracture_detection.common.augmentation import (
 )
 from fracture_detection.common.constants import (
     DATASET_DIR,
-    MANIFEST_COLUMNS,
-    N_REGIONS,
     REGION_COLUMNS,
+    REGION_TARGET_VALID_COLUMNS,
+    SUPERVISED_MANIFEST_COLUMNS,
 )
 from fracture_detection.common.dataset import validate_arrays
 from fracture_detection.common.sampling import SampleIndex
@@ -39,7 +39,7 @@ class CanonicalFractureDataset(Dataset[dict[str, Tensor | str]]):
         outer_fold: int = 0,
         stream: str = "natural",
     ) -> None:
-        missing = set(MANIFEST_COLUMNS) - set(manifest.columns)
+        missing = set(SUPERVISED_MANIFEST_COLUMNS) - set(manifest.columns)
         if missing:
             raise ValueError(f"manifestに必要な列がありません: {sorted(missing)}")
         self.manifest = manifest.reset_index(drop=True).copy()
@@ -70,6 +70,9 @@ class CanonicalFractureDataset(Dataset[dict[str, Tensor | str]]):
         region_mask = np.load(bag_dir / "region_4class.npy", allow_pickle=False)
         validate_arrays(ct, whole_mask, region_mask)
         region_targets = row[list(REGION_COLUMNS)].to_numpy(dtype=np.float32)
+        region_target_valid = row[list(REGION_TARGET_VALID_COLUMNS)].to_numpy(
+            dtype=bool
+        )
         if self.augmentation is not None:
             seed = sample_seed(
                 self.base_seed,
@@ -78,11 +81,18 @@ class CanonicalFractureDataset(Dataset[dict[str, Tensor | str]]):
                 self.stream,
                 ordinal,
             )
-            ct, whole_mask, region_mask, region_targets = apply_canonical_augmentation(
+            (
                 ct,
                 whole_mask,
                 region_mask,
                 region_targets,
+                region_target_valid,
+            ) = apply_canonical_augmentation(
+                ct,
+                whole_mask,
+                region_mask,
+                region_targets,
+                region_target_valid,
                 self.augmentation,
                 seed,
             )
@@ -95,8 +105,8 @@ class CanonicalFractureDataset(Dataset[dict[str, Tensor | str]]):
                 float(row["vertebra_target"]), dtype=torch.float32
             ),
             "region_targets": torch.from_numpy(np.ascontiguousarray(region_targets)),
-            "region_target_valid": torch.full(
-                (N_REGIONS,), has_region_target, dtype=torch.bool
+            "region_target_valid": torch.from_numpy(
+                np.ascontiguousarray(region_target_valid)
             ),
             "has_region_target": torch.tensor(has_region_target),
             "fold": torch.tensor(int(row["fold"]), dtype=torch.int64),

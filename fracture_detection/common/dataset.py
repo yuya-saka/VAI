@@ -15,9 +15,10 @@ from fracture_detection.common.constants import (
     EXPECTED_CT_DTYPE,
     EXPECTED_CT_SHAPE,
     EXPECTED_MASK_SHAPE,
-    MANIFEST_COLUMNS,
     N_REGIONS,
     REGION_COLUMNS,
+    REGION_TARGET_VALID_COLUMNS,
+    SUPERVISED_MANIFEST_COLUMNS,
 )
 
 
@@ -121,7 +122,7 @@ class FractureDataset(Dataset[dict[str, Tensor | str]]):
         manifest: pd.DataFrame,
         dataset_dir: Path = DATASET_DIR,
     ) -> None:
-        missing_columns = set(MANIFEST_COLUMNS) - set(manifest.columns)
+        missing_columns = set(SUPERVISED_MANIFEST_COLUMNS) - set(manifest.columns)
         if missing_columns:
             raise ValueError(
                 f"manifestに必要な列がありません: {sorted(missing_columns)}"
@@ -146,7 +147,9 @@ class FractureDataset(Dataset[dict[str, Tensor | str]]):
         mask_channels = build_mask_channels(vertebra_mask, region_mask)
         plane_region_valid = mask_channels[:, 1:].any(axis=(2, 3))
         region_targets = row[list(REGION_COLUMNS)].to_numpy(dtype=np.float32)
-        has_region_target = bool(row["has_region_target"])
+        region_target_valid = row[list(REGION_TARGET_VALID_COLUMNS)].to_numpy(
+            dtype=bool
+        )
 
         return {
             "ct": torch.from_numpy(np.ascontiguousarray(ct)).float().div_(255.0),
@@ -155,8 +158,8 @@ class FractureDataset(Dataset[dict[str, Tensor | str]]):
                 float(row["vertebra_target"]), dtype=torch.float32
             ),
             "region_targets": torch.from_numpy(region_targets),
-            "region_target_valid": torch.full(
-                (N_REGIONS,), has_region_target, dtype=torch.bool
+            "region_target_valid": torch.from_numpy(
+                np.ascontiguousarray(region_target_valid)
             ),
             "plane_region_valid": torch.from_numpy(
                 np.ascontiguousarray(plane_region_valid)

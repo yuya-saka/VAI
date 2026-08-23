@@ -131,7 +131,9 @@ def compute_gradcam(
     model.zero_grad(set_to_none=True)
     moved = inputs.to(device)
     try:
-        with torch.enable_grad():
+        # cuDNN refuses RNN backward in eval mode, and the model must stay in
+        # eval mode so dropout and BatchNorm do not perturb the explanation.
+        with torch.enable_grad(), torch.backends.cudnn.flags(enabled=False):
             logits = model(moved)
             plane_probabilities = logits.sigmoid()
             bag_probabilities = plane_probabilities.mean(dim=1)

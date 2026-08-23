@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from fracture_detection.common.constants import REGION_TARGET_VALID_COLUMNS
 from fracture_detection.common.manifest import (
     apply_quality_exclusions,
     assemble_manifest,
@@ -103,4 +104,22 @@ def test_frozen_manifest_matches_stage1_quality_filtered_population() -> None:
     assert manifest["study_id"].nunique() == 2_009
     assert int(manifest["vertebra_target"].sum()) == 1_332
     assert int(manifest["has_region_target"].sum()) == 268
+    annotated = manifest[manifest["has_region_target"].astype(bool)]
+    complete = annotated[annotated["annotation_complete"].astype(bool)]
+    partial = annotated[~annotated["annotation_complete"].astype(bool)]
+    assert len(complete) == 235
+    assert len(partial) == 33
+    assert complete[list(REGION_TARGET_VALID_COLUMNS)].all().all()
+    assert manifest[list(REGION_TARGET_VALID_COLUMNS)].sum().tolist() == [
+        245,
+        243,
+        244,
+        251,
+    ]
+    for region_index, validity_column in enumerate(
+        REGION_TARGET_VALID_COLUMNS, start=1
+    ):
+        target_column = f"region_{region_index}"
+        assert partial.loc[partial[target_column].eq(1), validity_column].all()
+        assert not partial.loc[partial[target_column].eq(0), validity_column].any()
     assert manifest.attrs["quality_exclusions"]["rows_removed"] == 496

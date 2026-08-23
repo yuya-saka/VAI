@@ -8,7 +8,10 @@ import torch
 
 from fracture_detection.common.augmentation import build_canonical_augmentation
 from fracture_detection.common.canonical_dataset import CanonicalFractureDataset
-from fracture_detection.common.constants import REGION_COLUMNS
+from fracture_detection.common.constants import (
+    REGION_COLUMNS,
+    REGION_TARGET_VALID_COLUMNS,
+)
 from fracture_detection.common.sampling import SampleIndex
 
 
@@ -51,8 +54,12 @@ def _write_bag(root: Path) -> pd.DataFrame:
         "fold": 0,
         "vertebra_target": 1,
         "has_region_target": True,
+        "annotation_complete": False,
     }
     row.update(dict(zip(REGION_COLUMNS, [0, 1, 0, 1], strict=True)))
+    row.update(
+        dict(zip(REGION_TARGET_VALID_COLUMNS, [False, True, False, True], strict=True))
+    )
     return pd.DataFrame([row])
 
 
@@ -79,6 +86,10 @@ def test_canonical_horizontal_flip_swaps_r2_r3_targets_and_channels(
     sample = dataset[SampleIndex(index=0, epoch=2, ordinal=3)]
 
     assert torch.equal(sample["region_targets"], torch.tensor([0.0, 0.0, 1.0, 1.0]))
+    assert torch.equal(
+        sample["region_target_valid"],
+        torch.tensor([False, False, True, True]),
+    )
     inputs = sample["inputs"]
     assert torch.all(inputs[:, 7, :, 10:20] == 255)
     assert torch.all(inputs[:, 8, :, -20:-10] == 255)

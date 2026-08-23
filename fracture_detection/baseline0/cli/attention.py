@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 from collections.abc import Iterator
 from pathlib import Path
@@ -39,6 +38,10 @@ from fracture_detection.common.constants import (
     REGION_COLUMNS,
     REGION_NAMES,
 )
+from fracture_detection.common.region_validity import (
+    attach_region_target_validity as attach_annotation_validity,
+    load_annotation_coverage,
+)
 
 DEFAULT_EXPERIMENT_DIR = Path(
     "fracture_detection/baseline0/outputs/08_19/baseline0_shared_core"
@@ -68,7 +71,7 @@ def run_analysis(args: argparse.Namespace) -> Path:
 
     annotation_coverage = load_annotation_coverage()
     annotation_coverage.to_csv(output_dir / "annotation_coverage.csv", index=False)
-    predictions = _attach_annotation_validity(
+    predictions = attach_annotation_validity(
         load_oof_predictions(experiment_dir), annotation_coverage
     )
     if args.selection == "annotated":
@@ -423,84 +426,6 @@ def _region_target_valid(metrics: pd.DataFrame, region_column: str) -> pd.Series
     if "annotation_complete" not in metrics.columns:
         raise ValueError("annotation_complete is required for region evaluation")
     return metrics[region_column].eq(1) | metrics["annotation_complete"].astype(bool)
-
-
-def load_annotation_coverage() -> pd.DataFrame:
-    """Derive bag-level run completion from the annotation tool source inventory."""
-    annotation_tool = importlib.import_module("Unet.dicom_bbox_annotation_tool.server")
-
-    targets = annotation_tool.augment_with_missing_fractured_levels(
-        annotation_tool.build_targets(
-            annotation_tool.DEFAULT_BBOX_CSV,
-            annotation_tool.DEFAULT_METADATA_DIR,
-        ),
-        annotation_tool.DEFAULT_BBOX_CSV,
-        annotation_tool.DEFAULT_METADATA_DIR,
-        annotation_tool.DEFAULT_TRAIN_CSV,
-        annotation_tool.DEFAULT_TRAIN_IMAGES_DIR,
-        annotation_tool.DEFAULT_SEGMENTATION_DIR,
-        annotation_tool.DEFAULT_AUGMENT_CACHE,
-    )
-    label_keys = set(
-        annotation_tool.LabelStore(annotation_tool.DEFAULT_LABEL_CSV).read()
-    )
-    target_keys = {target.label_key for target in targets}
-    unmatched = label_keys - target_keys
-    if unmatched:
-        raise ValueError(
-            f"Region labels do not match annotation targets: {len(unmatched)}"
-        )
-
-    annotated_bags = {(study_id, level) for study_id, level, _ in label_keys}
-    rows: list[dict[str, Any]] = []
-    for study_id, level in sorted(annotated_bags):
-        bag_targets = [
-            target
-            for target in targets
-            if target.study_id == study_id and target.level == level
-        ]
-        annotatable = [target for target in bag_targets if target.rows]
-        annotated_runs = sum(target.label_key in label_keys for target in annotatable)
-        bbox_missing_runs = sum(not target.rows for target in bag_targets)
-        unannotated_runs = len(annotatable) - annotated_runs
-        rows.append(
-            {
-                "study_id": study_id,
-                "level": level,
-                "expected_annotation_runs": len(annotatable),
-                "annotated_runs": annotated_runs,
-                "unannotated_runs": unannotated_runs,
-                "bbox_missing_runs": bbox_missing_runs,
-                "annotation_complete": (
-                    unannotated_runs == 0 and bbox_missing_runs == 0
-                ),
-            }
-        )
-    return pd.DataFrame(rows)
-
-
-def _attach_annotation_validity(
-    predictions: pd.DataFrame,
-    annotation_coverage: pd.DataFrame,
-) -> pd.DataFrame:
-    """Attach per-region validity without treating unreviewed zeros as negative."""
-    merged = predictions.merge(
-        annotation_coverage,
-        on=["study_id", "level"],
-        how="left",
-        validate="one_to_one",
-    )
-    annotated = merged["has_region_target"].astype(bool)
-    if merged.loc[annotated, "annotation_complete"].isna().any():
-        raise ValueError("Annotation coverage is missing for an annotated bag")
-    merged["annotation_complete"] = (
-        merged["annotation_complete"].astype("boolean").fillna(False).astype(bool)
-    )
-    for region_column in REGION_COLUMNS:
-        merged[f"{region_column}_target_valid"] = (
-            merged[region_column].eq(1) | merged["annotation_complete"]
-        ) & annotated
-    return merged
 
 
 def build_case_figure(

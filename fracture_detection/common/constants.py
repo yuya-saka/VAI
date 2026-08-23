@@ -18,6 +18,10 @@ INPUT_MANIFEST_META_JSON = (
 
 LEVELS = ("C1", "C2", "C3", "C4", "C5", "C6", "C7")
 REGION_COLUMNS = ("region_1", "region_2", "region_3", "region_4")
+ANNOTATION_COMPLETE_COLUMN = "annotation_complete"
+REGION_TARGET_VALID_COLUMNS = tuple(
+    f"{region}_target_valid" for region in REGION_COLUMNS
+)
 REGION_NAMES = (
     "vertebral_body",
     "right_transverse_foramen",
@@ -43,4 +47,9 @@ MANIFEST_COLUMNS = (
     "vertebra_target",
     "has_region_target",
     *REGION_COLUMNS,
+)
+SUPERVISED_MANIFEST_COLUMNS = (
+    *MANIFEST_COLUMNS,
+    ANNOTATION_COMPLETE_COLUMN,
+    *REGION_TARGET_VALID_COLUMNS,
 )

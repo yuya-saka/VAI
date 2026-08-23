@@ -541,6 +541,17 @@ def evaluate(
             else None
         )
         folds = _tensor(batch, "fold").tolist()
+        raw_has_region_target = batch.get("has_region_target")
+        if raw_has_region_target is None:
+            has_region_targets = (
+                region_valid.any(dim=1).tolist()
+                if region_valid is not None
+                else [False] * len(folds)
+            )
+        elif isinstance(raw_has_region_target, Tensor):
+            has_region_targets = raw_has_region_target.bool().tolist()
+        else:
+            raise TypeError("batchのhas_region_targetはTensorである必要があります")
         study_ids = _strings(batch, "study_id")
         levels = _strings(batch, "level")
         for index, (study_id, level, fold) in enumerate(
@@ -552,9 +563,7 @@ def evaluate(
                 "fold": int(fold),
                 "vertebra_target": int(prepared.vertebra_targets[index].cpu()),
                 "vertebra_score": float(whole_scores[index]),
-                "has_region_target": bool(
-                    region_valid is not None and bool(region_valid[index].all())
-                ),
+                "has_region_target": bool(has_region_targets[index]),
             }
             if region_scores is not None and region_targets is not None:
                 for region_index, column in enumerate(REGION_COLUMNS):
@@ -564,6 +573,10 @@ def evaluate(
                     record[f"{column}_target"] = float(
                         region_targets[index, region_index]
                     )
+                    if region_valid is not None:
+                        record[f"{column}_target_valid"] = bool(
+                            region_valid[index, region_index]
+                        )
             records.append(record)
         total_loss += float(loss)
         batches += 1

@@ -17,7 +17,13 @@ from fracture_detection.common.constants import (
     MANIFEST_COLUMNS,
     REGION_COLUMNS,
     REGION_CSV,
+    REGION_TARGET_VALID_COLUMNS,
+    SUPERVISED_MANIFEST_COLUMNS,
     TRAIN_CSV,
+)
+from fracture_detection.common.region_validity import (
+    attach_region_target_validity,
+    load_annotation_coverage,
 )
 from fracture_detection.folds.load_labels import (
     load_region_labels,
@@ -145,6 +151,7 @@ def build_manifest(
     folds_csv: Path = FOLDS_CSV,
     excluded_studies_csv: Path = EXCLUDED_STUDIES_CSV,
     excluded_levels_csv: Path = EXCLUDED_LEVELS_CSV,
+    annotation_coverage: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """確定済み入力ファイルから共通manifestを構築する。"""
     inventory = pd.read_csv(inventory_csv, dtype={"study_id": str, "level": str})
@@ -156,7 +163,14 @@ def build_manifest(
         excluded_levels_csv, dtype={"study_uid": str, "vertebra": str}
     )
     manifest = assemble_manifest(inventory, vertebra_labels, region_labels, folds)
-    return apply_quality_exclusions(manifest, excluded_studies, excluded_levels)
+    filtered = apply_quality_exclusions(manifest, excluded_studies, excluded_levels)
+    coverage = (
+        load_annotation_coverage()
+        if annotation_coverage is None
+        else annotation_coverage
+    )
+    supervised = attach_region_target_validity(filtered, coverage)
+    return supervised[list(SUPERVISED_MANIFEST_COLUMNS)]
 
 
 def write_manifest(manifest: pd.DataFrame, output_dir: Path) -> tuple[Path, Path]:
@@ -172,6 +186,11 @@ def write_manifest(manifest: pd.DataFrame, output_dir: Path) -> tuple[Path, Path
         "rows": int(len(manifest)),
         "studies": int(manifest["study_id"].nunique()),
         "region_annotated_rows": int(manifest["has_region_target"].sum()),
+        "region_complete_rows": int(manifest["annotation_complete"].sum()),
+        "region_valid_cells": {
+            column: int(manifest[column].sum())
+            for column in REGION_TARGET_VALID_COLUMNS
+        },
         "sha256": digest,
         "quality_exclusions": manifest.attrs.get("quality_exclusions"),
         "excluded_studies_sha256": hashlib.sha256(

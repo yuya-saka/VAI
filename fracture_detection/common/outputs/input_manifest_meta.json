@@ -2,7 +2,14 @@
   "rows": 13432,
   "studies": 2009,
   "region_annotated_rows": 268,
-  "sha256": "9bc0b8b91a5ff719519a63a3b2a7aa7f14476b45fade5582efb58a258ef21ac3",
+  "region_complete_rows": 235,
+  "region_valid_cells": {
+    "region_1_target_valid": 245,
+    "region_2_target_valid": 243,
+    "region_3_target_valid": 244,
+    "region_4_target_valid": 251
+  },
+  "sha256": "b5d46161c374b38456393c0dfd65893d535f12eb17595c42f0c78c2b4a36b955",
   "quality_exclusions": {
     "rows_before": 13928,
     "rows_removed": 496,
