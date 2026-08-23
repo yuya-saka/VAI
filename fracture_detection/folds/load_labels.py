@@ -10,9 +10,14 @@ runにまとめる。そのため、1椎体に2つのrunがある場合、それ
 個別に表示・判定されている（run間は5〜50スライス空く）。アノテータは2026-08-07に、
 各runのラベルが記録どおり正しいことを確認済みである。
 
-したがって、椎体単位の領域ラベルには、その椎体に属する全runの論理和を用いる。
+したがって、椎体単位の領域ラベルには、その椎体で記録済みのrunの論理和を用いる。
 いずれかの骨折部位が領域rに達していれば、その椎体の領域rを陽性とする。
 1つのrunだけを採用すると、実在する骨折部位が暗黙に失われる。
+
+2026-08-21のcoverage監査では、少なくとも1 runが記録済みの268 bag中33 bagに、
+合計36本の未記録runが残っていた。この33 bagでは記録済みの1は陽性として使えるが、
+記録済みrunの論理和が0の領域は陰性ではなくunknownである。領域別評価では、陽性または
+全run確認済みのbagだけをその領域の有効ラベルとして使う。
 
 この集約による件数は268 bag、160 study、R1=78、R2=59、R3=72、R4=158である。
 以前の文書にあるR1=77、R3=71、R4=155は、骨折部位を落とす最新run採用規則による
@@ -21,7 +26,7 @@ runにまとめる。そのため、1椎体に2つのrunがある場合、それ
 
 from pathlib import Path
 
-import pandas as pd
+import pandas as pd  # type: ignore[import-untyped]
 
 REGION_COLUMNS = ["region_1", "region_2", "region_3", "region_4"]
 LEVELS = ["C1", "C2", "C3", "C4", "C5", "C6", "C7"]
@@ -37,7 +42,7 @@ EXPECTED_REGION_POSITIVES = {
 
 
 def load_region_labels(csv_path: Path) -> pd.DataFrame:
-    """全runの論理和を取り、椎体ごとに1行の領域ラベルを読み込む。
+    """記録済みrunの論理和を取り、椎体ごとに1行の領域ラベルを読み込む。
 
     study_id、level、n_runs、region_1〜region_4列を返す。
     件数が確認済みの値と異なる場合はValueErrorを送出する。この不一致はCSVが変更され、

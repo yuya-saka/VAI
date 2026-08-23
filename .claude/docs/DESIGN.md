@@ -371,6 +371,18 @@ them the runs carry different region labels, which is two sites reaching
 different regions rather than a contradiction. The annotator confirmed
 (2026-08-07) that each run's labels are correct as recorded.
 
+**Incomplete-run labels are positive/unknown, not positive/negative
+(2026-08-21).** A source-inventory audit found 321 annotatable runs among the
+268 vertebrae with at least one recorded annotation, of which 285 are recorded
+and 36 remain unreviewed across 33 vertebrae; 235 vertebrae are complete. An
+observed regional `1` remains a valid bag-level positive, but a regional `0` in
+an incomplete vertebra means only "absent from reviewed runs" and is unknown at
+bag level. Region evaluation must therefore use all observed positives plus
+zero labels only from fully reviewed vertebrae. The earlier all-268 zero-as-
+negative Grad-CAM AUROC/AP summaries are invalid and are superseded by this
+per-region validity mask. The same missingness must be resolved or masked in
+any region-supervised training arm before confirmatory training.
+
 R2/R3 are the **transverse** foramina (横突孔), the canal the vertebral artery
 runs through. Both annotation tools' buttons said 椎間孔 (intervertebral
 foramen), a different structure; the annotator confirmed on 2026-08-07 that the
@@ -530,6 +542,33 @@ negative penalty only to fracture-negative vertebrae. Region outputs are context
 fracture-candidate evidence, not independently supervised or calibrated regional
 fracture probabilities.
 
+**Retrospective corrected-label region audit (2026-08-21).** Stage3
+`baseline_3/v1` region evidence was evaluated with the same positive-or-complete
+target-validity rule used by the Baseline 0 Grad-CAM audit. The 216-bag OOF
+subset gave AUROC/AP of R1 `0.758/0.747`, R2 `0.755/0.590`, R3 `0.662/0.506`,
+and R4 `0.772/0.833`. The separate 52-bag fixed-test subset, using the mean of
+five fold-specific region evidence logits, gave R1 `0.783/0.708`, R2
+`0.576/0.629`, R3 `0.583/0.481`, and R4 `0.769/0.867`. Test R1 and R3 contain
+only 8 and 9 positives, respectively. These are exploratory ranking metrics for
+uncalibrated contextual evidence, not regional probability accuracy; OOF and
+fixed-test results remain separate, and neither is directly compared as an arm
+effect against the newer Baseline 0 nested-OOF Grad-CAM audit because the score,
+cohort, training protocol, and checkpoint-selection protocol differ. Artifacts
+are stored under `train_models/stage3/outputs/baseline_3/v1/region_evidence_*`.
+
+**Matched descriptive comparison with Baseline 0 CAM-only (2026-08-21).** On
+the same valid examples within each Stage3 partition, OOF macro AUROC was
+`0.736` for Stage3 evidence versus `0.769` for CAM density, while macro AP was
+`0.669` versus `0.651`. Fixed-test macro AUROC was `0.678` versus `0.816`, and
+macro AP was `0.671` versus `0.733`. OOF R3 was the only region whose paired
+patient-bootstrap difference excluded zero: Stage3 minus CAM was `-0.125`
+AUROC (95% CI `[-0.227, -0.016]`) and `-0.163` AP (`[-0.289, -0.012]`). The
+other per-region intervals crossed zero. Thus CAM-only is more consistent
+across regions and clearly better for R3 in this retrospective comparison,
+whereas Stage3 shows descriptive AP gains in OOF R1/R2 and both AUROC/AP gains
+in OOF R4 without conclusive paired intervals. This remains a score comparison,
+not a causal arm comparison, because model protocols differ.
+
 ## Implementation Plan
 
 ### Patterns & Approaches
@@ -556,6 +595,9 @@ fracture probabilities.
 
 | Decision | Rationale | Alternatives Considered | Date |
 |----------|-----------|------------------------|------|
+| Audit Baseline 0's high fracture scores with checkpoint-matched OOF Grad-CAM at `encoder.bn2`, targeting the registered bag readout `mean(sigmoid(plane_logits))`; use both fold-by-level TP/FP sampling and a separate all-268 annotation-bearing-bag audit, report anatomical-region CAM mass plus area-corrected density, and compare observed-positive versus fully reviewed-negative density with per-region validity masks, patient-cluster bootstrap, and within-level rank sensitivity | Matching every bag to its outer-fold checkpoint avoids train-set explanations, stratification prevents saturated C2 predictions from dominating the qualitative audit, the bag-score target includes BiLSTM context across all 15 planes, area correction distinguishes concentration from region size, and the annotation-bearing audit tests whether post-hoc evidence follows known region labels rather than merely the whole-fracture score. Unreviewed-run zeros are unknown and excluded. The 7x7 Grad-CAM remains a coarse exploratory diagnostic rather than a registered region endpoint or pixel-level fracture localization | Reuse one fold model for all bags; inspect only global top scores; treat zeros from incomplete bags as negatives; explain isolated plane logits; report raw region mass alone; interpret Grad-CAM as a causal lesion map | 2026-08-21 |
+| If piloting Baseline 0 initialization for regional fine-tuning, make it an exploratory fold-matched 6-channel Control-B ablation: transfer each outer fold's leakage-safe Baseline 0 encoder, BiLSTM, and whole head; train a new four-region head first with the trunk frozen and the positive-or-complete validity mask; only then consider low-LR last-block/BiLSTM unfreezing while retaining the full natural-stream whole loss. Do not optimize Grad-CAM directly and do not replace the frozen six-arm study | CAM-only ranking shows that the Baseline 0 representation already contains regional signal, so a head-first transfer test can ask whether explicit labels add value with minimal variance. Only ~160 annotated bags and roughly 35 R2 positives are available in each three-fold training split, making full-model annotation-only tuning prone to memorization and catastrophic loss of whole-fracture performance. Fold-matched initialization prevents outer leakage; masked targets prevent unreviewed zeros becoming false negatives; keeping this as an independent ablation preserves the registered study | Fine-tune the full model on all 268 annotated positives; use one all-data Baseline 0 checkpoint in every fold; treat all recorded zeros as negative; train from Grad-CAM loss with second-order gradients; silently change the frozen confirmatory arms | 2026-08-21 |
+| Do not expand `mtl_type2` v1 beyond its exploratory outer0 run as-is. Any follow-up must first use per-region positive-or-complete validity, measure gradients on actual region-update steps, freeze the executed source/config provenance, and isolate one change at a time. Prefer fold-matched Baseline 0 transfer into the region sequence path or retain the shared BiLSTM rather than randomly initializing a separate 4.86M-parameter region BiLSTM | Outer0 underperformed Baseline 0 and Baseline 1-B on whole AUROC/PRAUC and collapsed region identity: R1-R3 scores correlated 0.973-0.983, R4 won 55/56 annotated bags, and R3 AUROC was 0.317. The separate region path received only 40 updates/epoch from 159 unique bags and no whole-loss supervision; partial-annotation zeros, uncalibrated `lambda=1`, non-overlapping gradient-measurement steps, and whole-best rather than region-best inference further confound the run. Source edits during execution also prevent exact provenance | Run outer1-4 unchanged; attribute the result to branch separation alone despite simultaneous schedule/batch/lambda changes; treat `pretrained: true` as Baseline 0 transfer; accept all partial-label zeros as negatives; regard the current outer0 artifact as confirmatory | 2026-08-21 |
 | Add optional fold-process multi-GPU execution for Baseline 1 and later arms: run one fold per independent process and GPU; expose `parallel.mode`, `gpu_ids`, and `max_concurrent_folds`; freeze the fold-to-GPU mapping; and require the same GPU model and compute capability across arms. Do not use within-fold DDP, DataParallel, or FSDP in formal runs | Fold-level parallelism preserves global batch 16, BN behavior, losses, sampler order, optimizer-step count, and per-fold RNG/checkpoint ownership while reducing wall-clock time. Within-fold replication would change per-rank BN or batch semantics and would not reduce each model replica's VRAM requirement | Single-GPU-only execution; within-fold DDP/DataParallel/FSDP; ad hoc or heterogeneous GPU assignment | 2026-08-19 |
 | Harden the MTL-arm implementation contract before any full training: use BN-module-only eval on the annotated stream; run natural backward before annotated forward/backward with one optimizer step; isolate augmentation, mixup, and annotated-model RNG streams and checkpoint their states; define every late branch as `blocks[5] -> conv_head -> bn2 -> GAP -> BiLSTM`; finish every arm and resource smoke test before freezing one source/config/dependency manifest; store lambda/beta raw calibration separately and generate immutable `loss_weights.json` only after both exist; and replace the 65-80M estimate with measured lower bounds of 84,290,740 parameters for Proposed-max and 104,041,693 for Proposed-B before MA modules | The joint Claude/Codex review found that `momentum=0` still normalizes from the one-bag annotated batch, shared global RNG silently changes later natural mixup draws, training Baseline 1 before modifying shared core breaks literal same-hash parity, omitting `bn2` leaves the timm branch boundary ambiguous, one combined backward retains both graphs, a lambda-only immutable JSON cannot later accept beta, and the old resource estimate omitted duplicated recurrent/attention work. The corrected contract protects arm comparability, resume reproducibility, peak VRAM, and artifact immutability | Whole-model eval or train-mode `momentum=0`; global RNG; train each arm as soon as implemented; omit/share `bn2`; retain both graphs for one backward; mutate one calibration JSON; keep the 65-80M/174-hour estimate | 2026-08-19 |
 | Treat pre-freeze smoke as train/inner-validation only and carry a transitive provenance chain from raw lambda/beta artifacts and resource profiles into the frozen manifest and every formal outer-prediction row | Outer predictions before freezing violate the registered no-peeking order even when stored under a smoke directory. Hashing only the final weights file cannot prove that calibration/profile measurements used the same source, dependencies, input manifest, folds, and effective reference config. Embedding the frozen-manifest hash in formal OOF rows lets analysis reject mixed runs | Let smoke invoke outer inference; trust artifact filenames; record only the final loss-weight hash; combine OOF files without manifest identity | 2026-08-19 |
@@ -857,6 +899,12 @@ fracture probabilities.
 
 | Date | Changes |
 |------|---------|
+| 2026-08-21 | Added a checkpoint-matched OOF Grad-CAM audit for Baseline 0 with fold-by-level TP/FP sampling, an all-268 annotated-bag mode, 15-plane case figures, anatomical CAM mass and density summaries, target-positive/negative comparisons, patient-cluster bootstrap intervals, and within-level rank sensitivity metrics. |
+| 2026-08-21 | Audited fracture-region run coverage and corrected label validity: 33/268 partially annotated vertebrae contain 36 unreviewed runs, so recorded positives remain usable but zeros in those vertebrae are unknown; region evaluation now uses per-region positive-or-complete masks, and confirmatory region-supervised training is blocked until the same missingness is masked or completed. |
+| 2026-08-21 | Retrospectively evaluated legacy Stage3 `baseline_3/v1` contextual region evidence with the corrected positive-or-complete label mask, keeping its 216-bag OOF and 52-bag fixed-test ensemble results separate and recording that these uncalibrated ranking metrics are not directly comparable as an arm effect with the newer Baseline 0 Grad-CAM audit. |
+| 2026-08-21 | Added a same-case descriptive comparison of legacy Stage3 evidence against Baseline 0 CAM density with study-paired bootstrap intervals. CAM had higher macro AUROC in OOF and fixed test and higher fixed-test macro AP; OOF R3 was the only conclusive per-region difference, favoring CAM for both AUROC and AP. |
+| 2026-08-21 | Recorded a pending exploratory Baseline 0 transfer-learning pilot: initialize a fold-matched 6-channel Control-B trunk and whole head from the leakage-safe Baseline 0 checkpoint, train the new region head first with corrected per-region validity, and preserve whole-task training if later unfreezing; direct Grad-CAM-loss optimization and annotation-only full-model fine-tuning are rejected for the pilot. |
+| 2026-08-21 | Diagnosed the exploratory `mtl_type2` outer0 failure: a randomly initialized 4.86M-parameter region BiLSTM received sparse annotation-only updates after separation from whole-task transfer, produced near-identical R1-R3 scores and an overwhelming R4 bias, and was additionally confounded by invalid partial-label negatives, unaudited `lambda=1`, checkpoint mismatch, and source drift; blocked unchanged fold expansion. |
 | 2026-08-19 | Implemented the six-arm shared core, canonical data/RNG path, Control/Baseline 1 and Proposed models, calibration/profile/freeze CLIs, and pooled-OOF analysis. Pre-freeze smoke now stops before outer inference; calibration/resource provenance is transitively hashed into the frozen manifest; formal outer rows carry that manifest hash for pooled verification. Real-data one-step GPU smoke passed for Control-B, Baseline 1-B, Proposed-B, and Proposed-max with both beta paths. Formal calibration, 20-step profiles, manifest freezing, and full training remain intentionally unstarted. |
 | 2026-08-19 | Completed real-data one-step GPU smoke for all six paths including Baseline 0, then validated Control-B with two independent folds on two A6000 GPUs and a checkpoint resume. The resume smoke exposed that `torch.load(map_location=cuda)` relocates saved CPU RNG tensors; restore now normalizes every torch RNG state to contiguous CPU `uint8`. Final validation passed 111 tests, mypy on 31 source files, and Ruff format/check. |
 | 2026-08-19 | Selected the three idle homogeneous RTX A6000 devices for formal fold-process execution and aligned all six frozen configs to `gpu_ids=[0,1,2]`, `max_concurrent_folds=3`, yielding the fixed fold mapping `0->0, 1->1, 2->2, 3->0, 4->1`. |

@@ -96,3 +96,33 @@ uv run pytest fracture_detection -q
 uv run ruff format --check fracture_detection
 uv run ruff check fracture_detection
 ```
+
+## 注目領域の可視化
+
+正式OOFの各bagを、そのbagがouter評価されたfoldの`best_model.pt`でGrad-CAM解析できます。
+最終CNN空間特徴`encoder.bn2`からbag確率へ逆伝播し、症例別15面図に加えて、4解剖領域内の
+CAM質量比と領域面積で補正したCAM密度比を保存します。既定ではTP/FPの各fold・各椎体レベルから
+最高スコアを1件ずつ選ぶため、特定foldやC2だけに偏りません。
+
+```bash
+uv run python -m fracture_detection.baseline0.cli.attention \
+  --device cpu
+```
+
+少なくとも1 runに4領域アノテーションがある268 bagをすべて解析する場合は、次を実行します。
+
+```bash
+uv run python -m fracture_detection.baseline0.cli.attention \
+  --selection annotated --device cpu
+```
+
+出力先は正式run直下の`gradcam_attention/`で、`--selection annotated`では
+`gradcam_annotated/`です。`attention_metrics.csv`、
+`region_summary.csv`、`annotated_target_summary.csv`、`region_summary.png`、および代表症例の
+`cases/*.png`を保存します。椎体内CAMは画像内の椎体面積も併記し、面積補正密度を計算します。
+`annotated_localization_metrics.csv`には領域教師の陽性・陰性密度差、患者cluster bootstrap区間、
+AUROC/AP、および椎体レベル内順位による感度解析を保存します。
+run coverageも自動照合し、未注釈runが残るbagでは記録済みの陽性だけを有効とし、0はunknownとして
+領域別指標から除外します。現在は268 bag中235 bagが全run確認済みで、33 bagに36未注釈runがあります。
+`annotation_coverage.csv`と各領域の`n_unknown`で除外状況を確認できます。
+Grad-CAMは7x7最終特徴からの事後説明であり、骨折部位の画素単位教師や因果的根拠ではありません。

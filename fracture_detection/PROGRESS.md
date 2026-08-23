@@ -10,8 +10,13 @@
 > `PROGRESS_ARCHIVE_4arm.md` に分離した。やっていることが根本的に異なるため、
 > 旧ファイルの設計判断・数値・タスクは現行計画には適用しない。
 >
-> 🔧 **2026-08-19に共有コア・6構成・校正/profile/解析CLIを実装。正式校正・20-step profile・凍結は未実行。**
-> 実装だけなら
+> 🔧 **2026-08-20時点: 正式校正・profile・凍結は完了。Baseline 0は5 fold完走。**
+> **Baseline 1–Bは2GPUで正式学習中**（outer0/1完了、outer2進行中、outer3/4未着手）。
+> Control–B / Proposed 3構成は未着手。frozen manifestは科学的に意味のある設定
+> （model/augmentation/data.random_seed/学習ハイパラ）のみを凍結し、実験名・GPU割当・
+> fold範囲・W&B設定は凍結対象外（2026-08-20修正）。
+> 実装経緯は `.claude/docs/work-logs/2026-08/2026-08-20-frozen-manifest-scope-fix-and-baseline1b-launch.md`、
+> それ以前の実装だけなら
 > `.claude/docs/work-logs/2026-08/2026-08-18-implementation-handoff.md`
 > と `memo/計画書/提案手法.md` を読めば足りる（設計の経緯は読まなくてよい）。
 
@@ -222,10 +227,10 @@ Codexの回答（全文 `.claude/docs/codex/20260818-remaining-four-decisions.md
 | fold定義 | `folds/` | **完了(検証済)** | folds.csv凍結（seed 20260807）。再生成禁止 |
 | 共通基盤 | `common/` | **完了(検証済)** | manifest / dataset / 明示ラベルのみのregion BCE / 領域別AP / deterministic two-stream sampler / nested split / λ・β校正 / cross-fitted床・MDE |
 | matched cohort | `cohorts/` | **廃止(成果物保持)** | 2026-08-17設計転換で学習不使用に。凍結CSVは削除しない |
-| Baseline 0 | `baseline0/` | **実装中** | `core/` adapter化とcanonical data pathへの移行中。full trainingは再凍結後のみ |
-| Control (no-region-mask MTL) | `mtl/` | **実装中** | 入力6chはBaseline 0と同一、head/損失/samplerはBaseline 1と同一。学習runは延期 |
-| Baseline 1 (Early Fusion MTL) | `mtl/` | **実装中** | 10ch early fusion / whole head + region head `[B,15,4]` / method B |
-| Proposed (Mask-guided Branch) | `proposed/` | **実装中** | `blocks[4]`分岐 → MA + 独立late branch。3構成を実装 |
+| Baseline 0 | `baseline0/` | **完了(検証済)** | 5 fold全てouter推論完了。outer0〜4のbest_epoch: 44/55/48/53/40 |
+| Control (no-region-mask MTL) | `mtl/` | **未着手** | config・実装は完了。学習run未起動（`control_b`） |
+| Baseline 1 (Early Fusion MTL) | `mtl/` | **学習中** | 10ch early fusion / whole head + region head `[B,15,4]` / method B。2GPUで正式学習中。outer0(best_epoch=41)・outer1(best_epoch=39)完了、outer2進行中 |
+| Proposed (Mask-guided Branch) | `proposed/` | **未着手** | 実装・凍結は完了。3構成とも学習run未起動 |
 
 状態は 未着手 / 実装中 / 学習中 / 完了(検証済) / 保留 のいずれかで更新する。
 
@@ -245,6 +250,32 @@ Codexの回答（全文 `.claude/docs/codex/20260818-remaining-four-decisions.md
   full用の共有`/dev/shm` staging、checkpoint別outer 1回制約、pooled OOF整合検証
 
 ## 進捗ログ
+
+### 2026-08-20（frozen manifest凍結範囲の修正・各project別CLI・Baseline 1–B起動）
+
+詳細: `.claude/docs/work-logs/2026-08/2026-08-20-frozen-manifest-scope-fix-and-baseline1b-launch.md`
+
+- 自動連鎖していた`.tmp/run_formal_fracture_pipeline.sh`をユーザー指摘で停止。以降、各アームの
+  学習はユーザーが個別に手動起動する運用へ変更（自動連鎖は禁止）
+- `python -m fracture_detection.{baseline0,mtl,proposed}.cli train --arm <arm>`で各project配下
+  から起動できるよう再編。実装は共通`core/`/`cli/`への委譲のみ
+- `verify_frozen_manifest`の凍結範囲を「モデル・損失・データ経路・乱数系列に影響する設定」のみに
+  限定。実験名・GPU割当（`parallel.*`）・fold範囲・W&B設定は凍結対象外へ変更。
+  `fold_to_gpu`の「6アーム全部が同一GPU割当であること」制約も撤廃し、アームごとに異なる
+  GPU構成（例: baseline1_bだけ2GPU）を選べるようにした
+- `source_tree_sha256`の対象を`.py`のみに変更（従来は`.yaml`も含み、armのconfig編集だけで
+  再凍結が必要になっていた）
+- 上記修正に伴いλ/β校正・5構成resource profile・frozen manifestを再実行（旧artifactは
+  `experiments/archive/stale_20260819/`へ退避、削除はしていない）
+- Baseline 0が5 fold完走（詳細は下記プロジェクト一覧）
+- Baseline 1–Bを2GPU（`parallel.gpu_ids: [0,1]`）で正式学習開始。outer0/1完了、outer2進行中
+- outer0のheld-out実測: AUROC 0.88前後、region_3のAUROC/PR-AUCが他領域より弱い（n=56/foldと
+  小さいため1fold単独では未確定）。val_lossのepoch間振れ幅がBaseline 0の3〜4.5倍あり、
+  annotated batch=1混入によるgradient分散が主因と推定（未検証の仮説）
+- λの`target_ratio=0.5`（2026-08-18確定・grid探索なし・結果を見て変更しない、とPI仕様に明記）
+  について「強すぎるのでは」という懸念が本セッションで出たが、確定ルールに従い**変更していない**
+- 別プロジェクト`train_models/stage3`（region maskを構造priorとしてのみ使い、region labelは
+  教師に使わない設計）がOOF AUROC 0.925とbaseline1_bより高いことを確認。設計差の比較を記録
 
 ### 2026-08-19（6構成共有実装とpreflight guard）
 
@@ -479,8 +510,11 @@ Codexの回答（全文 `.claude/docs/codex/20260818-remaining-four-decisions.md
 
 ## 次のタスク
 
-1. Control–B / Baseline 1–B を共通sampler・nested契約へ接続して実装
-2. Proposed（PMGAN式mask-guided branch）の3構成を実装
-3. 5 outer分のλ・βをreference modelで校正し、全アーム共通値として凍結
-4. **凍結してからouter推論**: 6構成・重み・検定順序・code hashを固定し、
-   それ以降はouter foldの結果を設計変更に使わない（Codex Q6の必須要件）
+1. Baseline 1–Bのouter2〜4完走を待つ（`mtl.cli train --arm baseline1_b`が2GPUで実行中）
+2. Control–Bを起動する（`mtl.cli train --arm control_b`）。H1（`AUROC(Baseline1–B)>AUROC(Control–B)`）
+   の比較相手であり、まだ未着手
+3. Proposed 3構成（proposed_b / proposed_max / proposed_max_beta0）を起動する
+4. 全アーム揃ったらpooled OOF解析（`cli/analyze.py`）でH1→H2固定順序検定を実行
+5. λの`target_ratio=0.5`見直しは未決着。見直す場合は次の凍結サイクルで正式に意思決定する
+6. **凍結後はouter foldの結果を設計変更に使わない**方針は維持（Codex Q6の必須要件）。
+   ただし凍結の「範囲」自体（運用設定 vs 科学的設定）は2026-08-20に修正済み
