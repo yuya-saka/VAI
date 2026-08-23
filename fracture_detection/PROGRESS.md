@@ -518,3 +518,134 @@ Codexの回答（全文 `.claude/docs/codex/20260818-remaining-four-decisions.md
 5. λの`target_ratio=0.5`見直しは未決着。見直す場合は次の凍結サイクルで正式に意思決定する
 6. **凍結後はouter foldの結果を設計変更に使わない**方針は維持（Codex Q6の必須要件）。
    ただし凍結の「範囲」自体（運用設定 vs 科学的設定）は2026-08-20に修正済み
+
+---
+
+## 2026-08-23（疑似ラベルMTLへの方針転換・生成段階の監査）
+
+詳細: `.claude/docs/work-logs/2026-08/2026-08-23-pseudo-label-mtl-design-review-and-cam-gate-audit.md`
+設計レビュー全文: `.claude/docs/codex/20260823-pseudo-label-mtl-design.md`
+計画書: `memo/進捗/研究計画書_2026-08-21.md`
+
+### 正式6アーム実験は保留
+
+ユーザー決定により、`baseline1_b` outer4以降・`control_b`・Proposed 3構成は**起動しない**。
+`baseline1_b`は outer0〜3 完了で停止。疑似ラベル路線を優先する。
+
+**`region_target_valid`の部分注釈バグは2026-08-23に修正済み。** 33部分注釈bagでは
+記録済み陽性だけをvalid、未確認`0`をunknownとし、235完全注釈bagだけ4領域すべてvalidにする。
+ただし`baseline1_b` outer0〜3は修正前の状態で学習済みなので、その結果の汚染は解消しない。
+
+### 新方針: Grad-CAM疑似ラベルによるMTL
+
+Baseline 0（領域教師も領域mask入力も使わない）のGrad-CAM領域密度を4領域教師の種にする。
+確定した設計:
+
+| 論点 | 決定 |
+|---|---|
+| 領域損失の母集団 | **骨折陽性1,332のみ / 論理的0込み全13,432 の2アームで比較**（ユーザー決定） |
+| 疑似ラベルの形 | **bag間ペアワイズ順位蒸留**。二値化・ソフト確率とも不採用 |
+| CAM variant | `encoder.bn2` 7×7 plain Grad-CAMを主解析に固定。268で選び直さない |
+| 15面の集約 | 全面のCAM massと面積を先に合計してから密度。max-over-planeは不採用 |
+| 面積補正 | density enrichment（region密度 / 椎体全体密度）を維持 |
+| 4領域内正規化 | softmax・rank正規化とも不採用（multi-region 70例に対し相互排他は誤り） |
+| branch | 4領域maskでmask-normalized pooling、BiLSTMは4領域共有＋Baseline 0から転移 |
+| 成功判定 | teacher CAM超えは必要条件にすぎない。**human-only armに対する増分**で判定 |
+| teacher割当 | **fold-matched in-sample `Teacher_k`**。同一teacher・同一領域内だけで比較 |
+
+論理的0アームを残す決定により、2026-08-17の「論理的0教師は使わない」は
+「主解析では使わないが、対照アームとして比較する」へ変わった。
+
+### 生成段階の監査
+
+GPU不要なゲートは既存の268 bag集計だけで全てPASS（患者クラスタbootstrap 10,000回）。
+
+| ゲート | 実測 | 判定 |
+|---|---|---|
+| R2/R3 AUROC ≥ 0.70 | 0.786 / 0.788 | PASS |
+| R2/R3 の95% CI下限 > 0.50 | 0.726 / 0.714 | PASS |
+| R2/R3 within-level AUROC ≥ 0.65 | 0.767 / 0.745 | PASS |
+| 左右弁別 win rate > 0.55 | **0.854** [0.769, 0.929]（82 bag / 64 study） | PASS |
+| zero/undefined CAM < 1% | 0.00% | PASS |
+
+4領域CAMスコアの相関は最大 |ρ|=0.806（R1–R4、負）、argmaxは18.7/19.4/26.5/35.4%に分散。
+`mtl_type2`の崩壊（ρ 0.973–0.983、98%がR4）とは質的に別物で、種としての多様性がある。
+
+残る2ゲート（teacher memorization / mask境界感度）は `baseline0.cli.cam_audit` として
+実装・検証済み。**正式監査runは未起動**。
+
+### 検出力の登録
+
+teacher CAMへの患者bootstrapで単一AUROCのSEは約0.030–0.035。paired AUROCのMDEは
+4領域Holm補正込みで**実質0.06–0.09**。+0.02程度の差は「意味がない」ではなく
+「この標本では判定不能」として扱う。
+
+### 副次的に判明したBaseline 0の性質
+
+**bag確率が水平反転で大きく振れる**（`0.986→0.029`、`0.771→0.011` など、
+16 bagで平均絶対差0.257）。`horizontal_flip_probability=0.5` で学習済みにもかかわらず
+個々の予測は反転不変ではない。反転TTAはCAM集計の安定性ではなくモデル自体の
+不安定性を測るため、監査のゲートには使わない。CAMの反転TTA平均は分散低減の
+選択肢として登録する。
+
+### 生成段階監査run結果（2026-08-23実施・完了）
+
+268 bag本番runの結果は `proceed_to_pseudo_label_generation: false`だが、内訳は次の通り。
+
+- **memorizationゲート: 完全PASS**（0領域が抵触、AUROC差は最大でも+0.041、95% CI全て0を跨ぐ）
+- **mask境界感度ゲート: `erode_4`のargmax副条件のみFAIL**。Spearman順位相関はゲート対象
+  6変種・全領域で0.80超（最低0.829）。argmax変化率は侵食4pxだけ全領域0.200で抵触、
+  他5変種（dilation・shift×4方向）は0.052〜0.082でPASS。侵食半径を上げると悪化が単調
+  （2px 0.083→4px 0.200→8px 0.300）し、8pxではR2/R3の未定義率が73〜75%（横突孔が消滅）
+
+Codexの解釈（`.claude/docs/codex/20260823-cam-audit-gate-interpretation.md`）:
+**「進めてよいが、事前登録上はゲート合格と書けない。ゲート逸脱を承認して継続、と明記すること」**。
+
+⚠️ **ユーザー指摘により訂正（2026-08-23）**: argmax失敗は「採用済みの疑似ラベル方式が
+使わないだけ」ではなく、**2026-08-17の設計時点から本研究のどの段階でも使う予定のない量**。
+268例中70例が複数領域陽性で4領域は互いに排他ではなく、各領域は独立に骨折の有無を判定する
+設計（Codex Q3dで「4領域内のsoftmax・rank正規化とも不採用」と確認済み）。よってargmax失敗は
+「今回無関係」ではなく「本研究のどの構成でも無関係」であり、進行判断はより強い根拠に基づく。
+
+**必須の限定事項**: 監査は268 annotated bagsの内部検証であり、未注釈対象集団への一般化と
+水平反転に対するteacherの頑健性は保証されない。
+
+**teacher割当はfold-matched `Teacher_k`（in-sample）で確定**（Codex推奨、memorization水増し
+未検出のため）。比較ペアは同一teacher・同一領域内で作る。
+
+### 次のタスク（この節が現行。上の「次のタスク」節は正式6アーム保留により凍結）
+
+1. **完了（2026-08-23ユーザー承認）**: `erode_4`の領域間argmax副条件のみの失敗を
+   「ゲート合格」とは扱わず、ゲート逸脱として明記した上で疑似ラベル生成へ進む
+2. **教師スコア生成は完了**: 40,296行・13,432 bag、温度20件、provenanceとSHA256を検証済み。
+   **順位蒸留ペア構成も完了**: 同一teacher・同一領域・骨折陽性内、未定義除外、
+   `human+pseudo`では人手validセル除外、同点・近接差保持、固定seedのランダム循環ペア
+3. MTLアームを実装する（human-only / pseudo-only / human+pseudo / shuffled-pseudo control、
+   および陽性のみ / 論理的0込みの2母集団）
+
+温度`T_r`はfold-matched teacherの**骨折陽性train bagだけ**から計算する。CAM順位ペアも
+陽性bag内に限定し、負例同士・陽性負例間のCAMペアは作らない。論理的0込みアームは
+whole-negative bagのexact-negative BCEを別sourceとして追加し、pseudo-rankingの母集団は変えない。
+疑似スコア成果物には人手領域ラベルを複製せず、student outer fold、teacher ID、teacher訓練fold、
+checkpoint SHA256を明示する。
+
+本番成果物: `baseline0/outputs/08_19/pseudo_labels/`。全207 tests、Ruff、mypy、全行整合性監査が通過。
+score CSV SHA256は`2a78aededc11b3231aaf906cbf907e2104486c6db18205d6a0d79f212bfea22f`、
+temperature CSV SHA256は`ed91915d0b30e0a83a0c2f72898ec10d6b9da402c4362249998c262ba426559b`。
+実データouter0の802陽性bagではR1/R2/R3/R4に802/802/801/802ペア（計3,207）を生成し、
+自己ペアなし、有限loss・gradientを確認した。
+
+### 部分注釈validity修正（2026-08-23完了）
+
+- 注釈run coverage算出を`common/region_validity.py`へ共通化
+- 修正版manifestは235完全注釈bag / 33部分注釈bag。領域別valid cellはR1/R2/R3/R4で
+  245/243/244/251、部分注釈bagの未確認zero cell 89件をunknown化
+- `CanonicalFractureDataset`と`FractureDataset`はmanifestの領域別validityを返す
+- 水平反転時はtarget・maskと同時にR2/R3 validityも交換
+- 評価predictionにも領域別`*_target_valid`を保存
+- 修正版input manifest SHA256:
+  `b5d46161c374b38456393c0dfd65893d535f12eb17595c42f0c78c2b4a36b955`
+- 全210 tests、Ruff、stub不足を除いたmypy、実partial-zero bag smokeが通過
+
+旧manifest hashを固定した既存runは新manifestでresumeしない。新しい疑似ラベルMTLは
+修正版manifestを含む別のfrozen experiment manifestを作ってから開始する。
