@@ -2,7 +2,7 @@ protocol_version: baseline0-nested-v8
 
 experiment:
   phase: 08_19
-  name: v6
+  name: baseline0_shared_core
 
 data:
   random_seed: 20260807

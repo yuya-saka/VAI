@@ -26,25 +26,28 @@ import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 import torch
 
-from fracture_detection.baseline0.analysis.cam_audit import (
+from fracture_detection.baseline0.data.constants import DATASET_DIR, REGION_COLUMNS
+from fracture_detection.baseline0.data.dataset import load_manifest
+from fracture_detection.baseline0.data.splits import (
+    resolve_nested_folds,
+    split_nested_manifest,
+)
+from fracture_detection.baseline0.data.staging import manifest_sha256
+from fracture_detection.baseline0.pseudo_labeling.cam_audit import (
     MaskPerturbation,
     region_density_enrichment,
 )
-from fracture_detection.baseline0.analysis.gradcam import (
+from fracture_detection.baseline0.pseudo_labeling.gradcam import (
     compute_gradcam,
     load_bag_arrays,
     load_baseline0_checkpoint,
     prepare_inputs,
 )
-from fracture_detection.baseline0.analysis.pseudo_label import (
+from fracture_detection.baseline0.pseudo_labeling.scoring import (
     DEFAULT_TEMPERATURE_PAIRS,
     DEFAULT_TEMPERATURE_SEED,
     region_temperature,
 )
-from fracture_detection.baseline0.data.dataset import load_manifest
-from fracture_detection.common.constants import DATASET_DIR, REGION_COLUMNS
-from fracture_detection.common.splits import resolve_nested_folds, split_nested_manifest
-from fracture_detection.core.artifacts import sha256_file
 
 N_FOLDS = 5
 IDENTITY = MaskPerturbation("identity", "identity")
@@ -76,7 +79,7 @@ def run_generation(args: argparse.Namespace) -> Path:
         if args.limit_bags is not None:
             train = train.head(args.limit_bags)
         checkpoint = experiment_dir / f"outer{outer_fold}" / args.checkpoint_name
-        checkpoint_hash = sha256_file(checkpoint)
+        checkpoint_hash = manifest_sha256(checkpoint)
         teacher_id = f"baseline0_outer{outer_fold}"
         teacher_assignments.append(
             {
@@ -130,8 +133,8 @@ def run_generation(args: argparse.Namespace) -> Path:
         "temperature_pairs": int(args.temperature_pairs),
         "temperature_seed": int(args.seed),
         "temperature_population": "fracture_positive",
-        "scores_sha256": sha256_file(scores_path),
-        "temperatures_sha256": sha256_file(temperatures_path),
+        "scores_sha256": manifest_sha256(scores_path),
+        "temperatures_sha256": manifest_sha256(temperatures_path),
         "teacher_assignments": teacher_assignments,
     }
     (output_dir / METADATA_JSON).write_text(

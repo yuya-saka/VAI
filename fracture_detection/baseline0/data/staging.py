@@ -17,7 +17,7 @@ from pathlib import Path
 import pandas as pd
 from tqdm.auto import tqdm
 
-from fracture_detection.common.constants import DATASET_DIR
+from fracture_detection.baseline0.data.constants import DATASET_DIR
 
 STAGE_ROOT = Path("/dev/shm/vai-fracture-dataset")
 STAGE_MARKER = "READY.json"

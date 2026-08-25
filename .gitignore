@@ -102,6 +102,11 @@ scripts/
 *.npz
 .json
 
+# Active fracture_detection Baseline 0 reproducibility inputs
+!fracture_detection/baseline0/config/baseline0.yaml
+!fracture_detection/baseline0/resources/input_manifest.csv
+!fracture_detection/baseline0/resources/input_manifest_meta.json
+
 # Stage4 experiment code and reproducibility inputs
 !train_models/stage4/config/
 !train_models/stage4/config/*.yaml

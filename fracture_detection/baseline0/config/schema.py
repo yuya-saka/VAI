@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 
-from fracture_detection.common.splits import resolve_nested_folds
+from fracture_detection.baseline0.data.splits import resolve_nested_folds
 
 PROTOCOL_VERSION = "baseline0-nested-v8"
 REQUIRED_SECTIONS = {

@@ -1,0 +1,22 @@
+{
+  "rows": 13432,
+  "studies": 2009,
+  "region_annotated_rows": 268,
+  "region_complete_rows": 235,
+  "region_valid_cells": {
+    "region_1_target_valid": 245,
+    "region_2_target_valid": 243,
+    "region_3_target_valid": 244,
+    "region_4_target_valid": 251
+  },
+  "sha256": "b5d46161c374b38456393c0dfd65893d535f12eb17595c42f0c78c2b4a36b955",
+  "quality_exclusions": {
+    "rows_before": 13928,
+    "rows_removed": 496,
+    "rows_after": 13432,
+    "listed_studies": 1,
+    "listed_levels": 646
+  },
+  "excluded_studies_sha256": "45830a8eb448a49f61af434f066a40342fc2189dbd754decb6e31ab1d5a6e6ab",
+  "excluded_levels_sha256": "3afc3e004a90d8065895eba5360f3f2c9bee15526fefc042d8d04617f64c7d4d"
+}

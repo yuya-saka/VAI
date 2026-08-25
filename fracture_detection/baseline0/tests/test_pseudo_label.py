@@ -5,7 +5,11 @@ import pandas as pd  # type: ignore[import-untyped]
 import pytest
 import torch
 
-from fracture_detection.baseline0.analysis.pseudo_label import (
+from fracture_detection.baseline0.cli.generate_pseudo_labels import (
+    _compute_temperatures,
+)
+from fracture_detection.baseline0.data.constants import REGION_COLUMNS
+from fracture_detection.baseline0.pseudo_labeling.scoring import (
     TEMPERATURE_FLOOR,
     RegionPairBatch,
     build_region_pair_batch,
@@ -15,10 +19,6 @@ from fracture_detection.baseline0.analysis.pseudo_label import (
     region_balanced_pairwise_ranking_loss,
     region_temperature,
 )
-from fracture_detection.baseline0.cli.generate_pseudo_labels import (
-    _compute_temperatures,
-)
-from fracture_detection.common.constants import REGION_COLUMNS
 
 
 def test_log_score_floors_zero_density_instead_of_diverging() -> None:

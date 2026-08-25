@@ -22,7 +22,13 @@ import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 import torch
 
-from fracture_detection.baseline0.analysis.cam_audit import (
+from fracture_detection.baseline0.cli.attention import (
+    DEFAULT_EXPERIMENT_DIR,
+    attach_annotation_validity,
+    load_annotation_coverage,
+)
+from fracture_detection.baseline0.data.constants import DATASET_DIR, REGION_COLUMNS
+from fracture_detection.baseline0.pseudo_labeling.cam_audit import (
     MaskPerturbation,
     default_perturbations,
     flip_planes_horizontally,
@@ -30,7 +36,14 @@ from fracture_detection.baseline0.analysis.cam_audit import (
     region_density_enrichment,
     teacher_role,
 )
-from fracture_detection.baseline0.analysis.cam_audit_report import (
+from fracture_detection.baseline0.pseudo_labeling.gradcam import (
+    compute_gradcam,
+    load_bag_arrays,
+    load_baseline0_checkpoint,
+    load_oof_predictions,
+    prepare_inputs,
+)
+from fracture_detection.baseline0.pseudo_labeling.report import (
     HFLIP_TTA,
     NO_TTA,
     audit_verdict,
@@ -40,19 +53,6 @@ from fracture_detection.baseline0.analysis.cam_audit_report import (
     perturbation_table,
     tta_table,
 )
-from fracture_detection.baseline0.analysis.gradcam import (
-    compute_gradcam,
-    load_bag_arrays,
-    load_baseline0_checkpoint,
-    load_oof_predictions,
-    prepare_inputs,
-)
-from fracture_detection.baseline0.cli.attention import (
-    DEFAULT_EXPERIMENT_DIR,
-    attach_annotation_validity,
-    load_annotation_coverage,
-)
-from fracture_detection.common.constants import DATASET_DIR, REGION_COLUMNS
 
 N_FOLDS = 5
 OUTPUT_NAME = "cam_generation_audit"

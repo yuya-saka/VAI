@@ -4,7 +4,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from fracture_detection.baseline0.analysis.cam_audit import (
+from fracture_detection.baseline0.data.constants import (
+    EXPECTED_MASK_SHAPE,
+    N_REGIONS,
+    REGION_COLUMNS,
+)
+from fracture_detection.baseline0.pseudo_labeling.cam_audit import (
     GATE_PERTURBATION_PIXELS,
     MaskPerturbation,
     default_perturbations,
@@ -14,7 +19,7 @@ from fracture_detection.baseline0.analysis.cam_audit import (
     region_density_enrichment,
     teacher_role,
 )
-from fracture_detection.baseline0.analysis.cam_audit_report import (
+from fracture_detection.baseline0.pseudo_labeling.report import (
     HFLIP_TTA,
     NO_TTA,
     audit_verdict,
@@ -24,11 +29,6 @@ from fracture_detection.baseline0.analysis.cam_audit_report import (
     perturbation_table,
     select_role_frame,
     tta_table,
-)
-from fracture_detection.common.constants import (
-    EXPECTED_MASK_SHAPE,
-    N_REGIONS,
-    REGION_COLUMNS,
 )
 
 PLANES, HEIGHT, WIDTH = EXPECTED_MASK_SHAPE

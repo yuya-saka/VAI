@@ -23,7 +23,7 @@ from sklearn.metrics import (  # type: ignore[import-untyped]
     roc_auc_score,
 )
 
-from fracture_detection.baseline0.analysis.gradcam import (
+from fracture_detection.baseline0.pseudo_labeling.gradcam import (
     GradCamBatch,
     anatomical_attention_metrics,
     compute_gradcam,
@@ -33,12 +33,12 @@ from fracture_detection.baseline0.analysis.gradcam import (
     prepare_inputs,
     select_stratified_high_scores,
 )
-from fracture_detection.common.constants import (
+from fracture_detection.baseline0.data.constants import (
     DATASET_DIR,
     REGION_COLUMNS,
     REGION_NAMES,
 )
-from fracture_detection.common.region_validity import (
+from fracture_detection.baseline0.data.region_validity import (
     attach_region_target_validity as attach_annotation_validity,
     load_annotation_coverage,
 )

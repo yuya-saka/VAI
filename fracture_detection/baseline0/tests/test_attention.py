@@ -5,18 +5,21 @@ import pandas as pd
 import torch
 from torch import Tensor, nn
 
-from fracture_detection.baseline0.analysis.gradcam import (
+from fracture_detection.baseline0.cli.attention import (
+    summarize_annotated_localization,
+    summarize_annotated_targets,
+)
+from fracture_detection.baseline0.data.constants import (
+    EXPECTED_CT_SHAPE,
+    EXPECTED_MASK_SHAPE,
+)
+from fracture_detection.baseline0.modeling.model import Baseline0Model
+from fracture_detection.baseline0.pseudo_labeling.gradcam import (
     anatomical_attention_metrics,
     compute_gradcam,
     prepare_inputs,
     select_stratified_high_scores,
 )
-from fracture_detection.baseline0.cli.attention import (
-    summarize_annotated_localization,
-    summarize_annotated_targets,
-)
-from fracture_detection.baseline0.modeling.model import Baseline0Model
-from fracture_detection.common.constants import EXPECTED_CT_SHAPE, EXPECTED_MASK_SHAPE
 
 
 class TinyEncoder(nn.Module):

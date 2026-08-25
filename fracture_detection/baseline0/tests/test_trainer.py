@@ -11,13 +11,13 @@ from torch import Tensor, nn
 from torch.utils.data import DataLoader, Dataset
 
 import fracture_detection.baseline0.training.trainer as trainer_module
+from fracture_detection.baseline0.data.sampling import EpochShuffleSampler
 from fracture_detection.baseline0.training.trainer import (
     _batch_tensors,
     _mixup_batch,
     set_seed,
     train_fold,
 )
-from fracture_detection.common.sampling import EpochShuffleSampler
 
 
 class _TinyDataset(Dataset[dict[str, Tensor | str]]):

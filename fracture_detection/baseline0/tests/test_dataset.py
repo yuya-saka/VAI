@@ -6,13 +6,16 @@ import numpy as np
 import pandas as pd
 import torch
 
+from fracture_detection.baseline0.data.constants import (
+    EXPECTED_CT_SHAPE,
+    EXPECTED_MASK_SHAPE,
+)
 from fracture_detection.baseline0.data.dataset import (
     Baseline0Dataset,
     apply_bag_transform,
     augment_from_config,
     default_augmentation,
 )
-from fracture_detection.common.constants import EXPECTED_CT_SHAPE, EXPECTED_MASK_SHAPE
 
 
 def _write_bag(dataset_dir: Path) -> pd.DataFrame:

@@ -2,12 +2,27 @@
 
 from __future__ import annotations
 
-from typing import cast
+from typing import Any, cast
 
 import timm
 from torch import Tensor, nn
 
-from fracture_detection.common.constants import N_PLANES
+from fracture_detection.baseline0.data.constants import N_PLANES
+
+
+def build_model(config: dict[str, Any]) -> Baseline0Model:
+    """Configのmodel sectionからBaseline 0を構築する。"""
+    model = config["model"]
+    return Baseline0Model(
+        backbone_name=str(model["backbone"]),
+        pretrained=bool(model["pretrained"]),
+        drop_rate=float(model["drop_rate"]),
+        drop_path_rate=float(model["drop_path_rate"]),
+        head_dropout=float(model["head_dropout"]),
+        lstm_hidden=int(model["lstm_hidden"]),
+        lstm_layers=int(model["lstm_layers"]),
+        n_planes=int(model["n_planes"]),
+    )
 
 
 class Baseline0Model(nn.Module):

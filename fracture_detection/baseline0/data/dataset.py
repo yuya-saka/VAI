@@ -13,7 +13,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import Dataset
 
-from fracture_detection.common.constants import (
+from fracture_detection.baseline0.data.constants import (
     DATASET_DIR,
     EXPECTED_CT_DTYPE,
     EXPECTED_CT_SHAPE,
