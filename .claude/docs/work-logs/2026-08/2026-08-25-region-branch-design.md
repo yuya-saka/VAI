@@ -5,6 +5,13 @@
 4領域骨折検出モデル（`fracture_detection/region_branch/`）の設計。**実装は未着手**。
 本セッションではコードを書かず、設計の確定と実測による裏取りのみ行った。
 
+> **2026-08-25 追補:** その後、ユーザーが BiLSTM 2本、同一4領域headへの
+> hard GT / pseudo教師の併用、人手4領域ラベルとwhole-negative由来の論理
+> `[0,0,0,0]`を同じ `L_exact` に入れること、および
+> `L=L_whole+lambda(L_exact+alpha L_rank)` を確定した。本書の「BiLSTM未回答」
+> と「陰性統合未決定」はこの追補で上書きされる。具体的な不均衡対策と係数校正の
+> 調査結果は `.claude/docs/research/20260825-region-loss-balancing.md` を参照。
+
 ---
 
 ## 1. 依頼内容

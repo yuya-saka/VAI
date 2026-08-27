@@ -1,8 +1,21 @@
 # fracture_detection 進捗
 
-最終更新: 2026-08-24
+最終更新: 2026-08-26
 
 ## 現在の主軸
+
+`fracture_detection/region_branch/` の4領域骨折検出モデル（統合4領域 + 単一領域4本）を実装済み。
+`baseline0/` は疑似ラベルの供給元・whole path architectureの参照元として維持する。
+
+- architecture: shared EfficientNetV2-S trunk、whole path（Baseline 0とbit-exact）、
+  region path（FPN + mask-normalized pooling + shared region BiLSTM + 領域別head）
+- 損失: `L = L_whole + lambda_k*(L_exact + alpha_k*L_rank)`。`alpha_k`/`lambda_k`は
+  outer foldごとに学習前の決定的な64 batchで一度だけ勾配ノルム校正する
+- unit test 35件（合成データ）+ 実データでのGPU/CPU smoke testで一通り確認済み
+- 学習・評価は未実施（校正・学習・OOF評価・比較はすべてユーザーが手動起動）
+- 詳細は `region_branch/README.md` を参照
+
+## 過去の主軸（維持）
 
 `fracture_detection/baseline0/` の椎体単位骨折分類と、その教師モデルを使う疑似ラベル生成を主軸として扱う。
 
@@ -28,28 +41,52 @@
 ```text
 fracture_detection/
 ├── PROGRESS.md
-└── baseline0/
-    ├── cli/          # train / evaluate / attention / CAM audit / pseudo-label generation
-    ├── config/       # schema / YAML
-    ├── data/         # dataset / staging / split / sampling / constants
-    ├── modeling/     # model / loss
-    ├── training/     # trainer / optimizer / experiment management
-    ├── evaluation/   # metrics
-    ├── pseudo_labeling/ # Grad-CAM / CAM audit / score / report
-    ├── resources/
+├── baseline0/
+│   ├── cli/          # train / evaluate / attention / CAM audit / pseudo-label generation
+│   ├── config/       # schema / YAML
+│   ├── data/         # dataset / staging / split / sampling / constants
+│   ├── modeling/     # model / loss
+│   ├── training/     # trainer / optimizer / experiment management
+│   ├── evaluation/   # metrics
+│   ├── pseudo_labeling/ # Grad-CAM / CAM audit / score / report
+│   ├── resources/
+│   └── tests/
+└── region_branch/
+    ├── README.md
+    ├── cli/          # train / calibrate / evaluate / compare_arms
+    ├── config/       # schema / YAML（統合1 + 単一4）
+    ├── data_pipeline/ # dataset / pseudo_labels / sources / sampling / loaders / constants
+    ├── modeling/     # model / pooling(FPN) / losses
+    ├── training/     # trainer / calibration / monitoring(collapse) / experiment
+    ├── evaluation/   # metrics（validity mask付き領域別AP/AUROC）
     └── tests/
 ```
 
 ## 整理方針
 
 - 失敗した MTL、Proposed、Type2 は再利用しない。
-- 疑似ラベル生成とCAM監査は現行の主要機能として維持する。
-- 新しい手法ごとにトップレベルdirectoryを増やさない。
-- Baseline 0から派生する検討は、採用が決まるまで文書または小さなablationとして扱う。
-- コードは責務別directoryへ置き、`baseline0/`直下へ実装fileを増やさない。
+- 疑似ラベル生成とCAM監査はbaseline0の主要機能として維持する。
+- 新しい手法ごとにトップレベルdirectoryを増やさない（region_branchは4領域検出という
+  独立した検討単位のため例外）。
+- コードは責務別directoryへ置き、各project直下へ実装fileを増やさない。
 - 各directory内では、役割が1ファイルで収まる限り過剰に階層化しない。
 - 過去の実装や判断が必要な場合はGit履歴を参照し、現行treeへarchiveを置かない。
 
 ## 次の作業
 
-再生成済み疑似ラベルを使うpair構築・student学習へ進む。再生成が必要な場合は、復元済みCLIと同じfold・checkpoint provenanceを維持する。
+### 1. Baseline 0 fine-tuning化（実装済み）
+
+outer foldごとにfold-matched Baseline 0 checkpointからencoder / whole BiLSTM / whole headを
+読み込み、FPN / region BiLSTM / region headsをランダム初期化する。全層を学習対象とし、
+学習済み部分は`2.3e-5`、新規region部分は`2.3e-4`からcosine減衰する。
+freeze/warmupは使わない。初期化監査情報は`initialization.json`へ保存する。
+
+### 2. 実行順（すべてユーザーが手動起動）
+
+校正（`cli/calibrate.py`）→学習（`cli/train.py`）→評価（`cli/evaluate.py`）→
+比較（`cli/compare_arms.py`）。統合4領域modelを先に5 fold終えてから、単一領域4本の
+要否・優先順位を判断する（計算量目安は`region_branch/README.md`参照）。
+
+校正結果は各configの`calibration.version`で選択する。現在は`v1`で、保存先は
+`region_branch/outputs/calibration/v1/outer{k}/`。学習条件を変更して再校正する場合は
+全5 configのversionを同じ新番号へ更新する。
