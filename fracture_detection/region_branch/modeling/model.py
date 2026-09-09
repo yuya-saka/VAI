@@ -147,6 +147,7 @@ class RegionBranchModel(nn.Module):
         region_mask: Tensor,
         need_whole: bool = True,
         need_region: bool = True,
+        region_sample_indices: Tensor | None = None,
     ) -> RegionBranchOutput:
         """[B,15,6,H,W]と[B,15,H,W]から、要求された経路のlogitを返す。"""
         if not need_whole and not need_region:
@@ -162,6 +163,19 @@ class RegionBranchModel(nn.Module):
             )
         if region_mask.shape != (batch_size, plane_count, height, width):
             raise ValueError(f"region_maskのshapeが不正です: {region_mask.shape}")
+        if region_sample_indices is not None:
+            if not need_region:
+                raise ValueError(
+                    "region_sample_indicesはneed_region=Trueの場合のみ指定できます"
+                )
+            if region_sample_indices.dtype != torch.long:
+                raise ValueError(
+                    "region_sample_indicesはlong tensorである必要があります"
+                )
+            if region_sample_indices.ndim != 1 or region_sample_indices.shape[0] < 1:
+                raise ValueError(
+                    "region_sample_indicesは1件以上の1次元tensorが必要です"
+                )
         flattened = inputs.reshape(batch_size * plane_count, channels, height, width)
 
         whole_plane_logits: Tensor | None = None
@@ -182,15 +196,29 @@ class RegionBranchModel(nn.Module):
                     intermediates_only=False,
                 ),
             )
-            fused = self.fpn(intermediates)
-            flattened_mask = region_mask.reshape(
-                batch_size * plane_count, height, width
+            region_batch_size = batch_size
+            region_intermediates = intermediates
+            selected_region_mask = region_mask
+            if region_sample_indices is not None:
+                selected_region_mask = region_mask.index_select(
+                    0, region_sample_indices
+                )
+                region_batch_size = selected_region_mask.shape[0]
+                region_intermediates = [
+                    feature.reshape(batch_size, plane_count, *feature.shape[1:])
+                    .index_select(0, region_sample_indices)
+                    .reshape(region_batch_size * plane_count, *feature.shape[1:])
+                    for feature in intermediates
+                ]
+            fused = self.fpn(region_intermediates)
+            flattened_mask = selected_region_mask.reshape(
+                region_batch_size * plane_count, height, width
             )
             pooled, plane_valid = mask_normalized_pool(
                 fused, flattened_mask, self.n_regions
             )
             region_plane_logits, region_plane_valid = self._region_forward(
-                pooled, plane_valid, batch_size, plane_count
+                pooled, plane_valid, region_batch_size, plane_count
             )
             if need_whole:
                 whole_features = cast(

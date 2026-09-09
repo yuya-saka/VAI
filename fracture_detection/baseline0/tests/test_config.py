@@ -73,18 +73,12 @@ def test_validate_config_rejects_removed_matched_mode() -> None:
         validate_config(config)
 
 
-def test_validate_config_rejects_vertical_flip_and_transpose() -> None:
-    """R1/R4に正しい入れ替えが存在しない反転は恒久的に禁止する。"""
-    for key in (
-        "vertical_flip",
-        "vertical_flip_probability",
-        "transpose",
-        "transpose_probability",
-    ):
+def test_validate_config_requires_orientation_augmentation() -> None:
+    for key in ("vertical_flip_probability", "transpose_probability"):
         config = _config()
-        config["augmentation"][key] = 0.5
+        config["augmentation"][key] = 0.0
 
-        with pytest.raises(ValueError, match="禁止augmentation"):
+        with pytest.raises(ValueError, match="augmentationの凍結設定"):
             validate_config(config)
 
 
@@ -110,6 +104,26 @@ def test_validate_config_rejects_mixup_probability_drift() -> None:
     config["training"]["mixup_probability"] = 0.0
 
     with pytest.raises(ValueError, match="trainingの凍結設定"):
+        validate_config(config)
+
+
+def test_validate_config_accepts_two_gpu_fold_parallelism() -> None:
+    config = _config()
+
+    validate_config(config)
+
+    assert config["parallel"] == {
+        "mode": "fold",
+        "gpu_ids": [0, 1],
+        "max_concurrent_folds": 2,
+    }
+
+
+def test_validate_config_rejects_parallelism_above_gpu_count() -> None:
+    config = _config()
+    config["parallel"]["max_concurrent_folds"] = 3
+
+    with pytest.raises(ValueError, match="GPU数以下"):
         validate_config(config)
 
 

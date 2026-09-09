@@ -37,24 +37,18 @@ REGION_BRANCH_DIR = Path(__file__).resolve().parents[1]
 CALIBRATION_DIR = REGION_BRANCH_DIR / "outputs" / "calibration"
 
 DEFAULT_PSEUDO_LABEL_DIR = (
-    REPO_ROOT / "fracture_detection/baseline0/outputs/08_19/pseudo_labels"
+    REPO_ROOT / "fracture_detection/baseline0/outputs/09_04/pseudo_labels"
 )
-PSEUDO_SCORES_CSV = "pseudo_label_scores.csv"
-PSEUDO_TEMPERATURES_CSV = "pseudo_label_temperatures.csv"
-PSEUDO_METADATA_JSON = "pseudo_label_generation_metadata.json"
+# CAM-soft pseudo-target artifacts (baseline0/cli/generate_pseudo_labels.py).
+PSEUDO_REGION_TARGETS_CSV = "pseudo_region_targets.csv"
+PSEUDO_CALIBRATION_CSV = "pseudo_target_calibration.csv"
+PSEUDO_METADATA_JSON = "pseudo_target_generation_metadata.json"
 
 REGION_MASK_FILENAME = "region_4class.npy"
 EXPECTED_REGION_MASK_SHAPE = EXPECTED_MASK_SHAPE  # (15, 224, 224)
 REGION_MASK_VALUES = (0, 1, 2, 3, 4)  # 0=背景, 1..4=REGION_COLUMNS
 
-REGION_SCORE_COLUMNS = tuple(f"{column}_score" for column in REGION_COLUMNS)
-
-# 補助region batchの3ソース。値はTensor化するときのsource id。
-SOURCE_HUMAN = 0
-SOURCE_NEGATIVE = 1
-SOURCE_PSEUDO = 2
-SOURCE_NAMES = ("human", "negative", "pseudo")
-
-EXPECTED_HUMAN_BAGS = 268
-EXPECTED_NEGATIVE_BAGS = 12_100
-EXPECTED_PSEUDO_BAGS = 1_064
+REGION_SHARE_COLUMNS = tuple(f"{column}_cam_share" for column in REGION_COLUMNS)
+REGION_PSEUDO_TARGET_COLUMNS = tuple(
+    f"{column}_pseudo_target" for column in REGION_COLUMNS
+)

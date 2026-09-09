@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 import torch
 from torch import Tensor, nn
 
@@ -14,12 +15,24 @@ from fracture_detection.baseline0.data.constants import (
     EXPECTED_MASK_SHAPE,
 )
 from fracture_detection.baseline0.modeling.model import Baseline0Model
+from fracture_detection.baseline0.pseudo_labeling.cam_audit import (
+    MaskPerturbation,
+    region_density_enrichment,
+)
 from fracture_detection.baseline0.pseudo_labeling.gradcam import (
+    DEFAULT_TTA_VIEWS,
+    TTAView,
+    _rotation_matrix,  # testing the private warp helper directly
+    _warp_planes,
     anatomical_attention_metrics,
+    apply_tta_view_to_inputs,
     compute_gradcam,
+    invert_tta_view_on_cam,
     prepare_inputs,
     select_stratified_high_scores,
 )
+
+IDENTITY = MaskPerturbation("identity", "identity")
 
 
 class TinyEncoder(nn.Module):
@@ -221,3 +234,104 @@ def test_region_summaries_exclude_unreviewed_zero_but_keep_positive() -> None:
     assert target_summary.loc["region_1", "n_negative"] == 1
     assert target_summary.loc["region_1", "n_unknown"] == 1
     assert localization.loc["region_1", "density_auroc"] == 1.0
+
+
+def test_default_tta_views_are_the_frozen_four_view_set() -> None:
+    assert [view.name for view in DEFAULT_TTA_VIEWS] == [
+        "identity",
+        "horizontal_flip",
+        "rotation_plus10",
+        "rotation_minus10",
+    ]
+    assert [view.kind for view in DEFAULT_TTA_VIEWS] == [
+        "identity",
+        "horizontal_flip",
+        "rotation",
+        "rotation",
+    ]
+
+
+def test_tta_view_rejects_a_rotation_without_an_angle() -> None:
+    with pytest.raises(ValueError, match="non-zero angle"):
+        TTAView("bad", "rotation")
+
+
+def test_tta_view_rejects_an_angle_on_a_non_rotation_view() -> None:
+    with pytest.raises(ValueError, match="must not carry an angle"):
+        TTAView("bad", "identity", degrees=5.0)
+
+
+def test_apply_tta_view_to_inputs_identity_returns_the_same_arrays() -> None:
+    ct = np.arange(np.prod(EXPECTED_CT_SHAPE), dtype=np.uint8).reshape(
+        EXPECTED_CT_SHAPE
+    )
+    whole_mask = np.zeros(EXPECTED_MASK_SHAPE, dtype=np.uint8)
+    view = TTAView("identity", "identity")
+
+    warped_ct, warped_mask = apply_tta_view_to_inputs(ct, whole_mask, view)
+
+    assert warped_ct is ct
+    assert warped_mask is whole_mask
+
+
+def test_apply_tta_view_to_inputs_preserves_shape_and_dtype_for_every_view() -> None:
+    ct = np.zeros(EXPECTED_CT_SHAPE, dtype=np.uint8)
+    whole_mask = np.zeros(EXPECTED_MASK_SHAPE, dtype=np.uint8)
+    whole_mask[:, 50:150, 50:150] = 1
+
+    for view in DEFAULT_TTA_VIEWS:
+        warped_ct, warped_mask = apply_tta_view_to_inputs(ct, whole_mask, view)
+        assert warped_ct.shape == EXPECTED_CT_SHAPE
+        assert warped_ct.dtype == np.uint8
+        assert warped_mask.shape == EXPECTED_MASK_SHAPE
+        assert warped_mask.dtype == np.uint8
+
+
+def test_horizontal_flip_view_round_trips_exactly_on_a_synthetic_cam() -> None:
+    rng = np.random.default_rng(0)
+    native_cam = rng.uniform(0.0, 1.0, size=EXPECTED_MASK_SHAPE).astype(np.float32)
+    view = TTAView("horizontal_flip", "horizontal_flip")
+
+    transformed = native_cam[..., ::-1]
+    recovered = invert_tta_view_on_cam(transformed, view)
+
+    np.testing.assert_allclose(recovered, native_cam)
+
+
+def _blob_masks() -> tuple[np.ndarray, np.ndarray]:
+    """A whole mask split into four large, spatially separated region blocks."""
+    whole_mask = np.zeros(EXPECTED_MASK_SHAPE, dtype=np.uint8)
+    region_mask = np.zeros(EXPECTED_MASK_SHAPE, dtype=np.uint8)
+    whole_mask[:, 40:184, 40:184] = 1
+    region_mask[:, 40:112, 40:112] = 1
+    region_mask[:, 40:112, 112:184] = 2
+    region_mask[:, 112:184, 40:112] = 3
+    region_mask[:, 112:184, 112:184] = 4
+    return whole_mask, region_mask
+
+
+def test_rotation_view_round_trip_recovers_region_enrichment_on_a_smooth_cam() -> None:
+    whole_mask, region_mask = _blob_masks()
+    native_cam = np.zeros(EXPECTED_MASK_SHAPE, dtype=np.float32)
+    native_cam[:, 40:112, 40:112] = 3.0
+    native_cam[:, 40:112, 112:184] = 1.0
+    native_cam[:, 112:184, 40:112] = 0.5
+    native_cam[:, 112:184, 112:184] = 0.2
+
+    expected = region_density_enrichment(native_cam, whole_mask, region_mask, IDENTITY)
+
+    for view in (
+        TTAView("rotation_plus10", "rotation", degrees=10.0),
+        TTAView("rotation_minus10", "rotation", degrees=-10.0),
+    ):
+        forward_matrix = _rotation_matrix(view.degrees, native_cam.shape[-1])
+        transformed = _warp_planes(native_cam, forward_matrix, nearest=False)
+        recovered_cam = invert_tta_view_on_cam(transformed, view)
+
+        assert np.isfinite(recovered_cam).all()
+        assert (recovered_cam >= 0).all()
+
+        recovered = region_density_enrichment(
+            recovered_cam, whole_mask, region_mask, IDENTITY
+        )
+        np.testing.assert_allclose(recovered, expected, rtol=0.1, atol=0.05)

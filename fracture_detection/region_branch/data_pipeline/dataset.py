@@ -1,10 +1,22 @@
 """region_branchの6ch入力・4領域mask・教師信号を返すDataset。
 
-horizontal flipはCT・椎体mask・4領域maskを同じ`ReplayCompose`呼び出しで同期変換する。
+全幾何変換はCT・椎体mask・4領域maskを同じ`ReplayCompose`呼び出しで同期変換する。
 `region_4class.npy`はラベル値そのもの（1..4=REGION_COLUMNS、0=背景）なので、
-flipで空間位置が変わっても値は入れ替えない。head r は常に解剖学的領域 r を予測する
+変換で空間位置が変わっても値は入れ替えない。head r は常に解剖学的領域 r を予測する
 （`baseline0/data/dataset.py`のflip時ラベル入れ替えコメントとは異なる規約。
 統合4領域モデルと単一領域モデルの両方でこの規約が一致する）。
+
+セル単位の統一教師信号契約（`.claude/docs/REGION_MODEL_DESIGN_JA.md` §5.1）:
+
+    if vertebra_target == 0:
+        target = 0, target_valid = True, hard_valid = True
+    elif human_valid:
+        target = human 0/1, target_valid = True, hard_valid = True
+    else:
+        target = q, target_valid = True, pseudo_valid = True (artifactがあれば)
+
+hard GTは常にCAM soft targetより優先する。GTとpseudoは同じ`target` tensorへ
+解決し、source別target tensorやsource別lossを作らない。
 """
 
 from __future__ import annotations
@@ -34,7 +46,8 @@ from fracture_detection.region_branch.data_pipeline.constants import (
     N_REGIONS,
     REGION_COLUMNS,
     REGION_MASK_FILENAME,
-    REGION_SCORE_COLUMNS,
+    REGION_PSEUDO_TARGET_COLUMNS,
+    REGION_SHARE_COLUMNS,
     REGION_TARGET_VALID_COLUMNS,
 )
 
@@ -99,13 +112,14 @@ def apply_bag_transform_with_regions(
 
 
 class RegionBranchDataset(Dataset[dict[str, Any]]):
-    """CT 5ch + 椎体全体mask 1ch + 4領域mask + 領域教師信号を返す。"""
+    """CT入力、mask、GT/pseudo統一region targetを返す。"""
 
     def __init__(
         self,
         manifest: pd.DataFrame,
         dataset_dir: Path = DATASET_DIR,
         transform: A.ReplayCompose | None = None,
+        require_pseudo_targets: bool = False,
     ) -> None:
         missing_columns = set(SUPERVISED_COLUMNS) - set(manifest.columns)
         if missing_columns:
@@ -115,7 +129,16 @@ class RegionBranchDataset(Dataset[dict[str, Any]]):
         self.manifest = manifest.reset_index(drop=True).copy()
         self.dataset_dir = dataset_dir
         self.transform = transform
-        self.has_teacher_scores = set(REGION_SCORE_COLUMNS).issubset(manifest.columns)
+        self.require_pseudo_targets = require_pseudo_targets
+        self.has_pseudo_columns = set(REGION_SHARE_COLUMNS) | set(
+            REGION_PSEUDO_TARGET_COLUMNS
+        ) <= set(manifest.columns)
+        if require_pseudo_targets and not self.has_pseudo_columns:
+            raise ValueError(
+                "require_pseudo_targets=Trueですが、manifestにCAM share/pseudo target"
+                "列がありません。build_outer_fold_loadersでattach_pseudo_targetsを"
+                "呼んでいるか確認してください"
+            )
 
     def __len__(self) -> int:
         return len(self.manifest)
@@ -142,20 +165,9 @@ class RegionBranchDataset(Dataset[dict[str, Any]]):
         if inputs.shape[1] != 6:
             raise ValueError(f"region_branch入力ch数が不正です: {inputs.shape}")
 
-        region_targets = torch.tensor(
-            [float(row[column]) for column in REGION_COLUMNS], dtype=torch.float32
+        target, target_valid, hard_valid, pseudo_valid = self._resolve_region_targets(
+            row, study_id, level
         )
-        region_target_valid = torch.tensor(
-            [bool(row[column]) for column in REGION_TARGET_VALID_COLUMNS],
-            dtype=torch.bool,
-        )
-        if self.has_teacher_scores:
-            region_scores = torch.tensor(
-                [float(row[column]) for column in REGION_SCORE_COLUMNS],
-                dtype=torch.float32,
-            )
-        else:
-            region_scores = torch.full((N_REGIONS,), float("nan"), dtype=torch.float32)
 
         return {
             "inputs": inputs,
@@ -163,13 +175,72 @@ class RegionBranchDataset(Dataset[dict[str, Any]]):
             "vertebra_target": torch.tensor(
                 float(row["vertebra_target"]), dtype=torch.float32
             ),
-            "region_targets": region_targets,
-            "region_target_valid": region_target_valid,
-            "region_scores": region_scores,
+            "region_target": target,
+            "region_target_valid": target_valid,
+            "region_hard_valid": hard_valid,
+            "region_pseudo_valid": pseudo_valid,
             "fold": torch.tensor(int(row["fold"]), dtype=torch.int64),
             "study_id": study_id,
             "level": level,
         }
+
+    def _resolve_region_targets(
+        self, row: pd.Series, study_id: str, level: str
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """1 bag分の4領域をGT優先の単一target tensorへ解決する。"""
+        vertebra_negative = float(row["vertebra_target"]) == 0.0
+        target = [0.0] * N_REGIONS
+        target_valid = [False] * N_REGIONS
+        hard_valid = [False] * N_REGIONS
+        pseudo_valid = [False] * N_REGIONS
+
+        for region_index, (region_column, valid_column) in enumerate(
+            zip(REGION_COLUMNS, REGION_TARGET_VALID_COLUMNS, strict=True)
+        ):
+            if vertebra_negative:
+                target[region_index] = 0.0
+                target_valid[region_index] = True
+                hard_valid[region_index] = True
+                continue
+
+            human_valid = bool(row[valid_column])
+            if human_valid:
+                target[region_index] = float(row[region_column])
+                target_valid[region_index] = True
+                hard_valid[region_index] = True
+                continue
+
+            # whole-positive, human-unknown cell
+            value = self._pseudo_value(row, region_index)
+            if value is not None:
+                target[region_index] = value
+                target_valid[region_index] = True
+                pseudo_valid[region_index] = True
+            elif self.require_pseudo_targets:
+                share_column = REGION_SHARE_COLUMNS[region_index]
+                target_column = REGION_PSEUDO_TARGET_COLUMNS[region_index]
+                raise ValueError(
+                    f"study_id={study_id}, level={level}, region={region_column}: "
+                    f"whole-positiveかつhuman-unknownのcellにpseudo target"
+                    f"({target_column}/{share_column})がありません"
+                )
+
+        return (
+            torch.tensor(target, dtype=torch.float32),
+            torch.tensor(target_valid, dtype=torch.bool),
+            torch.tensor(hard_valid, dtype=torch.bool),
+            torch.tensor(pseudo_valid, dtype=torch.bool),
+        )
+
+    def _pseudo_value(self, row: pd.Series, region_index: int) -> float | None:
+        """pseudo target列が存在し有限であればfloatを、そうでなければNoneを返す。"""
+        if not self.has_pseudo_columns:
+            return None
+        column = REGION_PSEUDO_TARGET_COLUMNS[region_index]
+        value = float(row[column])
+        if not np.isfinite(value):
+            return None
+        return value
 
 
 def _validate_bag_arrays(

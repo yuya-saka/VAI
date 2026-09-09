@@ -12,7 +12,7 @@ import yaml  # type: ignore[import-untyped]
 from fracture_detection.baseline0.data.splits import resolve_nested_folds
 from fracture_detection.region_branch.data_pipeline.constants import N_REGIONS
 
-PROTOCOL_VERSION = "region-branch-v3"
+PROTOCOL_VERSION = "region-branch-v8"
 REQUIRED_SECTIONS = {
     "protocol_version",
     "experiment",
@@ -22,6 +22,7 @@ REQUIRED_SECTIONS = {
     "region",
     "training",
     "augmentation",
+    "parallel",
     "wandb",
 }
 FORBIDDEN_CONFIG_KEYS = {
@@ -40,12 +41,20 @@ FORBIDDEN_CONFIG_KEYS = {
     "plateau_cooldown",
     "region_pos_weight",
     "cam_magnitude_weight",
+    "alpha",
+    "rank_temperature",
+    "pseudo_coefficient",
+    "pseudo_loss_weight",
+    "confidence_weight",
+    "ramp",
+    "pseudo_ramp",
+    "human_bags_per_batch",
+    "negative_bags_per_batch",
+    "pseudo_bags_per_batch",
 }
+PSEUDO_ARMS = ("no_pseudo", "cam_soft", "cam_soft_shuffled")
 FROZEN_MODEL: dict[str, object] = {
     "backbone": "tf_efficientnetv2_s",
-    "pretrained": False,
-    "initialization": "baseline0_fold_matched",
-    "baseline0_checkpoint_root": "fracture_detection/baseline0/outputs/08_19/baseline0_shared_core",
     "in_chans": 6,
     "n_planes": 15,
     "drop_rate": 0.0,
@@ -60,9 +69,6 @@ FROZEN_REGION: dict[str, object] = {
     "region_lstm_hidden": 256,
     "region_lstm_layers": 2,
     "region_head_dropout": 0.3,
-    "human_bags_per_batch": 4,
-    "negative_bags_per_batch": 4,
-    "pseudo_bags_per_batch": 8,
     "diagnostic_subset_size": 256,
     "collapse_spearman_threshold": 0.95,
     "collapse_consecutive_epochs": 3,
@@ -73,19 +79,43 @@ FROZEN_TRAINING: dict[str, object] = {
     "max_epochs": 75,
     "min_epoch": 1,
     "early_stopping_patience": 20,
-    "early_stopping_metric": "val_total",
+    "early_stopping_metric": "val_region_centered_loss",
     "weight_decay": 1e-4,
     "gradient_clip_norm": None,
     "amp_dtype": "bfloat16",
-    "pretrained_learning_rate": 2.3e-5,
-    "region_learning_rate": 2.3e-4,
-    "pretrained_min_learning_rate": 2.3e-6,
-    "region_min_learning_rate": 2.3e-5,
     "lr_scheduler": "cosine_annealing",
     "mixup_probability": 0.2,
 }
+INITIALIZATION_CONTRACTS: dict[str, dict[str, dict[str, object]]] = {
+    "baseline0_fold_matched": {
+        "model": {
+            "pretrained": False,
+            "baseline0_checkpoint_root": "fracture_detection/baseline0/outputs/09_04/baseline0_aug追加",
+        },
+        "training": {
+            "pretrained_learning_rate": 2.3e-5,
+            "region_learning_rate": 2.3e-4,
+            "pretrained_min_learning_rate": 2.3e-6,
+            "region_min_learning_rate": 2.3e-5,
+        },
+    },
+    "joint_from_start": {
+        "model": {
+            "pretrained": True,
+            "baseline0_checkpoint_root": None,
+        },
+        "training": {
+            "pretrained_learning_rate": 2.3e-4,
+            "region_learning_rate": 2.3e-4,
+            "pretrained_min_learning_rate": 2.3e-5,
+            "region_min_learning_rate": 2.3e-5,
+        },
+    },
+}
 FROZEN_AUGMENTATION: dict[str, object] = {
     "horizontal_flip_probability": 0.5,
+    "vertical_flip_probability": 0.5,
+    "transpose_probability": 0.5,
     "affine_probability": 0.7,
     "shift_limit": 0.3,
     "scale_lower": 0.7,
@@ -168,23 +198,18 @@ def validate_config(config: dict[str, Any]) -> None:
     region = _section(config, "region")
     _require_exact_values(region, FROZEN_REGION, "region")
     _validate_active_regions(region)
+    _validate_pseudo_arm(region)
 
     training = _section(config, "training")
     _require_exact_values(training, FROZEN_TRAINING, "training")
+    _validate_initialization_contract(model, training)
     if not isinstance(training.get("gpu_id"), int) or training["gpu_id"] < 0:
         raise ValueError("training.gpu_idは0以上の整数である必要があります")
 
     augmentation = _section(config, "augmentation")
-    prohibited = {
-        "vertical_flip",
-        "vertical_flip_probability",
-        "transpose",
-        "transpose_probability",
-    }
-    present = prohibited & set(augmentation)
-    if present:
-        raise ValueError(f"禁止augmentation設定があります: {sorted(present)}")
     _require_exact_values(augmentation, FROZEN_AUGMENTATION, "augmentation")
+
+    _validate_parallel(_section(config, "parallel"))
 
     wandb = _section(config, "wandb")
     if not isinstance(wandb.get("enabled"), bool):
@@ -206,6 +231,42 @@ def validate_config(config: dict[str, Any]) -> None:
             raise ValueError("runtime.train_foldsがnested契約と一致しません")
 
 
+def _validate_parallel(parallel: dict[str, Any]) -> None:
+    """fold-process並列設定を検証する。"""
+    if parallel.get("mode") not in {"single", "fold"}:
+        raise ValueError("parallel.modeはsingleまたはfoldが必要です")
+    gpu_ids = parallel.get("gpu_ids")
+    if (
+        not isinstance(gpu_ids, list)
+        or not gpu_ids
+        or any(not isinstance(value, int) or value < 0 for value in gpu_ids)
+        or len(set(gpu_ids)) != len(gpu_ids)
+    ):
+        raise ValueError("parallel.gpu_idsは重複のない0以上の整数listが必要です")
+    concurrency = parallel.get("max_concurrent_folds")
+    if (
+        not isinstance(concurrency, int)
+        or isinstance(concurrency, bool)
+        or not 1 <= concurrency <= len(gpu_ids)
+    ):
+        raise ValueError("parallel.max_concurrent_foldsは1以上GPU数以下が必要です")
+
+
+def _validate_initialization_contract(
+    model: dict[str, Any], training: dict[str, Any]
+) -> None:
+    """初期化方式と、それに対応するpretrained設定・学習率を検証する。"""
+    initialization = model.get("initialization")
+    contract = INITIALIZATION_CONTRACTS.get(initialization)
+    if contract is None:
+        raise ValueError(
+            "model.initializationはbaseline0_fold_matchedまたは"
+            "joint_from_startが必要です"
+        )
+    _require_exact_values(model, contract["model"], "model initialization")
+    _require_exact_values(training, contract["training"], "training initialization")
+
+
 def _validate_active_regions(region: dict[str, Any]) -> None:
     """active_regionsが0..N_REGIONS-1の非空・重複なし集合であることを検証する。"""
     active_regions = region.get("active_regions")
@@ -222,6 +283,18 @@ def _validate_active_regions(region: dict[str, Any]) -> None:
         raise ValueError("region.active_regionsに重複があります")
     if not set(active_regions).issubset(range(N_REGIONS)):
         raise ValueError(f"region.active_regionsは0..{N_REGIONS - 1}の範囲が必要です")
+
+
+def _validate_pseudo_arm(region: dict[str, Any]) -> None:
+    """`region.pseudo_arm`が既知のアームであることを検証する。
+
+    `pseudo_label_dir`は`null`のままでよい（呼び出し側が
+    `DEFAULT_PSEUDO_LABEL_DIR`へfallbackする既存規約に従う）ため、
+    ここでは値自体を要求しない。
+    """
+    pseudo_arm = region.get("pseudo_arm")
+    if pseudo_arm not in PSEUDO_ARMS:
+        raise ValueError(f"region.pseudo_armは{PSEUDO_ARMS}のいずれかが必要です")
 
 
 def _validate_outer_fold_range(data: dict[str, Any]) -> None:

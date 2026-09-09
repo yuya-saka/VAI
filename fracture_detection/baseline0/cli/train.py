@@ -28,10 +28,12 @@ from fracture_detection.baseline0.data.splits import split_nested_manifest
 from fracture_detection.baseline0.data.staging import manifest_sha256, stage_dataset
 from fracture_detection.baseline0.modeling.model import Baseline0Model
 from fracture_detection.baseline0.training.experiment import (
+    resolve_experiment_root,
     resolve_fold_dir,
     save_effective_config,
     save_fold_effective_config,
 )
+from fracture_detection.baseline0.training.parallel import launch_fold_processes
 from fracture_detection.baseline0.training.trainer import (
     create_data_loader,
     set_seed,
@@ -59,6 +61,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--start-outer-fold", type=int, default=None)
     parser.add_argument("--end-outer-fold", type=int, default=None)
+    parser.add_argument("--outer-fold", type=int, default=None)
     parser.add_argument("--gpu-id", type=int, default=None)
     parser.add_argument("--resume", action="store_true")
     return parser.parse_args()
@@ -93,6 +96,9 @@ def run_training(config: dict[str, Any], resume: bool) -> None:
     data = config["data"]
     start_outer_fold = int(data["start_outer_fold"])
     end_outer_fold = int(data["end_outer_fold"])
+    runtime = config.get("runtime")
+    if isinstance(runtime, dict):
+        start_outer_fold = end_outer_fold = int(runtime["outer_fold"])
     print("凍結fullマニフェストを読み込んでいます", flush=True)
     manifest = load_manifest()
     print(f"マニフェストを読み込みました: {len(manifest):,} bag", flush=True)
@@ -222,12 +228,29 @@ def main() -> None:
     args = parse_args()
     config = apply_cli_overrides(
         load_config(args.config),
+        outer_fold=args.outer_fold,
         gpu_id=args.gpu_id,
         start_outer_fold=args.start_outer_fold,
         end_outer_fold=args.end_outer_fold,
     )
-    config_path = save_effective_config(config)
-    print(f"実効configを保存しました: {config_path}")
+    if (
+        config["parallel"]["mode"] == "fold"
+        and args.outer_fold is None
+        and args.gpu_id is None
+    ):
+        config_path = save_effective_config(config)
+        print(f"実効configを保存しました: {config_path}")
+        launch_fold_processes(
+            args.config,
+            config,
+            module_name="fracture_detection.baseline0.cli.train",
+            experiment_root=resolve_experiment_root(config),
+            resume=args.resume,
+        )
+        return
+    if args.outer_fold is None:
+        config_path = save_effective_config(config)
+        print(f"実効configを保存しました: {config_path}")
     run_training(config, args.resume)
 
 

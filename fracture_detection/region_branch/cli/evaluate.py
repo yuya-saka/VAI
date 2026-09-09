@@ -86,28 +86,34 @@ def collect_oof_predictions(
     for outer_fold in range(5):
         fold_dir = output_root / f"outer{outer_fold}"
         prediction_path = fold_dir / prediction_filename
-        checkpoint_path = fold_dir / "best_model.pt"
-        if not prediction_path.is_file() or not checkpoint_path.is_file():
-            raise FileNotFoundError(
-                f"outer={outer_fold}の予測またはbest checkpointがありません"
-            )
-        checkpoint = _load_checkpoint(checkpoint_path)
-        if checkpoint.get("checkpoint_role") != "best_val_total":
-            raise ValueError(
-                f"outer={outer_fold}のcheckpoint roleが不正です: "
-                f"{checkpoint.get('checkpoint_role')}"
-            )
-        runtime = checkpoint.get("config", {}).get("runtime", {})
+        if not prediction_path.is_file():
+            raise FileNotFoundError(f"outer={outer_fold}の予測がありません")
         assignment = resolve_nested_folds(outer_fold)
         expected_runtime = {
             "outer_fold": outer_fold,
             "inner_fold": assignment.inner_fold,
             "train_folds": list(assignment.train_folds),
         }
-        if runtime != expected_runtime:
-            raise ValueError(
-                f"outer={outer_fold}のcheckpoint nested設定が不正です: {runtime}"
-            )
+        for checkpoint_name, expected_role in (
+            ("best_region.pt", "best_region"),
+            ("best_whole.pt", "best_whole"),
+        ):
+            checkpoint_path = fold_dir / checkpoint_name
+            if not checkpoint_path.is_file():
+                raise FileNotFoundError(
+                    f"outer={outer_fold}の{checkpoint_name}がありません"
+                )
+            checkpoint = _load_checkpoint(checkpoint_path)
+            if checkpoint.get("checkpoint_role") != expected_role:
+                raise ValueError(
+                    f"outer={outer_fold}の{checkpoint_name} roleが不正です: "
+                    f"{checkpoint.get('checkpoint_role')}"
+                )
+            runtime = checkpoint.get("config", {}).get("runtime", {})
+            if runtime != expected_runtime:
+                raise ValueError(
+                    f"outer={outer_fold}の{checkpoint_name} nested設定が不正です: {runtime}"
+                )
         expected = manifest[manifest["fold"].eq(outer_fold)]
         predictions = pd.read_csv(
             prediction_path, dtype={"study_id": str, "level": str}

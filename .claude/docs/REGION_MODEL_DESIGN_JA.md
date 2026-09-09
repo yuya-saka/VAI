@@ -1,7 +1,7 @@
 # 4領域骨折検出モデル 全体設計
 
 作成日: 2026-08-25  
-状態: **設計確定・実装未着手**
+状態: **疑似確率の4-view監査待ち・実装未着手**
 
 ## 1. この文書の位置づけ
 
@@ -15,6 +15,8 @@
   `.claude/docs/research/20260825-region-loss-balancing.md`
 - 設計過程と実測結果:
   `.claude/docs/work-logs/2026-08/2026-08-25-region-branch-design.md`
+- 現行の疑似確率監査:
+  `.claude/docs/research/2026-09-01-pseudo-target-probability-audit.md`
 
 本書は設計の正本であり、実装開始そのものの承認を意味しない。
 
@@ -28,14 +30,13 @@
 主な検証対象は次の2点である。
 
 1. 4領域を一つのmodelで共有学習する構成が、単一領域model 4本より有効か。
-2. 少数の人手4領域ラベルに、whole-negative由来の論理0とCAM pseudo rankingを加えることで、
+2. 少数の人手4領域ラベルに、whole-negative由来の論理0とCAM soft targetを加えることで、
    領域識別を安定して学習できるか。
 
 ### 対象外
 
 - region scoreを校正済みの無条件骨折確率として解釈すること
 - attention、Transformer、region専用CNNなどを初期modelへ追加すること
-- human-only同一architecture armを追加すること
 - 268件の人手ラベルを見ながらloss係数を繰り返し調整すること
 
 ---
@@ -64,10 +65,11 @@ quality filter後の全データは13,432 bagsである。
 |---|---:|---|
 | Human-annotated | 268 | 有効セルの人手0/1ラベル |
 | Whole-negative | 12,100 | 論理的に確定する`[0, 0, 0, 0]` |
-| Pseudo-positive | 1,064 | fold-matched CAM pairwise ranking |
+| Pseudo-positive | 1,064 | fold-matched CAM soft binary target |
 
-人手ラベルは1,072セル中983セルが有効である。無効セルはlossから除外し、有効な人手セルには
-pseudo教師を適用しない。常にhard GTを優先する。
+人手ラベルは1,072セル中983セルが有効である。有効セルはhard GTを優先し、無効89セルには
+fold-matched CAM soft targetを適用する。完全未注釈4,256セルと合わせ、4,345 unique cellsが
+pseudo対象になる。
 
 ### 3.3 分割
 
@@ -115,7 +117,7 @@ Baseline 0のwhole pathは変更しない。
 - 4領域maskごとにmask-normalized poolingを行う。
 - 4領域は同じregion BiLSTMを共有する。
 - 最終headは領域別に4つ置く。
-- hard GTとpseudo rankingは同じ4領域logitを学習する。
+- hard GTとCAM soft targetは同じ4領域logitを学習する。
 
 ### 4.4 勾配の流れ
 
@@ -129,13 +131,14 @@ Baseline 0のwhole pathは変更しない。
 
 ### 4.5 初期化とfine-tuning
 
-student outer fold `k`はfold-matched Baseline 0の`outer{k}/best_model.pt`から開始する。
-`encoder`、whole BiLSTM、whole headを移し、FPN、region BiLSTM、region headsだけを
-seed固定でランダム初期化する。checkpointのouter/inner/train fold対応とroleを読込時に検証する。
+`model.initialization`で初期化方式を選ぶ。既定の`joint_from_start`はImageNet pretrained
+encoderとランダム初期化したwhole BiLSTM/head・FPN・region BiLSTM/headsを使い、epoch 1から
+全pathを同時学習する。全parameterの初期LRは`2.3e-4`、最小LRは`2.3e-5`とする。
 
-全parameterを学習対象とし、freeze/warmupは設けない。Baseline 0由来parameterの初期LRは
-`2.3e-5`、新規region pathは`2.3e-4`とし、それぞれcosineで10分の1まで減衰させる。
-同じ初期化規約を統合modelと単一領域4 modelへ適用する。
+比較用の`baseline0_fold_matched`はfold-matched Baseline 0の`outer{k}/best_model.pt`から
+encoder・whole BiLSTM・whole headを移し、region pathだけをランダム初期化する。転送部分は
+初期LR`2.3e-5`、region pathは`2.3e-4`を使う。両方式ともfreeze/warmupは設けず、同じ方式を
+統合modelと単一領域4 modelへ適用する。
 
 ### 4.5 各領域専用single model 4本
 
@@ -189,7 +192,73 @@ single model 4本の`z_R1`-`z_R4`を対応領域ごとに並べたものを、�
 
 ---
 
-## 5. 教師信号
+## 5. 現行の教師・損失・検証契約
+
+この節は2026-09-01時点の規範であり、後ろの「旧設計archive」より優先する。
+
+### 5.1 教師信号
+
+- region targetは1つのtensorへ統一する。human valid cellはhard 0/1を置き、
+  human invalidかつwhole-positive cellだけfold-matched CAM soft targetで埋める。
+- whole-negativeはtensor上では4領域すべてhard 0かつhard-validとするが、
+  条件付きregion lossからは除外し、whole lossでのみ学習する。
+- CAM targetは4-viewの各view内でdensity enrichmentをshare化してから平均する。
+- 4領域共通のpositive-slope logit-share校正を、完全注釈whole-positiveだけでfold別にfitする。
+- region別切片、hard top-1、confidence filter、teacher disagreement weight、cardinality推定は使わない。
+- 4-view実値と係数はGPU再生成後に凍結する。式と棄却条件は確率監査文書を正とする。
+
+### 5.2 損失
+
+```text
+L = L_whole + lambda * L_region_conditional
+```
+
+- `L_region_conditional`はwhole-positive bagだけを対象にする。
+- GT/pseudoを区別せず同じtarget tensorへplain `BCEWithLogits`を適用する。
+- regionごとにvalid cellで平均し、active region間をmacro平均する。
+- region側へ`pos_weight`、source係数、ramp、confidence weightを置かない。
+- validation監視値は同じmacro reductionの`BCE-H(target)`とする。これは
+  hard targetではBCE、soft targetではBernoulli KLで、学習BCEと勾配が同じである。
+- `lambda`だけを新しいregion objectiveと自然分布streamで再校正する。旧`alpha`、旧`lambda`を流用しない。
+
+### 5.3 Samplingと学習
+
+- region側も全training bagsのnatural-distribution stream一本を使う。encoderはbatch
+  全体へ1回だけforwardし、FPN以降だけwhole-positive bagへ絞る。GTとpseudoは分離しない。
+- 一epochでhuman poolを一回だけ通し、大poolはepoch間shuffleで回転する。
+- whole mixupが発火したstepではregion mask poolingが定義できないためregion lossをskipする。
+- wholeとregion lossを同じencoder graph上で加算し、1回だけbackwardする。
+- human cellがないstepを正常ケースとして扱い、source別valid cell数とgradientを記録する。
+
+### 5.4 最初の受入試験
+
+outer fold 0だけで同一architecture・同一scheduleの3 armを比較する。
+
+1. `no_pseudo`: human-unknown cellを統一targetのvalid対象にしない
+2. `cam_soft`: 全pseudo対象へfold-matched CAM target
+3. `cam_soft_shuffled`: case対応だけを固定seedでshuffleした負対照
+
+region checkpointは統一validation `region_centered_loss`、whole checkpointは
+`val_whole`で別々に選ぶ。human validation macro AP/AUROCは独立して報告する。
+`cam_soft`がhuman macro APで`no_pseudo`と`cam_soft_shuffled`の両方を上回るまで、残り4 outer foldsと
+single-region比較へ進まない。validation BCEはsoft target entropy floorとhard targetの非有限最適値を
+含むため、primaryな学習成否判定には使わない。
+
+### 5.5 実装時の必須検証
+
+- complete-only patient-grouped校正、fold一致、positive slope、有限`q`、`sum(q)>=1`をassertする。
+- human-over-CAMのcell-wise precedenceと、部分注釈89 cellへのCAM適用をunit testする。
+- plain soft BCEのgradient zeroが`sigmoid(z)=q`にあることと、統一region lossへ
+  `pos_weight`やsource別係数が入らないことをtestする。
+- pseudo generation metadataへ4-view構成、share floor、係数、reliability bins、`q` quantile、projection率を保存する。
+- pair構築、pairwise ranking loss、three-source samplerは現行experimentへ接続しない。
+
+## 旧設計archive（非規範）
+
+以下の旧5–14節はpairwise-ranking pilot以前の履歴であり、実装指示として参照してはいけない。
+現行契約と矛盾する箇所は上の第5節が全面的にsupersedeする。
+
+### 旧5. 教師信号
 
 ### 5.1 Exact教師
 
@@ -211,7 +280,7 @@ loss reductionではsourceを分けて均衡化する。
 
 ---
 
-## 6. 損失関数
+### 旧6. 損失関数
 
 ### 6.1 全体損失
 
@@ -272,7 +341,7 @@ L_{\mathrm{exact}}=0.5L_H+0.5L_N.
 
 ---
 
-## 7. 不均衡対策とsampling
+### 旧7. 不均衡対策とsampling
 
 ### 7.1 Auxiliary region batch
 
@@ -304,7 +373,7 @@ R4 31.5%である。samplingだけでBaseline 0のweighted whole lossと同程�
 
 ---
 
-## 8. `alpha`と`lambda`の決定
+### 旧8. `alpha`と`lambda`の決定
 
 ### 8.1 共通方針
 
@@ -368,7 +437,7 @@ dynamic GradNormとlearned uncertainty weightingは採用しない。
 
 ---
 
-## 9. 学習・validation・比較
+### 旧9. 学習・validation・比較
 
 ### 9.1 学習
 
@@ -416,7 +485,7 @@ trainとvalidationでlossの集約単位を揃える。selection metricの最終
 
 ---
 
-## 10. 評価とcollapse監視
+### 旧10. 評価とcollapse監視
 
 ### 10.1 主評価
 
@@ -447,7 +516,7 @@ alarm後に係数を変更して同じ人手ラベルへ再適合しない。事
 
 ---
 
-## 11. 再現性とデータ保護
+### 旧11. 再現性とデータ保護
 
 - split、sampler、calibration batch、model初期化のseedをartifactへ保存する。
 - patient IDのfold重複を開始前assertで検出する。
@@ -461,7 +530,7 @@ alarm後に係数を変更して同じ人手ラベルへ再適合しない。事
 
 ---
 
-## 12. 実装構成
+### 旧12. 実装構成
 
 新規実装は`fracture_detection/region_branch/`へ置き、Baseline 0の責務分割に合わせる。
 
@@ -485,7 +554,7 @@ alarm後に係数を変更して同じ人手ラベルへ再適合しない。事
 
 ---
 
-## 13. 実装前後の検証項目
+### 旧13. 実装前後の検証項目
 
 ### 13.1 Unit test
 
@@ -519,7 +588,7 @@ alarm後に係数を変更して同じ人手ラベルへ再適合しない。事
 
 ---
 
-## 14. 実装順序
+### 旧14. 実装順序
 
 1. `fracture_detection/region_branch/`の責務構成を作る。
 2. two-BiLSTM model、FPN、region poolingを実装する。

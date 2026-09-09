@@ -14,21 +14,35 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
-from fracture_detection.region_branch.data_pipeline.constants import REGION_COLUMNS
-from fracture_detection.region_branch.data_pipeline.sources import SourcePools
+from fracture_detection.region_branch.data_pipeline.constants import (
+    REGION_COLUMNS,
+    REGION_TARGET_VALID_COLUMNS,
+)
 
 COLLAPSE_SPEARMAN_THRESHOLD = 0.95
 COLLAPSE_CONSECUTIVE_EPOCHS = 3
 STANDARD_DEVIATION_FLOOR = 1e-8
 
 
-def select_diagnostic_subset(pools: SourcePools, size: int, seed: int) -> pd.DataFrame:
-    """train foldのpseudo pool（骨折陽性・非annotated）からseed固定で診断subsetを選ぶ。"""
-    if len(pools.pseudo) < size:
+def select_diagnostic_subset(
+    train_manifest: pd.DataFrame, size: int, seed: int
+) -> pd.DataFrame:
+    """train foldのwhole-positiveかつ人手未確定bagからseed固定で診断subsetを選ぶ。
+
+    hard GTを使わない固定subsetという元の意図を、廃止された`SourcePools`に
+    依存せず保つ: whole-positive、かつ4領域全てが人手確定済みではないbagだけを
+    候補にする。
+    """
+    eligible = train_manifest[
+        train_manifest["vertebra_target"].eq(1)
+        & ~train_manifest[list(REGION_TARGET_VALID_COLUMNS)].all(axis=1)
+    ]
+    if len(eligible) < size:
         raise ValueError(
-            f"pseudo poolがdiagnostic subset size未満です: {len(pools.pseudo)} < {size}"
+            f"診断subset用の候補がdiagnostic subset size未満です: "
+            f"{len(eligible)} < {size}"
         )
-    return pools.pseudo.sample(n=size, random_state=seed).reset_index(drop=True)
+    return eligible.sample(n=size, random_state=seed).reset_index(drop=True)
 
 
 @dataclass(frozen=True)
@@ -72,7 +86,8 @@ def compute_diagnostics(
     epoch: int,
     region_array: np.ndarray,
     whole_array: np.ndarray,
-    teacher_scores: np.ndarray,
+    pseudo_target_array: np.ndarray,
+    pseudo_valid_array: np.ndarray,
     active_regions: tuple[int, ...],
 ) -> DiagnosticEpochRecord:
     """固定subsetのwhole/region bag logit（既に計算済み）からcollapse診断指標を計算する。
@@ -80,7 +95,11 @@ def compute_diagnostics(
     Args:
         region_array: [N, |active_regions|] region bag logit。
         whole_array: [N] whole bag logit。
-        teacher_scores: [N, |active_regions|] 生CAM density（NaN/非正値は除外する）。
+        pseudo_target_array: [N, |active_regions|] CAM soft pseudo target `q`。
+        pseudo_valid_array: [N, |active_regions|] bool。そのcellにpseudo
+            supervisionが実際に存在するか（`q`は0を正当な値として取り得るため、
+            `q>0`のような値ベースの判定ではなく、この明示的なvalidity配列で
+            除外セルを決める）。
         active_regions: `REGION_COLUMNS`への0-indexed参照。
     """
     if region_array.shape[0] != whole_array.shape[0]:
@@ -116,8 +135,10 @@ def compute_diagnostics(
 
     student_teacher: dict[str, float] = {}
     for i, name in enumerate(active_names):
-        column_scores = teacher_scores[:, i]
-        finite = np.isfinite(column_scores) & (column_scores > 0)
+        column_scores = pseudo_target_array[:, i]
+        # qは0を正当な値として取り得るため、`>0`ではなく明示的なvalidity配列で
+        # 除外セルを決める（生CAM density時代のheuristicは新しいsoft targetに合わない）。
+        finite = np.isfinite(column_scores) & pseudo_valid_array[:, i]
         if int(finite.sum()) >= 2:
             student_teacher[name] = float(
                 spearmanr(region_array[finite, i], column_scores[finite]).statistic

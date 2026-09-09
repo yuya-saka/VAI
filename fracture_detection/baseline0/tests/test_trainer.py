@@ -63,7 +63,7 @@ class _TinyModel(nn.Module):
 
 def _config() -> dict[str, Any]:
     return {
-        "protocol_version": "baseline0-nested-v8",
+        "protocol_version": "baseline0-nested-v9",
         "experiment": {"phase": "baseline0", "name": "trainer"},
         "runtime": {"outer_fold": 0, "inner_fold": 1, "train_folds": [2, 3, 4]},
         "training": {

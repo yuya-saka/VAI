@@ -20,10 +20,12 @@ uv run python -m fracture_detection.baseline0.cli.evaluate \
 
 対象foldやGPUは学習CLIの引数で上書きできる。
 
+既定では`parallel.mode: fold`により、GPU 0・1へouter foldをround-robinで
+割り当て、最大2 foldを同時実行する。1 foldは常に1 GPU内で完結する。
+
 ```bash
 uv run python -m fracture_detection.baseline0.cli.train \
-  --start-outer-fold 0 \
-  --end-outer-fold 0 \
+  --outer-fold 0 \
   --gpu-id 0
 ```
 
@@ -33,11 +35,11 @@ uv run python -m fracture_detection.baseline0.cli.train \
 
 ```bash
 uv run python -m fracture_detection.baseline0.cli.cam_audit \
-  --experiment-dir fracture_detection/baseline0/outputs/08_19/baseline0_shared_core
+  --experiment-dir fracture_detection/baseline0/outputs/09_04/baseline0_aug追加
 
 uv run python -m fracture_detection.baseline0.cli.generate_pseudo_labels \
-  --experiment-dir fracture_detection/baseline0/outputs/08_19/baseline0_shared_core \
-  --output-dir fracture_detection/baseline0/outputs/08_19/pseudo_labels
+  --experiment-dir fracture_detection/baseline0/outputs/09_04/baseline0_aug追加 \
+  --output-dir fracture_detection/baseline0/outputs/09_04/pseudo_labels
 ```
 
 疑似ラベル生成は各outer foldの教師を、その教師が学習したfoldのbagへ対応付ける。生成済みファイルがある場合は、意図した再生成時だけ `--overwrite` を付ける。
@@ -52,5 +54,5 @@ uv run ruff format --check fracture_detection/baseline0
 
 ## 成果物
 
-現行5-fold教師成果物は `outputs/08_19/baseline0_shared_core/` に保持する。
-疑似ラベル生成物の既定出力先は `outputs/08_19/pseudo_labels/`。失敗したMTL、Proposed、Type2、smoke run、旧診断runは現行treeから削除済み。
+現行5-fold教師成果物は `outputs/09_04/baseline0_aug追加/` に保存する。
+疑似ラベル生成物の既定出力先は `outputs/09_04/pseudo_labels/`。失敗したMTL、Proposed、Type2、smoke run、旧診断runは現行treeから削除済み。

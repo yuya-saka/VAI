@@ -1,4 +1,4 @@
-"""alpha_k / lambda_k を一度だけ校正するCLI。
+"""lambda_k を一度だけ校正するCLI。
 
 統合4領域referenceモデル（`active_regions`が4領域全てのconfig）でのみ実行する。
 単一領域モデルはこのCLIを実行せず、`training.experiment.resolve_calibration_path`が
@@ -53,7 +53,7 @@ from fracture_detection.region_branch.training.experiment import (
 
 def parse_args() -> argparse.Namespace:
     """CLI引数を解釈する。"""
-    parser = argparse.ArgumentParser(description="alpha_k / lambda_kの一度きり校正")
+    parser = argparse.ArgumentParser(description="lambda_kの一度きり校正")
     parser.add_argument(
         "--config",
         type=Path,
@@ -106,15 +106,17 @@ def run_calibration(
 
     manifest = load_manifest()
     stream_seed = int(data["random_seed"]) + outer_fold
+    active_regions = tuple(int(value) for value in region["active_regions"])
+    # 校正は常にcam_soft objectiveで測定する: fold.pseudo_armが何であっても、
+    # ここで測ったlambdaは同じfoldのno_pseudo/cam_soft_shuffledアームにも
+    # 共有される（.claude/docs/REGION_MODEL_DESIGN_JA.md §7.3）。
     loaders = build_outer_fold_loaders(
         manifest,
         outer_fold,
         dataset_dir,
         pseudo_label_dir,
+        "cam_soft",
         int(fold_config["training"]["natural_batch_size"]),
-        int(region["human_bags_per_batch"]),
-        int(region["negative_bags_per_batch"]),
-        int(region["pseudo_bags_per_batch"]),
         num_workers=int(data["num_workers"]),
         seed=stream_seed,
         device=device,
@@ -131,6 +133,7 @@ def run_calibration(
             loaders,
             outer_fold,
             pos_weight=float(fold_config["training"]["pos_weight"]),
+            active_regions=active_regions,
             seed=stream_seed,
             device=device,
             **kwargs,
@@ -142,8 +145,8 @@ def run_calibration(
         initialization, output_path.with_name("initialization.json")
     )
     print(
-        f"[outer {outer_fold}] alpha={result.alpha:.6f} (clipped={result.alpha_clipped}), "
-        f"lambda={result.lambda_:.6f} (clipped={result.lambda_clipped}) -> {output_path}",
+        f"[outer {outer_fold}] lambda={result.lambda_:.6f} "
+        f"(clipped={result.lambda_clipped}) -> {output_path}",
         flush=True,
     )
     return output_path

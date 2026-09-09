@@ -1,8 +1,8 @@
 # region_branch
 
 `fracture_detection/` の4領域（R1 椎体・R2 右横突孔・R3 左横突孔・R4 後方要素）骨折検出モデル。
-fold-matched Baseline 0 checkpointからwhole pathを初期化し、FPNで作ったregion pathを
-shared CNN trunkへ接続して全層を微調整する。疑似ラベル
+ImageNet初期化からwhole/regionを同時学習する方式と、fold-matched Baseline 0 checkpointから
+whole pathを初期化してfine-tuningする方式をconfigで切り替えられる。疑似ラベル
 （`baseline0/pseudo_labeling/`生成物）はregion headの学習に使う。
 
 設計の詳細と根拠は以下を参照する。
@@ -29,42 +29,48 @@ FPN/region BiLSTM/region head群はregion lossからのみ勾配を受ける。
 
 ## 初期化とfine-tuning
 
-student outer fold `k`は
-`baseline0/outputs/08_19/baseline0_shared_core/outer{k}/best_model.pt`から初期化する。
-checkpointのnested fold設定と`checkpoint_role=best_val_auroc`を読込時に検証する。
+既定の`joint_from_start`はImageNet pretrained encoderとランダム初期化したwhole/region pathを
+epoch 1から同時学習する。全parameterの初期LRを`2.3e-4`、最小LRを`2.3e-5`に揃える。
 
-- `encoder` → `encoder`
-- `lstm` → `whole_lstm`
-- `head` → `whole_head`
-- `fpn` / `region_lstm` / `region_heads`はseed固定でランダム初期化
+```yaml
+model:
+  pretrained: true
+  initialization: joint_from_start
+  baseline0_checkpoint_root: null
+training:
+  pretrained_learning_rate: 0.00023
+  region_learning_rate: 0.00023
+  pretrained_min_learning_rate: 0.000023
+  region_min_learning_rate: 0.000023
+```
 
-全parameterを学習対象とし、freeze/warmupは使わない。Baseline 0由来部分の初期LRは
-`2.3e-5`、新規region pathは`2.3e-4`とし、各々をcosineで10分の1まで減衰する。
-checkpoint hash、読込key数、ランダム初期化key数はfoldごとの`initialization.json`へ保存する。
-`alpha_k`・`lambda_k`校正もこの初期状態からやり直す。
+従来方式へ戻す場合は`baseline0_fold_matched`を指定する。student outer fold `k`は
+`baseline0_checkpoint_root/outer{k}/best_model.pt`を読み、nested fold設定と
+`checkpoint_role=best_val_auroc`を検証する。
+
+両方式とも全parameterを学習対象とし、freeze/warmupは使わない。初期化方式、checkpoint
+hash、読込key数、ランダム初期化key数はfoldごとの`initialization.json`へ保存する。
+`lambda_k`校正は選択した初期状態からやり直す。
 
 ## 損失
 
 ```text
-L = L_whole + lambda_k * (L_exact + alpha_k * L_rank)
+L = L_whole + lambda_k * L_region_conditional
 
 L_whole = broadcast_bce_loss(whole_plane_logits, vertebra_target, pos_weight=2.0)  # natural streamのみ
-L_exact = 0.5 * L_H + 0.5 * L_N   # human-annotated / whole-negative、source-balanced
-L_rank  = region_balanced_pairwise_ranking_loss(...)                              # pseudo-positiveのみ
+L_region_conditional = macro_bce(region_bag_logits, unified_gt_or_pseudo_targets) # whole陽性のみ
 ```
 
-補助region batch（batch size 16固定）は human 4 / whole-negative 4 / pseudo-positive 8を
-persistent queue（`AnnotatedCycleSampler`の再利用）で循環させる。natural stream（whole学習、
-mixupあり）は16 bag。1 stepは32 bagを2回forwardし、wholeとregionを順にbackwardして
-勾配を蓄積した後、1回だけoptimizerを更新する。これにより目的関数を変えず、2本の
-EfficientNet計算グラフを同時にVRAMへ保持しない。
+wholeとregionは同じnatural batchを使う。mixupなしのstepではencoderをbatch全体へ1回だけ
+forwardし、wholeは全bag、FPN以降のregion pathはwhole陽性bagだけで計算する。両lossを
+加算して1回だけbackward・optimizer更新するため、陽性だけの二度目のencoder forwardで
+BatchNorm統計が偏ることはない。mixupありのstepはregion lossをskipする。
 
-CUDA学習では`torch.compile(mode="default", dynamic=False)`をmodelへ適用する。RTX A6000の
-同一step実測でeager比1.70倍、peak allocated VRAM 27.43 GiB→18.26 GiBだった。
-初回compileは数分かかるが約1.3 epochで償却する。compile cacheはNFSを避け、CLIが
+CUDA学習では`torch.compile(mode="default", dynamic=False)`をmodelへ適用する。
+protocol v7の速度・peak VRAMは本番batchで再計測する。compile cacheはNFSを避け、CLIが
 `/tmp/vai-region-branch-$UID/torchinductor-cache`へ配置する。校正とCPU実行はcompileしない。
 
-`alpha_k`・`lambda_k`はouter foldごとに、学習前の決定的な64 batchで一度だけ勾配ノルムを
+`lambda_k`はouter foldごとに、学習前の決定的な64 batchで一度だけ勾配ノルムを
 測って決める（`training/calibration.py`）。統合4領域modelで測った値を、同じouter foldの
 単一領域4modelがそのまま読む。性能を見た再調整・model別/region別の再校正は行わない。
 
@@ -99,12 +105,14 @@ uv run python -m fracture_detection.region_branch.cli.calibrate \
 multiprocessing一時領域をローカル`/tmp/vai-region-branch-$UID`へ切り替えるため、
 中断時もNFS上の`.tmp/pymp-*` cleanup errorを発生させない。
 
-**2. 学習**（統合1本 + 単一4本 × 5 outer fold = 計25 run。すべて手動で起動する）
+**2. 学習**（統合1本 + 単一4本 × 5 outer fold = 計25 run）
+
+各configの`parallel.gpu_ids: [0, 1]`に従い、1コマンドで最大2 foldを
+GPU 0・1へ自動配分する。1 foldは1 GPU内で完結し、DDPは使用しない。
 
 ```bash
 uv run python -m fracture_detection.region_branch.cli.train \
-  --config fracture_detection/region_branch/config/region_branch_all.yaml \
-  --start-outer-fold 0 --end-outer-fold 4 --gpu-id 0
+  --config fracture_detection/region_branch/config/region_branch_all.yaml
 ```
 
 **3. OOF評価**

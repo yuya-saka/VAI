@@ -5,8 +5,9 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
+import cv2
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 import torch
@@ -23,9 +24,14 @@ from fracture_detection.baseline0.data.constants import (
     REGION_COLUMNS,
 )
 from fracture_detection.baseline0.modeling.model import Baseline0Model, build_model
+from fracture_detection.baseline0.pseudo_labeling.cam_audit import (
+    flip_planes_horizontally,
+)
 
 FloatArray = NDArray[np.float32]
 UInt8Array = NDArray[np.uint8]
+
+TTA_ROTATION_DEGREES = 10.0
 
 
 @dataclass(frozen=True)
@@ -229,6 +235,107 @@ def anatomical_attention_metrics(
         ),
     )
     return metrics
+
+
+@dataclass(frozen=True)
+class TTAView:
+    """One deterministic fold-matched-teacher test-time-augmentation view.
+
+    The four-region mask never enters the Baseline 0 forward pass, so a view
+    only needs to declare how to transform the CT/whole-mask input and how to
+    invert that same transform on the resulting CAM; the *un*transformed
+    region mask stays valid for aggregating the inverted CAM (see
+    ``cam_audit.flip_planes_horizontally``, which established this for the
+    flip case; rotation follows the same argument once the CAM is warped back
+    into the native frame).
+    """
+
+    name: str
+    kind: Literal["identity", "horizontal_flip", "rotation"]
+    degrees: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.kind == "rotation" and self.degrees == 0.0:
+            raise ValueError("a rotation view needs a non-zero angle")
+        if self.kind != "rotation" and self.degrees != 0.0:
+            raise ValueError(f"{self.kind} view must not carry an angle")
+
+
+DEFAULT_TTA_VIEWS: tuple[TTAView, ...] = (
+    TTAView("identity", "identity"),
+    TTAView("horizontal_flip", "horizontal_flip"),
+    TTAView("rotation_plus10", "rotation", degrees=TTA_ROTATION_DEGREES),
+    TTAView("rotation_minus10", "rotation", degrees=-TTA_ROTATION_DEGREES),
+)
+
+
+def _rotation_matrix(degrees: float, size: int) -> FloatArray:
+    center = (size / 2.0, size / 2.0)
+    matrix = cv2.getRotationMatrix2D(center, degrees, 1.0)
+    return cast(FloatArray, matrix.astype(np.float32))
+
+
+def _warp_planes(
+    volume: NDArray[np.generic], matrix: FloatArray, nearest: bool
+) -> NDArray[np.generic]:
+    """Affine-warp every trailing HxW plane of a stack, preserving leading dims."""
+    height, width = volume.shape[-2:]
+    flat = volume.reshape(-1, height, width)
+    interpolation = cv2.INTER_NEAREST if nearest else cv2.INTER_LINEAR
+    warped = np.stack(
+        [
+            cv2.warpAffine(
+                plane.astype(np.float32),
+                matrix,
+                (width, height),
+                flags=interpolation,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0,
+            )
+            for plane in flat
+        ]
+    )
+    return warped.reshape(volume.shape).astype(volume.dtype)
+
+
+def apply_tta_view_to_inputs(
+    ct: UInt8Array, whole_mask: UInt8Array, view: TTAView
+) -> tuple[UInt8Array, UInt8Array]:
+    """Transform CT and whole-vertebra mask into one TTA view's input frame."""
+    if view.kind == "identity":
+        return ct, whole_mask
+    if view.kind == "horizontal_flip":
+        return (
+            flip_planes_horizontally(ct),
+            flip_planes_horizontally(whole_mask),
+        )
+    if view.kind == "rotation":
+        size = ct.shape[-1]
+        matrix = _rotation_matrix(view.degrees, size)
+        warped_ct = cast(UInt8Array, _warp_planes(ct, matrix, nearest=False))
+        warped_mask = cast(UInt8Array, _warp_planes(whole_mask, matrix, nearest=True))
+        return warped_ct, warped_mask
+    raise ValueError(f"Unknown TTA view kind: {view.kind}")
+
+
+def invert_tta_view_on_cam(cam: FloatArray, view: TTAView) -> FloatArray:
+    """Map one view's CAM back into the native (identity) frame.
+
+    The result is clipped at zero: bilinear resampling of a non-negative CAM
+    stays non-negative except for floating-point rounding at the boundary,
+    and ``anatomical_attention_metrics``/``region_density_enrichment`` both
+    require non-negative input.
+    """
+    if view.kind == "identity":
+        return cam
+    if view.kind == "horizontal_flip":
+        return cast(FloatArray, flip_planes_horizontally(cam))
+    if view.kind == "rotation":
+        size = cam.shape[-1]
+        matrix = _rotation_matrix(-view.degrees, size)
+        inverted = cast(FloatArray, _warp_planes(cam, matrix, nearest=False))
+        return cast(FloatArray, np.clip(inverted, 0.0, None).astype(np.float32))
+    raise ValueError(f"Unknown TTA view kind: {view.kind}")
 
 
 def load_oof_predictions(experiment_dir: Path) -> pd.DataFrame:

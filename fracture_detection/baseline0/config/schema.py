@@ -10,7 +10,7 @@ import yaml  # type: ignore[import-untyped]
 
 from fracture_detection.baseline0.data.splits import resolve_nested_folds
 
-PROTOCOL_VERSION = "baseline0-nested-v8"
+PROTOCOL_VERSION = "baseline0-nested-v9"
 REQUIRED_SECTIONS = {
     "protocol_version",
     "experiment",
@@ -18,6 +18,7 @@ REQUIRED_SECTIONS = {
     "model",
     "training",
     "augmentation",
+    "parallel",
     "wandb",
 }
 FORBIDDEN_CONFIG_KEYS = {
@@ -67,6 +68,8 @@ FROZEN_TRAINING: dict[str, object] = {
 }
 FROZEN_AUGMENTATION: dict[str, object] = {
     "horizontal_flip_probability": 0.5,
+    "vertical_flip_probability": 0.5,
+    "transpose_probability": 0.5,
     "affine_probability": 0.7,
     "shift_limit": 0.3,
     "scale_lower": 0.7,
@@ -161,22 +164,9 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("training.gpu_idは0以上の整数である必要があります")
 
     augmentation = _section(config, "augmentation")
-    # horizontal flipだけは許可する。R2=right_transverse_foramenと
-    # R3=left_transverse_foramenは左右対称の同種構造なので、鏡像化と同時に
-    # ラベルを入れ替えれば意味論が保存される（common.dataset.flip_horizontal参照）。
-    # vertical flipとtransposeはR1=vertebral_bodyとR4=posterior_elementsを
-    # 入れ替えることになるが、この2つは鏡像関係にない別種の構造のため、
-    # 正しい入れ替えが存在しない。恒久的に禁止する。
-    prohibited = {
-        "vertical_flip",
-        "vertical_flip_probability",
-        "transpose",
-        "transpose_probability",
-    }
-    present = prohibited & set(augmentation)
-    if present:
-        raise ValueError(f"禁止augmentation設定があります: {sorted(present)}")
     _require_exact_values(augmentation, FROZEN_AUGMENTATION, "augmentation")
+
+    _validate_parallel(_section(config, "parallel"))
 
     wandb = _section(config, "wandb")
     if not isinstance(wandb.get("enabled"), bool):
@@ -196,6 +186,27 @@ def validate_config(config: dict[str, Any]) -> None:
             raise ValueError("runtime.inner_foldがcyclic innerと一致しません")
         if runtime.get("train_folds") != list(assignment.train_folds):
             raise ValueError("runtime.train_foldsがnested契約と一致しません")
+
+
+def _validate_parallel(parallel: dict[str, Any]) -> None:
+    """fold-process並列設定を検証する。"""
+    if parallel.get("mode") not in {"single", "fold"}:
+        raise ValueError("parallel.modeはsingleまたはfoldが必要です")
+    gpu_ids = parallel.get("gpu_ids")
+    if (
+        not isinstance(gpu_ids, list)
+        or not gpu_ids
+        or any(not isinstance(value, int) or value < 0 for value in gpu_ids)
+        or len(set(gpu_ids)) != len(gpu_ids)
+    ):
+        raise ValueError("parallel.gpu_idsは重複のない0以上の整数listが必要です")
+    concurrency = parallel.get("max_concurrent_folds")
+    if (
+        not isinstance(concurrency, int)
+        or isinstance(concurrency, bool)
+        or not 1 <= concurrency <= len(gpu_ids)
+    ):
+        raise ValueError("parallel.max_concurrent_foldsは1以上GPU数以下が必要です")
 
 
 def _validate_outer_fold_range(data: dict[str, Any]) -> None:

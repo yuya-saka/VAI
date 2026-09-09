@@ -1,8 +1,11 @@
-"""alpha_k / lambda_k の勾配ノルム校正（学習前・optimizer更新なし・一度だけ）。
+"""lambda_k の勾配ノルム校正（学習前・optimizer更新なし・一度だけ）。
 
-`.claude/docs/research/20260825-region-loss-balancing.md`の手続きに従う。
-統合4領域モデルをreferenceとして測定し、同じouter foldの単一領域4モデルは
-この結果を読むだけで再利用する（再校正しない）。
+`.claude/docs/REGION_MODEL_DESIGN_JA.md` §5.2/§7.3の手続きに従う。cross-case
+pairwise rankingの退役に伴いalpha校正も廃止し、shared trunk上の`L_whole`と
+条件付き統一region BCEの勾配ノルム比だけからlambdaを一度に測る。統合4領域モデル
+（`cam_soft` objective）をreferenceとして測定し、同じouter foldの
+`no_pseudo`/`cam_soft_shuffled`アームはこの結果を読むだけで再利用する
+（再校正しない）。
 """
 
 from __future__ import annotations
@@ -20,39 +23,27 @@ from torch import Tensor, nn
 from tqdm.auto import tqdm
 
 from fracture_detection.baseline0.modeling.losses import broadcast_bce_loss
+from fracture_detection.region_branch.data_pipeline.batching import batch_tensors
 from fracture_detection.region_branch.data_pipeline.loaders import OuterFoldLoaders
-from fracture_detection.region_branch.data_pipeline.sampling import (
-    batch_tensors,
-    concatenate_batches,
-)
 from fracture_detection.region_branch.modeling.losses import (
-    combine_exact_terms,
-    compute_exact_loss_terms,
+    compute_conditional_region_losses,
     region_bag_logits,
-    region_rank_loss,
 )
 from fracture_detection.region_branch.modeling.model import RegionBranchModel
 
 N_CALIBRATION_BATCHES = 64
 GRAD_NORM_EPSILON = 1e-8
-ALPHA_TARGET = 0.25
-ALPHA_MIN, ALPHA_MAX = 0.01, 1.0
 LAMBDA_TARGET = 0.25
 LAMBDA_MIN, LAMBDA_MAX = 0.01, 10.0
 
 
 @dataclass(frozen=True)
 class CalibrationResult:
-    """1 outer foldのalpha_k / lambda_k校正結果。"""
+    """1 outer foldのlambda_k校正結果。"""
 
-    alpha: float
     lambda_: float
-    alpha_raw_ratio_median: float
     lambda_raw_ratio_median: float
-    alpha_clipped: bool
     lambda_clipped: bool
-    human_region_norms: list[float]
-    rank_region_norms: list[float]
     whole_trunk_norms: list[float]
     region_trunk_norms: list[float]
     n_batches: int
@@ -67,249 +58,134 @@ def calibrate(
     loaders: OuterFoldLoaders,
     outer_fold: int,
     pos_weight: float,
+    active_regions: tuple[int, ...],
     seed: int,
     device: torch.device,
     n_batches: int = N_CALIBRATION_BATCHES,
 ) -> CalibrationResult:
-    """optimizer更新前の決定的なn_batchesからalpha_k・lambda_kを一度だけ測る。"""
+    """optimizer更新前の決定的なn_batchesからlambda_kを一度だけ測る。
+
+    natural batch一本から、shared trunk `blocks[4]`上のL_whole勾配ノルムと
+    条件付き統一region BCE勾配ノルムを同じbatchについて測定する（region経路もnatural
+    streamを共有するため、補助batchは不要）。
+    """
     if n_batches < 1:
         raise ValueError("n_batchesは1以上である必要があります")
     model.to(device)
     # train()が必須: cuDNNのLSTM backwardはeval()では実行できない
     # （"cudnn RNN backward can only be called in training mode"）。
     # 実際の学習もtrain()で行うため、この方がgradientの実測としても忠実になる。
-    # Dropoutのstochasticityは、両passの直前で同じseedへ固定して再現性を保つ。
     model.train()
 
     torch.manual_seed(seed)
-    human_norms, rank_norms = _measure_alpha_norms(
-        model, loaders, outer_fold, n_batches, device
-    )
-    alpha, alpha_ratio_median, alpha_clipped = _calibrate_coefficient(
-        human_norms, rank_norms, ALPHA_TARGET, ALPHA_MIN, ALPHA_MAX
-    )
-
-    torch.manual_seed(seed)
     whole_norms, region_norms = _measure_lambda_norms(
-        model, loaders, outer_fold, alpha, pos_weight, n_batches, device
+        model, loaders, outer_fold, pos_weight, active_regions, n_batches, device
     )
+    if not region_norms:
+        raise ValueError("lambda校正batchにwhole陽性region targetがありません")
     lambda_value, lambda_ratio_median, lambda_clipped = _calibrate_coefficient(
         whole_norms, region_norms, LAMBDA_TARGET, LAMBDA_MIN, LAMBDA_MAX
     )
 
     return CalibrationResult(
-        alpha=alpha,
         lambda_=lambda_value,
-        alpha_raw_ratio_median=alpha_ratio_median,
         lambda_raw_ratio_median=lambda_ratio_median,
-        alpha_clipped=alpha_clipped,
         lambda_clipped=lambda_clipped,
-        human_region_norms=human_norms,
-        rank_region_norms=rank_norms,
         whole_trunk_norms=whole_norms,
         region_trunk_norms=region_norms,
-        n_batches=n_batches,
+        n_batches=len(region_norms),
         seed=seed,
         outer_fold=outer_fold,
     )
-
-
-def _measure_alpha_norms(
-    model: RegionBranchModel,
-    loaders: OuterFoldLoaders,
-    outer_fold: int,
-    n_batches: int,
-    device: torch.device,
-) -> tuple[list[float], list[float]]:
-    """region BiLSTM上のL_exact・L_rank勾配ノルムをn_batches回測る。"""
-    human_iter = iter(loaders.human)
-    negative_iter = iter(loaders.negative)
-    pseudo_iter = iter(loaders.pseudo)
-    parameters = model.region_lstm_parameters()
-
-    human_norms: list[float] = []
-    rank_norms: list[float] = []
-    for batch_index in tqdm(
-        range(n_batches),
-        desc=f"outer{outer_fold} alpha校正",
-        leave=False,
-        dynamic_ncols=True,
-    ):
-        aux = concatenate_batches(
-            [next(human_iter), next(negative_iter), next(pseudo_iter)]
-        )
-        g_h, g_p = _alpha_norms_for_batch(
-            model,
-            aux,
-            outer_fold,
-            batch_index,
-            loaders.temperatures,
-            parameters,
-            device,
-        )
-        human_norms.append(g_h)
-        rank_norms.append(g_p)
-    return human_norms, rank_norms
-
-
-def _alpha_norms_for_batch(
-    model: RegionBranchModel,
-    aux: dict[str, Any],
-    outer_fold: int,
-    batch_index: int,
-    temperatures: Tensor,
-    parameters: list[nn.Parameter],
-    device: torch.device,
-) -> tuple[float, float]:
-    """1 aux batch分のL_exact・L_rank勾配ノルムを測る。
-
-    関数呼び出しにすることで、forward活性化を保持するローカル変数が戻り値だけ
-    残してこのスコープごと解放され、次batchのforwardと同時に生きたままにならない。
-    """
-    bt = batch_tensors(aux, device)
-    with torch.autocast(
-        device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"
-    ):
-        output = model(bt.inputs, bt.region_mask, need_whole=False, need_region=True)
-    bag_logits, cell_valid = region_bag_logits(
-        output.region_plane_logits, output.region_plane_valid
-    )
-    terms = compute_exact_loss_terms(
-        bag_logits,
-        bt.region_targets,
-        bt.region_target_valid,
-        cell_valid,
-        bt.vertebra_target,
-    )
-    l_exact, _, _ = combine_exact_terms(terms, bag_logits)
-    g_h = _grad_norm(l_exact, parameters)
-
-    generator = torch.Generator().manual_seed(_pair_seed(outer_fold, batch_index))
-    teacher_outer_fold = torch.full(
-        (bag_logits.shape[0],), outer_fold, dtype=torch.int64, device=device
-    )
-    l_rank, _ = region_rank_loss(
-        bag_logits,
-        bt.region_scores,
-        bt.vertebra_target,
-        teacher_outer_fold,
-        temperatures,
-        generator,
-    )
-    g_p = _grad_norm(l_rank, parameters, retain_graph=False)
-    return g_h, g_p
 
 
 def _measure_lambda_norms(
     model: RegionBranchModel,
     loaders: OuterFoldLoaders,
     outer_fold: int,
-    alpha: float,
     pos_weight: float,
+    active_regions: tuple[int, ...],
     n_batches: int,
     device: torch.device,
 ) -> tuple[list[float], list[float]]:
-    """shared trunk blocks[4]上のL_whole・weighted region loss勾配ノルムを測る。"""
+    """shared trunk blocks[4]上のwhole・条件付きregion勾配ノルムを測る。"""
     natural_iter = iter(loaders.natural)
-    human_iter = iter(loaders.human)
-    negative_iter = iter(loaders.negative)
-    pseudo_iter = iter(loaders.pseudo)
     parameters = model.shared_parameters()
 
     whole_norms: list[float] = []
     region_norms: list[float] = []
-    for batch_index in tqdm(
+    for _ in tqdm(
         range(n_batches),
         desc=f"outer{outer_fold} lambda校正",
         leave=False,
         dynamic_ncols=True,
     ):
-        g_w = _whole_norm_for_batch(
-            model, next(natural_iter), pos_weight, parameters, device
-        )
-        whole_norms.append(g_w)
-
-        aux = concatenate_batches(
-            [next(human_iter), next(negative_iter), next(pseudo_iter)]
-        )
-        g_r = _region_norm_for_batch(
+        natural_batch = next(natural_iter)
+        norms = _joint_norms_for_batch(
             model,
-            aux,
-            outer_fold,
-            batch_index,
-            alpha,
-            loaders.temperatures,
+            natural_batch,
+            pos_weight,
+            active_regions,
             parameters,
             device,
         )
-        region_norms.append(g_r)
+        if norms is None:
+            continue
+        whole_norm, region_norm = norms
+        whole_norms.append(whole_norm)
+        region_norms.append(region_norm)
     return whole_norms, region_norms
 
 
-def _whole_norm_for_batch(
+def _joint_norms_for_batch(
     model: RegionBranchModel,
     natural_batch: dict[str, Any],
     pos_weight: float,
+    active_regions: tuple[int, ...],
     parameters: list[nn.Parameter],
     device: torch.device,
-) -> float:
-    """1 natural batch分のL_whole勾配ノルムを測る（関数scopeで活性化を解放する）。"""
-    nbt = batch_tensors(natural_batch, device)
+) -> tuple[float, float] | None:
+    """1 encoder forwardから同じbatchのwhole・region勾配ノルムを測る。"""
+    bt = batch_tensors(natural_batch, device)
+    positive = bt.vertebra_target.eq(1.0)
+    if not positive.any():
+        return None
+    positive_indices = positive.nonzero(as_tuple=False).flatten()
     with torch.autocast(
         device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"
     ):
-        whole_output = model(
-            nbt.inputs, nbt.region_mask, need_whole=True, need_region=False
+        output = model(
+            bt.inputs,
+            bt.region_mask,
+            need_whole=True,
+            need_region=True,
+            region_sample_indices=positive_indices,
         )
+    if (
+        output.whole_plane_logits is None
+        or output.region_plane_logits is None
+        or output.region_plane_valid is None
+    ):
+        raise RuntimeError("lambda校正に必要なmodel出力が計算されませんでした")
     l_whole = broadcast_bce_loss(
-        whole_output.whole_plane_logits, nbt.vertebra_target, pos_weight
+        output.whole_plane_logits, bt.vertebra_target, pos_weight
     )
-    return _grad_norm(l_whole, parameters, retain_graph=False)
-
-
-def _region_norm_for_batch(
-    model: RegionBranchModel,
-    aux: dict[str, Any],
-    outer_fold: int,
-    batch_index: int,
-    alpha: float,
-    temperatures: Tensor,
-    parameters: list[nn.Parameter],
-    device: torch.device,
-) -> float:
-    """1 aux batch分のweighted region loss勾配ノルムを測る（関数scopeで活性化を解放する）。"""
-    bt = batch_tensors(aux, device)
-    with torch.autocast(
-        device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"
-    ):
-        region_output = model(
-            bt.inputs, bt.region_mask, need_whole=False, need_region=True
-        )
     bag_logits, cell_valid = region_bag_logits(
-        region_output.region_plane_logits, region_output.region_plane_valid
+        output.region_plane_logits, output.region_plane_valid
     )
-    terms = compute_exact_loss_terms(
+    active = list(active_regions)
+    effective_target_valid = cell_valid & bt.region_target_valid[positive][:, active]
+    region_losses = compute_conditional_region_losses(
         bag_logits,
-        bt.region_targets,
-        bt.region_target_valid,
-        cell_valid,
-        bt.vertebra_target,
+        bt.region_target[positive][:, active],
+        effective_target_valid,
+        bt.vertebra_target[positive],
     )
-    l_exact, _, _ = combine_exact_terms(terms, bag_logits)
-    generator = torch.Generator().manual_seed(_pair_seed(outer_fold, batch_index))
-    teacher_outer_fold = torch.full(
-        (bag_logits.shape[0],), outer_fold, dtype=torch.int64, device=device
-    )
-    l_rank, _ = region_rank_loss(
-        bag_logits,
-        bt.region_scores,
-        bt.vertebra_target,
-        teacher_outer_fold,
-        temperatures,
-        generator,
-    )
-    l_region = l_exact + alpha * l_rank
-    return _grad_norm(l_region, parameters, retain_graph=False)
+    if region_losses.valid_cells == 0:
+        return None
+    whole_norm = _grad_norm(l_whole, parameters, retain_graph=True)
+    region_norm = _grad_norm(region_losses.bce, parameters, retain_graph=False)
+    return whole_norm, region_norm
 
 
 def _grad_norm(
@@ -354,11 +230,6 @@ def _calibrate_coefficient(
         raise FloatingPointError("校正係数が非有限値です")
     clipped_value = min(max(raw_value, minimum), maximum)
     return clipped_value, median_log_ratio, clipped_value != raw_value
-
-
-def _pair_seed(outer_fold: int, batch_index: int) -> int:
-    """校正pass間で同一batchに同一ranking pairを再現するseed。"""
-    return (outer_fold * 1_000_003 + batch_index) % (2**31 - 1)
 
 
 def save_calibration(result: CalibrationResult, path: Path) -> None:
@@ -416,7 +287,14 @@ def validate_calibration_compatibility(
 
 
 def calibration_config_fingerprint(config: dict[str, Any]) -> str:
-    """出力先等を除いた校正・学習条件のSHA-256を返す。"""
+    """出力先・pseudo_arm等を除いた校正・学習条件のSHA-256を返す。
+
+    `pseudo_arm`/`pseudo_label_dir`は除外する: 校正はouter foldごとに`cam_soft`
+    objectiveで一度だけ測り、同じfoldの`no_pseudo`/`cam_soft_shuffled`アームへ
+    同じlambdaを配る（`.claude/docs/REGION_MODEL_DESIGN_JA.md` §7.3）。これらの
+    キーを指紋へ含めると、アームが違うだけでconfigが「別物」と判定され、共有
+    すべき同一artifactを誤って拒否してしまう。
+    """
     data = _config_section(config, "data")
     region = _config_section(config, "region")
     training = _config_section(config, "training")
@@ -428,7 +306,9 @@ def calibration_config_fingerprint(config: dict[str, Any]) -> str:
         },
         "model": _config_section(config, "model"),
         "region": {
-            key: value for key, value in region.items() if key != "active_regions"
+            key: value
+            for key, value in region.items()
+            if key not in {"active_regions", "pseudo_arm", "pseudo_label_dir"}
         },
         "training": {key: value for key, value in training.items() if key != "gpu_id"},
         "augmentation": _config_section(config, "augmentation"),

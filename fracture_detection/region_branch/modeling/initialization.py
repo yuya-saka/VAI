@@ -1,4 +1,4 @@
-"""Baseline 0 checkpointからregion branch modelを初期化する。"""
+"""設定された方式でregion branch modelを初期化する。"""
 
 from __future__ import annotations
 
@@ -22,15 +22,25 @@ BASELINE_PREFIX_MAP = {
 }
 PRETRAINED_PREFIXES = ("encoder.", "whole_lstm.", "whole_head.")
 REGION_PREFIXES = ("fpn.", "region_lstm.", "region_heads.")
+JOINT_RANDOM_PREFIXES = (
+    "whole_lstm.",
+    "whole_head.",
+    "fpn.",
+    "region_lstm.",
+    "region_heads.",
+)
+BASELINE_INITIALIZATION = "baseline0_fold_matched"
+JOINT_INITIALIZATION = "joint_from_start"
 
 
 @dataclass(frozen=True)
 class InitializationReport:
-    """fold-matched初期化の監査情報。"""
+    """model初期化の監査情報。"""
 
-    checkpoint_path: str
-    checkpoint_sha256: str
-    checkpoint_role: str
+    initialization: str
+    checkpoint_path: str | None
+    checkpoint_sha256: str | None
+    checkpoint_role: str | None
     outer_fold: int
     loaded_key_count: int
     random_key_count: int
@@ -45,7 +55,7 @@ class InitializationReport:
 def build_initialized_model(
     config: dict[str, Any],
 ) -> tuple[RegionBranchModel, InitializationReport]:
-    """modelを構築し、対応outer foldのBaseline 0重みを読み込む。"""
+    """configの初期化方式に従ってmodelと監査reportを返す。"""
     model = build_model(config)
     runtime = config.get("runtime")
     if not isinstance(runtime, dict):
@@ -56,14 +66,47 @@ def build_initialized_model(
     model_config = config.get("model")
     if not isinstance(model_config, dict):
         raise ValueError("config.modelはmappingである必要があります")
-    if model_config.get("initialization") != "baseline0_fold_matched":
-        raise ValueError("model.initializationはbaseline0_fold_matchedが必要です")
+    initialization = model_config.get("initialization")
+    if initialization == JOINT_INITIALIZATION:
+        return model, _joint_initialization_report(model, model_config, outer_fold)
+    if initialization != BASELINE_INITIALIZATION:
+        raise ValueError(
+            "model.initializationはbaseline0_fold_matchedまたはjoint_from_startが必要です"
+        )
     checkpoint_root = model_config.get("baseline0_checkpoint_root")
     if not isinstance(checkpoint_root, str) or not checkpoint_root:
         raise ValueError("model.baseline0_checkpoint_rootは非空文字列が必要です")
     checkpoint_path = Path(checkpoint_root) / f"outer{outer_fold}" / "best_model.pt"
     report = load_baseline0_weights(model, checkpoint_path, runtime)
     return model, report
+
+
+def _joint_initialization_report(
+    model: RegionBranchModel,
+    model_config: dict[str, Any],
+    outer_fold: int,
+) -> InitializationReport:
+    """ImageNet encoderとランダムwhole/region pathの初期化を記録する。"""
+    if model_config.get("pretrained") is not True:
+        raise ValueError("joint_from_startではmodel.pretrained=trueが必要です")
+    model_keys = set(model.state_dict())
+    encoder_keys = {key for key in model_keys if key.startswith("encoder.")}
+    random_keys = model_keys - encoder_keys
+    if not encoder_keys or any(
+        not key.startswith(JOINT_RANDOM_PREFIXES) for key in random_keys
+    ):
+        raise ValueError("joint_from_startのparameter分類に失敗しました")
+    return InitializationReport(
+        initialization=JOINT_INITIALIZATION,
+        checkpoint_path=None,
+        checkpoint_sha256=None,
+        checkpoint_role=None,
+        outer_fold=outer_fold,
+        loaded_key_count=len(encoder_keys),
+        random_key_count=len(random_keys),
+        loaded_prefixes=("encoder.",),
+        random_prefixes=JOINT_RANDOM_PREFIXES,
+    )
 
 
 def load_baseline0_weights(
@@ -126,6 +169,7 @@ def load_baseline0_weights(
     if not isinstance(outer_fold, int):
         raise ValueError("expected_runtime.outer_foldは整数が必要です")
     return InitializationReport(
+        initialization=BASELINE_INITIALIZATION,
         checkpoint_path=str(checkpoint_path.resolve()),
         checkpoint_sha256=_sha256(checkpoint_path),
         checkpoint_role="best_val_auroc",

@@ -68,6 +68,8 @@ def test_apply_bag_transform_keeps_mask_binary_and_geometry_shared() -> None:
     transform = augment_from_config(
         {
             "horizontal_flip_probability": 0.0,
+            "vertical_flip_probability": 0.0,
+            "transpose_probability": 0.0,
             "affine_probability": 1.0,
             "shift_limit": 0.0,
             "scale_lower": 1.0,
@@ -118,6 +120,9 @@ def test_apply_bag_transform_preserves_uint8_range() -> None:
     whole_mask = np.ones((15, 32, 32), dtype=np.uint8)
     transform = augment_from_config(
         {
+            "horizontal_flip_probability": 0.0,
+            "vertical_flip_probability": 0.0,
+            "transpose_probability": 0.0,
             "affine_probability": 0.0,
             "intensity_probability": 0.0,
             "blur_noise_probability": 0.0,
@@ -134,13 +139,15 @@ def test_apply_bag_transform_preserves_uint8_range() -> None:
     assert set(np.unique(augmented_mask)) == {1.0}
 
 
-def test_default_augmentation_matches_stage1_except_orientation_changes() -> None:
+def test_default_augmentation_matches_stage1() -> None:
     values = default_augmentation()
     transform = augment_from_config()
     transform_names = [item.__class__.__name__ for item in transform.transforms]
 
     assert values == {
         "horizontal_flip_probability": 0.5,
+        "vertical_flip_probability": 0.5,
+        "transpose_probability": 0.5,
         "affine_probability": 0.7,
         "shift_limit": 0.3,
         "scale_lower": 0.7,
@@ -159,11 +166,11 @@ def test_default_augmentation_matches_stage1_except_orientation_changes() -> Non
     }
     assert transform_names == [
         "HorizontalFlip",
+        "VerticalFlip",
+        "Transpose",
         "RandomBrightnessContrast",
         "Affine",
         "OneOf",
         "OneOf",
         "CoarseDropout",
     ]
-    # R1/R4に正しいラベル入れ替えが存在しない反転は使わない。
-    assert not {"VerticalFlip", "Transpose"} & set(transform_names)

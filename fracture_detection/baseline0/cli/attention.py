@@ -44,7 +44,7 @@ from fracture_detection.baseline0.data.region_validity import (
 )
 
 DEFAULT_EXPERIMENT_DIR = Path(
-    "fracture_detection/baseline0/outputs/08_19/baseline0_shared_core"
+    "fracture_detection/baseline0/outputs/09_04/baseline0_aug追加"
 )
 REGION_COLORS = ("#1f77b4", "#ff7f0e", "#2ca02c", "#d627b4")
 REGION_DISPLAY_NAMES = ("椎体", "右横突孔", "左横突孔", "後方要素")
