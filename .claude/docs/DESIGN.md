@@ -2,8 +2,99 @@
 
 > Active design decisions only. Historical designs are available from Git history.
 
-The canonical Japanese overview for the next four-region model is
-`.claude/docs/REGION_MODEL_DESIGN_JA.md`.
+The current new-model design is `fracture_detection/REGION_MIL_DESIGN.md`.
+Its 2026-09-12 v2 amendment supersedes the original fixed noisy-OR and 4/4/8
+starting settings: current defaults are normalized logit-LSE with tau=0.5 and
+N/A/U=8/4/4. Both settings are explicit in config, and legacy v1 artifacts keep
+their original noisy-OR interpretation. The user accepted the original serial
+local-region design on 2026-09-10 and authorized implementation later that day;
+the v2 aggregation and sampling revision was authorized and implemented on
+2026-09-12. Numerical settings remain experimental starting values, not validated
+optima. The implementation is at `fracture_detection/weak/`.
+`patience_gt_passes` is config-controlled with positive-integer validation.
+The editable config uses 15 GT-passes; completed test_v2 used 10 according to
+its saved effective config. Other frozen training settings remain unchanged.
+On 2026-09-10 the user specified end-to-end CNN fine-tuning, four local region
+fracture outputs, and whole prediction derived only from those outputs. There
+is no parallel whole classifier. Negative vertebrae now also train the region
+path. This supersedes the positive-only and frozen-CNN proposals retained as
+historical discussion in `fracture_detection/CONDITIONAL_MIL_DESIGN.md`.
+
+The current aggregation is configurable and parameter-free. Protocol v2 defaults
+to normalized logit-LSE, while protocol v1 and the v2 `noisy_or` option retain
+the original aggregation. On the 2026-09-10 review, the user relaxed Baseline 0
+loss parity and requested the most appropriate fine-tuning design. The resulting
+observation-specific mixed
+supervision: negative bags receive the sum of four negative region BCE terms;
+annotated positive bags receive BCE summed over all four region cells; positive
+bags without region GT receive positive whole-aggregation loss. The user explicitly
+clarified that every region in a GT-bearing vertebra is annotated: zero means
+no fracture, never an unknown cell. Annotation availability is vertebra-level.
+Annotated bags receive no redundant whole-positive OR term. Remove partial-cell
+loss branches and include every annotated bag's four cells in evaluation.
+The old 235-complete/33-partial and 983-known/89-unknown counts describe legacy
+validity logic, not this label contract. Do not reuse annotation-run-based zero
+invalidation from baseline0/data/region_validity.py for the new model. With the
+previously counted 268 annotated bags, all 1,072 cells are supervised. Recheck
+versioned inputs before implementation; existing artifacts are unchanged.
+
+The user's follow-up asks whether annotated positives should classify the
+vertebra using only GT-positive regions. A singleton GT-positive restricted
+OR is exactly that region's positive BCE. For multiple known-positive regions,
+restricted OR requires only one to fire; per-positive-region BCE additionally
+uses the fact that each is positive. The user selected per-positive-region
+supervision, not restricted-OR-only supervision. Confirmed negative regions
+likewise receive local BCE with target zero even inside a positive vertebra;
+do not overwrite them with the positive whole label or omit their local loss.
+All zeros in GT-bearing vertebrae are valid negative targets.
+GT selects training losses only;
+inference aggregates all four regions. Local feature readout does not guarantee
+strict exclusion of outside-region image information through the CNN.
+
+The batch objective averages these per-bag losses over the actual number of
+bags, with weak-loss coefficient beta=1. There is no extra pos_weight, source
+importance correction, or separately normalized GT term. Four observed region
+labels supply four BCE observations, not a per-bag cell mean. Under v1 noisy-OR,
+negative whole BCE equals the four-negative-region BCE sum. Under v2 LSE they
+are not equal; the design keeps the dense four-region negative BCE and adds no
+whole-negative term. This is not natural-population risk matching or a guarantee
+of calibrated region/whole probabilities.
+
+The accepted design has no pre-training calibration phase: no CAM probability
+calibration, pseudo-label generation, gradient-norm lambda calibration, or
+calibration artifacts/CLI. Beta=1 is a fixed starting hyperparameter; any later
+beta comparison is an inner-data hyperparameter experiment. Inner-only threshold
+selection for thresholded metrics remains an evaluation step, not model
+calibration. AP/AUROC require no threshold, and Brier/ECE remain diagnostics only.
+
+The current batch of 16 contains 8 negative, 4 annotated-positive, and 4
+unannotated-positive bags. One GT-pass exposes each annotated bag once;
+negative and weak-positive shuffled queues rotate across passes. Exact ratios,
+beta, and schedule remain provisional and require inner-validation comparison.
+A matched no-weak-loss arm keeps identical inputs and batch denominators to
+test whether direct weak supervision actually improves held-out localization.
+
+All losses update the CNN and the same local region path. The proposal retains
+pretrained BN running statistics while fine-tuning CNN weights and BN affine
+parameters, to limit statistic drift under positive-heavy sampling; this is
+not CNN freezing or a Baseline 0 loss-parity constraint. One checkpoint selected
+by inner annotated-positive region macro AP produces both region and whole
+outputs, with whole metrics reported to expose tradeoffs.
+
+Region scores are unconditional fracture scores and are not multiplied by whole
+probability at inference. LSE's surrogate-score meaning and legacy noisy-OR's
+independence assumption are documented. Architecture direction, inclusion of
+negatives, and three-source sampling are user requirements; Baseline 0 label-weight
+parity is no longer required. Exact ratios and numerical hyperparameters remain
+experimental starting values. Plane/mask
+fracture coverage was confirmed by the user. This design-only task did not
+itself authorize implementation or training; a later 2026-09-10 request did
+(Arm B implemented at `fracture_detection/weak/`; outer0 training completed,
+with the result re-audited on 2026-09-11).
+
+The following existing-system sections and `.claude/docs/REGION_MODEL_DESIGN_JA.md`
+describe the separate Baseline 0 / CAM project. Their parallel whole path and
+pseudo-label procedures are not requirements for the new region-MIL design.
 
 ## Overview
 
@@ -156,6 +247,49 @@ plan is `.claude/docs/work-logs/2026-09/2026-09-01-cam-soft-bce-implementation-p
 
 ## Open Questions
 
+- Proposed follow-up after the test_v2 AP diagnosis (not yet approved for
+  implementation or training): keep normalized LSE tau=0.5, N/A/U=8/4/4,
+  initialization, and the existing 60-pass cosine horizon. Run the full 60
+  GT-passes without region-only early stopping to observe both inner endpoints;
+  this supplies approximately 2.64 negative sampler cycles but may also
+  increase GT overfitting. Save candidate checkpoints sufficient to apply an
+  inner-only joint selection rule: maximize whole AP subject to a preregistered
+  acceptable region-macro-AP floor. A 0.01 decrease from the completed v2 inner
+  reference is an illustrative tolerance, not an accepted requirement or an
+  outer-tuned threshold. If no candidate satisfies the floor, report that the
+  candidate failed the localization constraint. Report both endpoints for the
+  same selected model, without mixing whole and region outputs across models.
+  Compare matched beta=1 and beta=0 runs using identical U inputs, denominators,
+  schedules, and the same selection rule to isolate the direct U-loss benefit
+  under this revised protocol. Longer training and this selection rule are
+  hypotheses, not guarantees of better AP. The previously inspected outer0
+  results are exploratory; use untouched outer folds for confirmation. Defer
+  distillation or another loss change until this comparison identifies the
+  remaining tradeoff. AUROC improvement alone does not guarantee PR-AUC
+  improvement, as discussed by
+  [Davis and Goadrich (2006)](https://ftp.cs.wisc.edu/machine-learning/shavlik-group/davis.icml06.pdf).
+
+- The user's 2026-09-11 objective is improved whole classification together with
+  localization. Proposed next comparisons preserve the serial region-to-whole
+  path: change only noisy-OR to max for U training and whole inference while
+  retaining full N/A region BCE; separately test N/A/U=8/4/4 with A's nominal
+  coefficient preserved. Max can miss additional positive regions and reinforce
+  an incorrect maximum, so it is not yet selected. Whole-score distillation from
+  the fold-matched Baseline 0 is a later option, not regional pseudo-labeling or
+  a parallel inference head. Select using both inner endpoints, and reserve
+  untouched outer folds for confirmation. No implementation or new training is
+  authorized by this design discussion; details and primary sources are in
+  `.claude/docs/experiments/2026-09-11-weak-test-v1/analysis.md`.
+- For weak/test_v1, isolate the incremental noisy-OR contribution using matched
+  beta=0/1 runs that retain identical U inputs and batch denominators. Outer0
+  region macro AP is 0.776598 on 56 annotated-positive bags; whole AP is 0.728427
+  versus Baseline 0's 0.772599 on the same 2,671 bags. The saved
+  `fold_metrics.json.best_metrics` are inner metrics, not outer results. Positive
+  oversampling and score inflation alone do not establish the AP regression's
+  cause, because a strictly increasing calibration transform preserves ranking.
+  Negative exposure in the new region path and noisy-OR aggregation remain
+  candidates. No new training protocol is selected by this analysis; see
+  `.claude/docs/experiments/2026-09-11-weak-test-v1/analysis.md`.
 - Test true from-start joint learning before adopting staged freezing as the final
   training protocol. The current v3 run is not a from-start joint experiment: it
   initializes the whole path from an already trained Baseline 0 checkpoint and
@@ -279,6 +413,16 @@ old diagnostic runs are removed.
 
 | Decision | Rationale | Date |
 |---|---|---|
+| Prefer observation-specific mixed supervision without Baseline 0 risk matching | User relaxed Baseline 0 parity. Proposed 4/4/8 sampling intentionally emphasizes positives: sum four all-negative BCE terms for negatives, sum all four GT-cell BCE terms for annotated positives, and noisy-OR positive loss for unannotated positives; average over actual bags with beta=1 initially. Omit source correction, extra pos_weight, and redundant OR on GT-positive bags. Fine-tune the shared local region path and CNN; verify benefit against a matched no-weak arm | 2026-09-10 |
+| ~~Use three-source positive-heavy sampling with Baseline 0 whole-loss weighting~~ (superseded by latest 2026-09-10 review) | User requires few negative bags and reliable exposure to annotated/unannotated positives. Proposed 4/4/8 batches need source importance correction before positive weight 2 and normalization by corrected weight sum; applying pos_weight alone would also change the whole class prior | 2026-09-10 |
+| Distinguish Baseline 0 class-weight parity from identical training behavior | Inspected broadcast_bce_loss: it weights 15 plane BCE terms by positive 2/negative 1 and divides by weight sum. A four-region bag-OR model can preserve target population label weights but cannot claim identical plane supervision, stochastic batch normalization, or optimizer trajectories | 2026-09-10 |
+| Fine-tune a single region-to-whole model with negative vertebrae included | Explicit user requirement: CNN learns four local fracture scores and whole is derived only from those scores. Remove the parallel whole classifier and CNN-freeze proposal. Negative whole labels supervise all four regions | 2026-09-10 |
+| ~~Propose noisy-OR whole BCE plus observed-region BCE for the serial model~~ (superseded by observation-specific loss, 2026-09-10) | Negative noisy-OR BCE already equals four negative region BCE terms. Add direct GT only for annotated positives, let both objectives update the CNN, and derive whole and region outputs from the same checkpoint without probability gating | 2026-09-10 |
+| Propose ordinary GT+OR as the first conditional-MIL comparison and defer head detachment | Regularization does not require a gradient stop; fixed head weights still permit shared feature shifts to increase every logit. A matched GT-only comparison should establish the weak-label effect before introducing unsupported gradient restrictions | 2026-09-10 |
+| Specify conditional-MIL pilot reductions and comparison controls before implementation | Normalize batch sums with fixed train GT-cell/weak-bag counts, use each positive bag once per epoch, keep identical exposure across arms, and select checkpoints/coefficients only with each outer run's inner data. A shared-head global-pool ablation would produce identical region outputs, so locality comparisons require matched distinct heads | 2026-09-10 |
+| ~~Treat positive-bag OR as a ramped feature-only regularizer~~ (superseded 2026-09-10 review) | The proposed head detach blocks direct bias gradients but does not fix output semantics or prevent collapse through feature changes; retain it only as an additional experimental arm | 2026-09-09 |
+| ~~Start a frozen-CNN, positive-only conditional-MIL pilot~~ (superseded 2026-09-10) | Replaced by the user's requirement to fine-tune the CNN and derive whole from four region outputs using positive and negative vertebrae | 2026-09-09 |
+| ~~Research a positive-only local-region model~~ (scope superseded 2026-09-10) | Local masks, mixed GT/weak supervision, and design-before-implementation remain required; positive-only training and a parallel whole path are no longer the target design | 2026-09-09 |
 | Keep Baseline 0 as the active teacher and reference implementation | It is the current reliable model; previous MTL, Proposed, and Type2 approaches failed | 2026-08-24 |
 | Keep pseudo-label generation and CAM audit as active first-class components | Pseudo-labels are a core upcoming workflow and require auditable Grad-CAM generation rather than historical deletion | 2026-08-24 |
 | Remove MTL, Proposed, Type2, frozen multi-arm infrastructure, and local archives | Keeping failed approaches in the active tree obscured the current system and created excessive files and directories | 2026-08-24 |
@@ -332,6 +476,115 @@ old diagnostic runs are removed.
 
 ## Changelog
 
+- 2026-09-12: Recorded an unimplemented follow-up proposal: retain LSE and
+  8/4/4 sampling, compare full 60-pass beta=1/0 runs, and select a single
+  checkpoint by inner whole AP under a predeclared localization floor.
+  Also distinguished the editable patience=15 config from completed test_v2's
+  saved patience=10. No training configuration or code was changed.
+
+- 2026-09-12: Qualified the test_v2 whole-AP diagnosis. Encoder-only transfer,
+  less than one negative sampler cycle at the selected pass, and checkpoint
+  selection on annotated-positive regions are concrete protocol facts; their
+  causal contributions remain unseparated. Post-hoc pooling comparisons do
+  not prove an information limit or establish distillation as necessary.
+
+- 2026-09-12: Audited the completed `weak/outputs/09_12/test_v2/outer0` run.
+  LSE tau=0.5 plus N/A/U=8/4/4 largely removed v1 whole-score inflation
+  (outer BCE 0.4619 to 0.1740; negative mean score 0.2913 to 0.0670) and
+  improved whole AP/AUROC to 0.7405/0.9160, while outer conditional region
+  macro AP stayed approximately flat at 0.7717 versus v1 0.7766. Because both
+  aggregation and sampling changed and no matched beta=0 arm exists, weak-label
+  benefit remains unidentified. Full review is under
+  `.claude/docs/experiments/2026-09-12-weak-test-v2/analysis.md`.
+
+- 2026-09-12: Removed `training.patience_gt_passes` from the frozen-value
+  contract after the user clarified that the v1 experiment had completed.
+  Patience is now a positive config integer, and the current v2 run uses 15;
+  all other frozen training settings remain unchanged.
+
+- 2026-09-12: Implemented protocol v2 after user approval: configurable
+  `loss.whole_aggregation` supports normalized logit-LSE and legacy noisy-OR,
+  `loss.lse_temperature` controls LSE and defaults to 0.5, and the runnable
+  config uses N/A/U=8/4/4 under a new `09_12/lse_tau05_n8` output directory.
+  U training and whole inference use the same aggregation; N/A retain dense
+  four-region BCE. Protocol v1 configs remain valid and map to noisy-OR.
+
+- 2026-09-12: Recorded the user's LSE suggestion and a normalized logit-LSE
+  comparison proposal in Open Questions and the test_v1 analysis. Checked toy
+  probabilities and gradients on CPU; no model, config, or training changes.
+
+- 2026-09-11: Recorded the user's joint whole-classification/localization goal
+  and unadopted max-MIL, sampling, and later whole-distillation proposals in Open
+  Questions and the test_v1 analysis. These are separate controlled comparisons,
+  not an accepted replacement for the then-current noisy-OR design. Superseded
+  by the user's 2026-09-12 LSE implementation decision.
+
+- 2026-09-11: Audited weak/test_v1 outer0 learning results and corrected the earlier
+  inner/outer metric mix-up in the training work log. Saved a reproducible CSV
+  analysis and inner learning-curve figure under
+  `.claude/docs/experiments/2026-09-11-weak-test-v1/`. GT validation improvement
+  is supported, but the incremental weak-label benefit requires a matched beta
+  control. Sampling, negative exposure, and aggregation explanations remain
+  hypotheses; no model/config changes or new training were performed.
+
+- 2026-09-10: Rework weak/'s per-GT-pass validation curves. The former `val_loss` averaged the N/A/U training loss over the natural inner fold (~90% whole-negative bags), so it matched neither the design's §8 split nor the train loss, and it was not written to `history.csv`; Brier/ECE were computed and discarded, and `training/monitoring.py` was never called. Now region metrics (per-region AP, BCE, Brier, ECE) use inner annotated-positive cells only, whole metrics (AP, AUROC, BCE, Brier, ECE) use every inner bag, and per-group per-bag losses (N, A, and weak-positive `-log p_whole`) are recorded for train and val. At the user's request a weak-positive-inclusive validation loss is also observed as `val_objective`: group means combined with the training 4/4/8 composition and beta, which equals the training batch loss for that composition and is computed identically for train. Annotated+negative pooled region BCE is not recorded because ~98% of its cells are negative bags and that part is identical to whole BCE by the noisy-OR identity. `diagnostics.csv` is written every pass and predictions now include raw region logits. Checkpoint selection is unchanged.
+
+- 2026-09-10: Measured peak VRAM of one train step at real shapes (16 bags × 15 planes, 224², bf16, eager, RTX A6000, random inputs): baseline0 17.90 GiB, region_branch 19.00/20.14 GiB with 2/4 positive bags, weak with an unchunked FPN 26.73 GiB. The earlier "4-8x region_branch" note was wrong; it described only the FPN share, not total memory. The extra cost is the stride-4 FPN maps kept for backward (~0.57 GiB per bag), which region_branch pays only for whole-positive bags. weak now runs FPN + mask pooling per one-bag chunk under activation checkpointing (the encoder is not recomputed; outputs and gradients match the unchunked computation), measuring 18.42 GiB at ~20% longer steps. Batch composition, the one-encoder-forward-per-batch contract, and model math are unchanged.
+
+- 2026-09-10: Implemented the accepted Region-MIL design as `fracture_detection/weak/` (the design doc's `region_mil/` placeholder is superseded by this user-specified directory name; no design content changed). Baseline0 modules (`data.splits`, `data.dataset`, `data.sampling`, `data.staging`, `training.trainer`, `training.parallel`, `evaluation.metrics`) are imported directly; everything else (N/A/U group resolution, the GT-pass batch sampler, the FPN/pooling/model/noisy-OR-loss stack, initialization, optimizer/scheduler, trainer, monitoring, evaluation metrics, config schema, CLIs) is implemented inside `weak/` with no dependency on `region_branch/`, keeping the rollback unit self-contained. Only Arm B (the proposed model) is implemented; no Arm A/C config switch exists. Augmentation reuses baseline0's frozen recipe unchanged per the user's instruction, except MixUp, which is structurally inapplicable to this model (no loss path exists to skip during a mixed step, unlike region_branch) and is enforced as a forbidden config key. 80 unit tests pass, including exact reproduction of the frozen manifest's N=12,100/A=268/U=1,064 counts and a genuine crash-and-resume determinism test. No training has been run; VRAM has not been measured against real data. Existing baseline0/region_branch tests (256/257, one pre-existing unrelated failure confirmed via git stash) show no regression.
+
+- 2026-09-10: Clarify that the accepted Region-MIL workflow has no pre-training calibration phase or calibration CLI/artifacts. Preserve only inner-data threshold selection for thresholded evaluation metrics and probability-quality diagnostics; these do not alter the initial model outputs.
+
+- 2026-09-10: Save the accepted region-MIL design, implementation order, validation gates, initial experiment, rollback policy, and dirty-worktree state to `.claude/docs/work-logs/2026-09/2026-09-10-region-mil-implementation-handoff.md` for direct implementation startup in the next session. No implementation or training performed.
+
+- 2026-09-10: User accepts the basic region-MIL design and requests a consolidated summary. Record acceptance of the serial local-region/noisy-OR path and three-source supervision with all four GT cells valid. Retain numerical settings as initial experimental choices; no implementation or training is authorized by this summary request.
+
+- 2026-09-10: User corrects annotation semantics: GT-bearing vertebrae have all four region labels and zero always means no fracture. Supersede earlier partial-cell assumptions and legacy-validity-derived counts for the new model; train/evaluate all four cells in all annotated bags. Update the active region-MIL contract and flag old validity logic for replacement only when implementation is authorized. No source/data edits or metric recomputation.
+
+- 2026-09-10: User selects supervision of each confirmed positive region rather than positive-subset OR. Clarify that confirmed-zero regions receive local negative BCE, whereas unknown partial-annotation zeros remain excluded by validity. No implementation.
+
+- 2026-09-10: Clarify the user's GT-region-only classification question: single-positive restricted OR equals local positive BCE, whereas multi-positive restricted OR is weaker than supervising each confirmed positive. Record the distinction without silently replacing the loss design or claiming strict pixel isolation. Design only.
+
+- 2026-09-10: Latest user review removes Baseline 0 loss-parity constraint. Revise the serial region-MIL proposal to observation-specific mixed supervision with 4/4/8 positive-heavy sampling, per-bag summed observed-cell BCE or weak OR, initial beta=1, no source importance correction or extra pos_weight, and no redundant whole-positive term when region-positive GT is observed. Record partial-GT likelihood handling, rotating data queues, and matched weak/no-weak validation. Design only; no model implementation or training.
+
+- 2026-09-10: Incorporated the user's three-source sampling and Baseline 0
+  pos_weight requirements. Replaced class-balanced whole BCE with corrected
+  positive-2/negative-1 weighted risk, proposed 4/4/8 batches and rotating queues
+  around one GT-pass, specified a separate observed-cell GT reduction, and
+  documented plane-vs-bag loss and BatchNorm limits on parity. CNN remains
+  trainable; pretrained BN-stat retention is a proposal. No code was implemented.
+- 2026-09-10: User changed the target architecture to end-to-end fine-tuned
+  region-to-whole MIL with negative vertebrae. Added REGION_MIL_DESIGN.md as the
+  current design, marked the conditional positive-only document historical,
+  and specified noisy-OR aggregation, negative-loss equivalence, all-bag whole
+  supervision plus positive observed GT, one-checkpoint inference, and matched
+  comparisons. CNN freezing and the parallel whole classifier are superseded.
+  Model code and training remain untouched.
+- 2026-09-10: Recorded user confirmation of plane/mask fracture coverage and
+  clarified that the frozen-CNN pilot is optional and not yet agreed. Its weak
+  supervision affects only the trainable region branch; CNN-level regularization
+  requires a matched comparison that also updates the CNN.
+- 2026-09-10: Reviewed the design-only conditional MIL proposal. Replaced the
+  unsupported feature-only OR default with ordinary region-path GT+OR, explained
+  why head detachment cannot fix score semantics, and specified a small shared
+  region head, frozen-encoder pilot, count-normalized step losses, ramp/weight
+  candidates, matched GT exposure, and nested model selection. Corrected the
+  degenerate shared-head/global-pool comparison. No runtime implementation or
+  model training was performed; the detailed settings remain review proposals.
+- 2026-09-09: Refined the conditional-MIL proposal after reviewing mixed weak/
+  strong supervision evidence. The leading arm now shares the scalar region
+  classifier, ramps noisy-OR from zero, and detaches classifier parameters on
+  weak examples so OR regularizes local features rather than directly shifting
+  head biases. The clean first pilot freezes the fold-matched Baseline 0 trunk,
+  uses every positive training bag once with GT/weak stratification, and compares
+  GT-only against feature-only OR before full-gradient OR or consistency.
+- 2026-09-09: Added the design-only positive-region MIL review in
+  `fracture_detection/CONDITIONAL_MIL_DESIGN.md`. Read the supplied Fang paper
+  and primary mixed/partial-supervision literature; distinguished local mask
+  readout from strict input isolation and noisy-OR scores from conditional
+  marginals. Audited 235 complete / 33 partial / 1,064 unannotated positive bags
+  and the differing vertebral-level distributions. No model code, configuration,
+  or training run was created; implementation awaits completion of design review.
 - 2026-09-08: Implemented protocol v7 single-pass joint training and calibration
   v5. Removed the positive-only second encoder forward while retaining
   conditional-positive FPN/region computation, and added a BatchNorm update-count

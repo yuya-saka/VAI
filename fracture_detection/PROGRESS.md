@@ -1,8 +1,28 @@
 # fracture_detection 進捗
 
-最終更新: 2026-08-26
+最終更新: 2026-09-10
 
 ## 現在の主軸
+
+`fracture_detection/weak/` の region-MIL モデル（4領域logit → 固定noisy-ORでwhole）を実装済み。
+設計は `REGION_MIL_DESIGN.md`（2026-09-10採用）。CAM疑似ラベル・校正フェーズ・collapse自動停止を
+すべて廃し、GTなし陽性はnoisy-ORの弱教師としてのみ使う3群(N/A/U) mixed supervision。
+
+- architecture: fine-tuneするEfficientNetV2-S trunk（Baseline 0からencoderのみ転送）、
+  stride-4 FPN + mask-normalized pooling + 有効面のみpackした共有region BiLSTM +
+  共有Linear head。whole専用経路は存在しない
+- 損失: N=4領域陰性BCE和、A=4セルBCE和、U=positive noisy-OR（beta倍）。数値は
+  float32のlog-survival/log1mexpで安定化
+- unit test 84件（合成データ、実manifestでの件数再現含む）で確認済み
+- 実装はArm B（提案モデル）のみ。Arm A/C切替機構は未実装
+- **outer0のみ学習完走済み（2026-09-11）。** region_macro_ap=0.778、whole AP=0.703
+  （baseline0と同一母集団で-0.069。陰性bagのp_whole平均が4倍高いことが原因で、
+  design上想定済みの代償。バグではない）。outer1〜4は未実行。
+  N/U比率変更の追加比較は要否未決定（ユーザー回答待ち）
+- 詳細は `weak/README.md` と
+  `.claude/docs/work-logs/2026-09/2026-09-11-weak-arm-b-outer0-training.md` を参照
+
+## 過去の主軸1（維持）
 
 `fracture_detection/region_branch/` の4領域骨折検出モデル（統合4領域 + 単一領域4本）を実装済み。
 `baseline0/` は疑似ラベルの供給元・whole path architectureの参照元として維持する。
@@ -15,7 +35,7 @@
 - 学習・評価は未実施（校正・学習・OOF評価・比較はすべてユーザーが手動起動）
 - 詳細は `region_branch/README.md` を参照
 
-## 過去の主軸（維持）
+## 過去の主軸2（維持）
 
 `fracture_detection/baseline0/` の椎体単位骨折分類と、その教師モデルを使う疑似ラベル生成を主軸として扱う。
 
@@ -51,14 +71,24 @@ fracture_detection/
 │   ├── pseudo_labeling/ # Grad-CAM / CAM audit / score / report
 │   ├── resources/
 │   └── tests/
-└── region_branch/
+├── region_branch/
+│   ├── README.md
+│   ├── cli/          # train / calibrate / evaluate / compare_arms
+│   ├── config/       # schema / YAML（統合1 + 単一4）
+│   ├── data_pipeline/ # dataset / pseudo_labels / sources / sampling / loaders / constants
+│   ├── modeling/     # model / pooling(FPN) / losses
+│   ├── training/     # trainer / calibration / monitoring(collapse) / experiment
+│   ├── evaluation/   # metrics（validity mask付き領域別AP/AUROC）
+│   └── tests/
+└── weak/
     ├── README.md
-    ├── cli/          # train / calibrate / evaluate / compare_arms
-    ├── config/       # schema / YAML（統合1 + 単一4）
-    ├── data_pipeline/ # dataset / pseudo_labels / sources / sampling / loaders / constants
-    ├── modeling/     # model / pooling(FPN) / losses
-    ├── training/     # trainer / calibration / monitoring(collapse) / experiment
-    ├── evaluation/   # metrics（validity mask付き領域別AP/AUROC）
+    ├── REGION_MIL_DESIGN.md（リポジトリ直下）参照
+    ├── cli/          # inventory / train / evaluate
+    ├── config/       # schema / YAML
+    ├── data_pipeline/ # dataset / groups(N/A/U) / sampling(GT-pass) / augmentation / loaders
+    ├── modeling/     # model / pooling(FPN) / losses(noisy-OR) / initialization
+    ├── training/     # trainer / optimization / monitoring(診断のみ) / experiment
+    ├── evaluation/   # metrics（3母集団分離 + Brier/ECE）
     └── tests/
 ```
 
@@ -73,6 +103,15 @@ fracture_detection/
 - 過去の実装や判断が必要な場合はGit履歴を参照し、現行treeへarchiveを置かない。
 
 ## 次の作業
+
+### 0. weak/ の学習実行（実装済み・未実行）
+
+`uv run python -m fracture_detection.weak.cli.inventory` で件数・4領域mask被覆を
+確認してから、`uv run python -m fracture_detection.weak.cli.train` を手動起動する。
+校正フェーズは存在しない（design docの方針どおり不要）。5 fold完走後に
+`uv run python -m fracture_detection.weak.cli.evaluate` でOOF評価する。
+VRAMはランダム入力・実寸で実測済み（1 step 18.42 GiB、region_branchの19.00 GiBより小さい。
+`weak/README.md`の既知の制約を参照）。実データでのsmoke testは未実施。
 
 ### 1. Baseline 0 fine-tuning化（実装済み）
 
