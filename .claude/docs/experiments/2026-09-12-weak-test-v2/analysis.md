@@ -113,6 +113,42 @@ with limited generalization, not proof of one architectural or sampling cause.
 Neither a representation plateau nor the necessity of distillation has been
 established by this single run.
 
+### Interpreting the user's region-guidance hypothesis
+
+The hypothesis is that learning fractures in four anatomical regions improves
+whole-vertebra classification by teaching the model better fracture evidence.
+The current comparison also changes how that evidence can be used: it replaces
+Baseline 0's trained whole path with a newly initialized FPN/region path and
+restricts the final whole readout to fixed aggregation of four scalar logits.
+It therefore combines the possible benefit of anatomical supervision with
+changes in representation, model capacity, optimization, and checkpoint
+selection. The observed whole-AP gap does not isolate the effect of anatomical
+supervision.
+
+Baseline 0 already receives the image containing all four regions. Explicit
+region outputs are additional supervision and an architectural constraint,
+not additional CT observations. Classification-only CNNs can already learn
+localized discriminative features, as demonstrated generally by
+[Zhou et al. (2016)](https://openaccess.thecvf.com/content_cvpr_2016/html/Zhou_Learning_Deep_Features_CVPR_2016_paper.html);
+this is not proof of where this specific Baseline 0 attends on every case.
+
+Under fixed LSE, a falsely high regional score can raise the whole score, and
+the final aggregator cannot inspect region feature vectors to correct it.
+Upstream CNN receptive fields still carry context; it would be incorrect to
+claim the model has no access to information outside each mask. Successful
+anatomical guidance would need to improve region evidence sufficiently to
+offset these readout and optimization changes. The 159 annotated training
+positives supply location targets, while U supervision does not identify the
+correct region. Conditional region AP on annotated positives alone does not
+measure rejection of negative vertebrae.
+
+A future test of anatomical-supervision benefit should hold the architecture,
+whole-label objective, inputs, training exposure, and selection rule constant
+while varying the regional GT supervision. This is distinct from beta=0/1,
+which isolates direct U-loss supervision. Neither comparison is implemented or
+authorized by this clarification, and the required serial inference constraint
+remains unchanged.
+
 ## Inner selection behavior
 
 - v2 selected pass 21 at inner region macro AP 0.7641; v1 selected pass 35 at

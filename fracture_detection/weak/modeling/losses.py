@@ -251,8 +251,9 @@ def mixture_objective(
     because of the short final step.
     """
     batch_size = negative_per_batch + annotated_per_batch + weak_per_batch
-    return (
-        negative_per_batch * negative_mean
-        + annotated_per_batch * annotated_mean
-        + beta * weak_per_batch * weak_mean
-    ) / batch_size
+    total = negative_per_batch * negative_mean + annotated_per_batch * annotated_mean
+    # An N/A-only composition has no U term; the train stream's weak_mean is
+    # then NaN, and 0 * NaN would poison the objective.
+    if weak_per_batch > 0:
+        total += beta * weak_per_batch * weak_mean
+    return total / batch_size

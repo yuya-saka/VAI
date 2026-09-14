@@ -2,6 +2,89 @@
 
 > Active design decisions only. Historical designs are available from Git history.
 
+The user now requests a PMGAN-inspired structure without learned attention,
+retaining as much of the learned vertebra classifier as possible. Both SA and MA
+are excluded; supplied anatomical masks remain as deterministic feature guidance.
+The source paper and the EfficientNet/Baseline 0 interfaces have been checked.
+The concrete adaptation and proposed global-branch/batch design are documented in
+`fracture_detection/PMGAN_ADAPTATION_DESIGN.md`; this design request reopens the
+architecture but has not yet changed the runnable v2 implementation below.
+
+### 2026-09-13 joint-learning candidate after the beta-zero experiment
+
+The completed `weak/outputs/09_12/test_v2_beta=0` has pooled five-fold whole
+AP 0.702075 and AUROC 0.906088, versus matched Baseline 0 AP 0.740479 and
+AUROC 0.908486. Conditional localization macro AP is 0.764900 on 268 annotated
+positive vertebrae; this is not localization AP over all vertebrae. On outer0,
+beta-zero versus beta-one whole AP is 0.774803 versus 0.740521 and conditional
+region macro AP is 0.767719 versus 0.771679. Their patience settings differ
+(15 versus 10); the comparison does not isolate beta alone. Sources are the
+saved OOF metrics and `.claude/docs/experiments/2026-09-12-weak-test-v2-beta0/metrics.json`.
+Beta zero removes the direct unannotated-positive MIL loss, not the negative
+regional targets or the whole-label information in the pretrained encoder.
+
+The revised candidate uses direct whole supervision on N/A/U and regional BCE
+only on N/A, with `L_total = L_whole + lambda_region * L_region`. U still trains
+shared parameters through the global path, without assigning its positive label
+to an unknown region. This supersedes the initial candidate's default U-local
+LSE constraint; reintroducing that constraint would be a separate experiment.
+Keep the attention-free global plus four fixed-mask streams and transferred,
+shared CNN tail/LSTM/head candidate. Shared parameters receive both gradients;
+the whole endpoint need not be an aggregation of regional predictions.
+N/A/U=8/4/4 can serve both tasks in one batch. Regional loss normalization,
+whole sampling correction, and lambda remain explicit experimental choices.
+The user rejected another whole-only training run on 2026-09-13. Proceed with
+joint-training design, using existing Baseline 0 and beta-zero results as
+reference points rather than requiring new single-task runs first.
+Select checkpoints by inner whole AP for the primary classification objective
+and report localization at those same checkpoints. Improved joint performance
+is a hypothesis, not established by this beta ablation. No implementation or
+training is authorized by this discussion alone.
+
+#### Joint-training safeguards proposed on 2026-09-13
+
+Parameter sharing permits transfer but does not guarantee mutual benefit.
+Before training, verify eval-mode global prediction parity with the fold-matched
+Baseline 0 and verify that each loss independently reaches the shared CNN,
+LSTM, and head parameters included in the optimizer. Use a single shared-prefix
+forward and one summed-loss optimizer update; keep pretrained CNN and head BN
+running statistics fixed while allowing weight and affine gradients. Frozen
+statistics do not by themselves solve the regional masked-input distribution
+shift. Earlier positive-only BN-buffer failures are distinct from current v2,
+which already retains BN statistics.
+
+For the candidate N/A/U=8/4/4 batch, define regional BCE as the mean over the
+48 known N/A cells (or actual valid known-cell count). This is a new loss scale,
+not numerical parity with the current sum-per-bag beta-zero objective. Keep the
+whole objective and any sampling correction identical across joint-training
+variants. Verify the transferred global path before training without launching
+a whole-only fine-tuning run. Explore a small prespecified inner-only positive
+lambda set, rather than
+assuming equally sized scalar losses imply equally sized parameter updates.
+Do not add pseudo labels, U-region MIL, or global/local consistency losses in
+the initial comparison.
+
+Log task-specific gradient norms, the weighted regional/whole norm ratio, and
+gradient cosine similarity at shared CNN and LSTM/head blocks on training
+batches. Inspect annotated-positive contributions separately because abundant
+negative targets can obscure positive-case conflicts. These are training
+diagnostics, not guarantees of validation AP or optimizer-step alignment.
+PCGrad or adaptive balancing are conditional follow-ups only if persistent
+conflict or domination is measured; neither is a proven fix for this dataset.
+If conflicts concentrate in the classifier, test splitting only the final
+linear layer rather than assuming maximal sharing must be optimal.
+
+The earlier three-arm proposal is not the active execution plan: the user
+does not want another whole-only run. Use completed Baseline 0 for whole
+classification and completed beta-zero for localization reference, while
+recognizing that architecture and protocol differences prevent isolated causal
+attribution to multitask learning. Train both objectives from the outset and
+retain gradient diagnostics and initialization checks within that run. Report
+both endpoints from the same joint checkpoint selected by inner whole AP;
+monitor conditional localization and region detection including negatives.
+Loss decrease or gradient alignment alone is not success. These safeguards
+remain proposals, not implemented policy.
+
 The current new-model design is `fracture_detection/REGION_MIL_DESIGN.md`.
 Its 2026-09-12 v2 amendment supersedes the original fixed noisy-OR and 4/4/8
 starting settings: current defaults are normalized logit-LSE with tau=0.5 and
@@ -247,6 +330,60 @@ plan is `.claude/docs/work-logs/2026-09/2026-09-01-cam-soft-bce-implementation-p
 
 ## Open Questions
 
+- The user decided not to use learned attention in the PMGAN-inspired candidate:
+  exclude both standalone SA and mask-supervised MA. The current proposal adds
+  one Baseline 0-compatible global stream and four deterministically masked
+  regional streams, sharing the transferred CNN tail, LSTM and head weights.
+  Keep N/A/U=8/4/4 so the same batch provides 8 whole negatives and 8 whole
+  positives. Train the global stream directly on all whole labels with
+  fold-specific source-importance correction plus Baseline 0 positive weight 2;
+  train the regional streams with separately normalized N/A/U supervision, then
+  combine as `L_whole + lambda_region * L_region`. Use the global score as the
+  initial whole endpoint and report regional LSE separately; PMGAN max fusion is
+  not selected. `lambda_region=1` after per-bag regional normalization is only a
+  starting proposal. Strict feature masking versus fixed residual mask weighting
+  is unresolved. This is documented design work; implementation and training
+  remain unchanged.
+
+- The user proposes reusing as much of Baseline 0's learned classification
+  machinery as possible, including its LSTM. The current weak LSTM is already
+  shared across four regions but is randomly initialized and incompatible with
+  Baseline 0: weak uses input 256, hidden 128, one bidirectional layer and a
+  linear region head; Baseline 0 uses input 1280, hidden 256, two bidirectional
+  layers and a nonlinear BN-containing head. A concrete unimplemented candidate
+  uses the complete pretrained encoder final feature map, region mask pooling,
+  one transferred Baseline 0 LSTM/head shared across region sequences, per-plane
+  sigmoid followed by valid-plane averaging, then normalized LSE over the four
+  region probability logits. This preserves serial region-to-whole inference
+  and does not add a separate whole classifier. The final map was verified in
+  the local timm installation as [1,1280,7,7] for a [1,6,224,224] input, and its
+  spatial mean matches Baseline 0 encoder pooling in eval mode. This check used
+  random encoder weights and verifies interface compatibility, not accuracy.
+  Retaining a randomly initialized FPN and projecting 256 to 1280 would match
+  dimensions without preserving the learned feature meanings. The candidate
+  trades stride-4 FPN detail for greater reuse; small-region spatial support
+  and global-to-regional feature distribution shift require validation. Head
+  BN running statistics need explicit handling, with retaining pretrained
+  statistics while fine-tuning affine parameters as a starting candidate.
+  Preserve per-plane head/sigmoid/mean order rather than applying the transferred
+  nonlinear head to mean LSTM features. A full-spatial-mask, full-plane eval
+  parity check should reproduce Baseline 0 before adapting to actual masks;
+  real regional masks do not preserve its initial predictions automatically.
+  This proposal reopens the readout design; implementation and training remain
+  unchanged. General transfer-learning motivation and limitations are described
+  by [Yosinski et al. (2014)](https://arxiv.org/abs/1411.1792).
+
+- The user clarified the scientific hypothesis: supervising fractures in four
+  anatomical regions should improve whole classification through better
+  fracture evidence. Current Baseline 0 versus weak comparisons also replace
+  the whole readout, initialization of the readout, feature path, training
+  exposure, and checkpoint selection. They do not isolate the incremental
+  benefit of regional GT. A matched regional-GT ablation with a common whole
+  objective would test that benefit; beta=0/1 instead tests direct U loss.
+  This is an experimental-design clarification, not approval to add an
+  inference whole head or change the current serial constraint. Mechanisms
+  and limitations are recorded in the test_v2 analysis.
+
 - Proposed follow-up after the test_v2 AP diagnosis (not yet approved for
   implementation or training): keep normalized LSE tau=0.5, N/A/U=8/4/4,
   initialization, and the existing 60-pass cosine horizon. Run the full 60
@@ -475,6 +612,51 @@ old diagnostic runs are removed.
 | Use one natural-batch encoder forward for joint whole/region training | The former positive-only second encoder pass causally corrupted BatchNorm buffers. Protocol v7 computes encoder features once for the full natural batch, applies the whole path to all bags and FPN/region modules only to selected whole-positive bags, then backpropagates the summed objective once. Calibration v5 measures both shared-trunk norms from the same forward | 2026-09-08 |
 
 ## Changelog
+
+- 2026-09-13: User rejected another whole-only training run. Removed that
+  prerequisite and the active three-arm execution proposal; prioritize joint
+  learning with existing single-task artifacts as non-matched references.
+  Keep initialization and gradient checks without a separate training run.
+
+- 2026-09-13: Added proposed joint-training safeguards: initialization and
+  gradient-path checks, retained BN statistics, explicit known-cell loss
+  normalization, per-block task-gradient diagnostics, and three matched arms
+  to test both transfer directions. Advanced gradient manipulation and reduced
+  head sharing remain conditional follow-ups, not default implementation.
+
+- 2026-09-13: Recorded completed beta-zero five-fold metrics and the revised
+  whole-plus-regional-GT multitask candidate. Distinguished removal of U MIL
+  from removal of all whole-label information, and specified a matched
+  regional-loss ablation to test the user's classification-benefit hypothesis.
+  This is a design proposal only; runnable code and config are unchanged.
+
+- 2026-09-12: Recorded the user's no-attention policy for the PMGAN-inspired
+  candidate and removed learned MA from the proposal. Proposed retaining a
+  single N/A/U=8/4/4 batch for a direct, importance-corrected Baseline 0 whole
+  loss plus a separately normalized regional loss, with a shared transferred
+  CNN tail/LSTM/head and the global score as the initial whole endpoint. The
+  deterministic mask operator and loss coefficient remain unresolved; no code
+  or runnable config was changed.
+
+- 2026-09-12: Read the user-provided PMGAN PDF and recorded an adaptation without
+  standalone SA, with the learned global/region classifier reuse and 14x14
+  pre-tail guidance interface made concrete. Documented the distinction between
+  SA removal and MA removal, residual guidance versus strict masking, and
+  independent paper branches versus shared pretrained modules. Two user
+  interpretation questions remain pending; source code/config are unchanged.
+
+- 2026-09-12: Investigated the user's proposal to reuse the learned whole
+  LSTM/head. Verified local encoder map dimensions and pooling compatibility,
+  and recorded an unimplemented serial candidate using final semantic features
+  plus shared transferred Baseline 0 LSTM/head. Documented the 7x7 spatial
+  tradeoff, changed feature distributions, head BN handling, and required
+  per-plane aggregation/parity checks. No model or configuration changes.
+
+- 2026-09-12: Clarified the user's region-guidance hypothesis and distinguished
+  anatomical-supervision benefit from the simultaneous replacement of the
+  trained whole readout by fixed aggregation of local scores. Recorded why
+  this comparison neither isolates that benefit nor disproves the hypothesis;
+  a regional-GT ablation and beta=0/1 answer different questions.
 
 - 2026-09-12: Recorded an unimplemented follow-up proposal: retain LSE and
   8/4/4 sampling, compare full 60-pass beta=1/0 runs, and select a single

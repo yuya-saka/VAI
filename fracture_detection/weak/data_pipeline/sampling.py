@@ -14,7 +14,9 @@ dataset's row indices.
 Every batch is ``negative_per_batch + annotated_per_batch + weak_per_batch``
 except the pass's last step, whose A slice may be short when
 ``len(A) % annotated_per_batch != 0`` (N and U stay full-size on that step;
-see ``fracture_detection/REGION_MIL_DESIGN.md`` section 6). The sampler's
+see ``fracture_detection/REGION_MIL_DESIGN.md`` section 6).
+``weak_per_batch=0`` builds N/A-only batches: under beta=0 a U bag receives
+exactly zero gradient, so sampling it would only spend compute. The sampler's
 entire state is a function of ``seed`` and ``pass_index`` alone, so resuming
 training only requires restoring ``pass_index``.
 """
@@ -67,20 +69,24 @@ class GtPassBatchSampler(Sampler[list[int]]):
         weak_per_batch: int,
         seed: int,
     ) -> None:
-        for group in (NEGATIVE_GROUP, ANNOTATED_GROUP, WEAK_GROUP):
-            if not group_indices.get(group):
-                raise ValueError(f"group_indices[{group!r}] must be non-empty")
         for name, value in (
             ("negative_per_batch", negative_per_batch),
             ("annotated_per_batch", annotated_per_batch),
-            ("weak_per_batch", weak_per_batch),
         ):
             if value < 1:
                 raise ValueError(f"{name} must be >= 1")
+        if weak_per_batch < 0:
+            raise ValueError("weak_per_batch must be >= 0")
+        required_groups = [NEGATIVE_GROUP, ANNOTATED_GROUP]
+        if weak_per_batch > 0:
+            required_groups.append(WEAK_GROUP)
+        for group in required_groups:
+            if not group_indices.get(group):
+                raise ValueError(f"group_indices[{group!r}] must be non-empty")
 
         self.negative_indices = list(group_indices[NEGATIVE_GROUP])
         self.annotated_indices = list(group_indices[ANNOTATED_GROUP])
-        self.weak_indices = list(group_indices[WEAK_GROUP])
+        self.weak_indices = list(group_indices.get(WEAK_GROUP, []))
         self.negative_per_batch = negative_per_batch
         self.annotated_per_batch = annotated_per_batch
         self.weak_per_batch = weak_per_batch
@@ -95,10 +101,14 @@ class GtPassBatchSampler(Sampler[list[int]]):
             samples_per_epoch=self.steps_per_pass * negative_per_batch,
             seed=seed + _NEGATIVE_SEED_OFFSET,
         )
-        self._weak_cycle = AnnotatedCycleSampler(
-            dataset_size=len(self.weak_indices),
-            samples_per_epoch=self.steps_per_pass * weak_per_batch,
-            seed=seed + _WEAK_SEED_OFFSET,
+        self._weak_cycle = (
+            AnnotatedCycleSampler(
+                dataset_size=len(self.weak_indices),
+                samples_per_epoch=self.steps_per_pass * weak_per_batch,
+                seed=seed + _WEAK_SEED_OFFSET,
+            )
+            if weak_per_batch > 0
+            else None
         )
 
     def set_pass(self, pass_index: int) -> None:
@@ -117,11 +127,13 @@ class GtPassBatchSampler(Sampler[list[int]]):
             self.annotated_indices, self.seed + _ANNOTATED_SEED_OFFSET, self._pass_index
         )
         self._negative_cycle.set_epoch(self._pass_index)
-        self._weak_cycle.set_epoch(self._pass_index)
         # include_metadata=False (the default) always yields plain int, but
         # the sampler's type signature is int | SampleIndex.
         negative_local = cast(list[int], list(self._negative_cycle))
-        weak_local = cast(list[int], list(self._weak_cycle))
+        weak_local: list[int] = []
+        if self._weak_cycle is not None:
+            self._weak_cycle.set_epoch(self._pass_index)
+            weak_local = cast(list[int], list(self._weak_cycle))
 
         for step in range(self.steps_per_pass):
             annotated_batch = annotated_order[

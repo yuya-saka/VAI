@@ -91,6 +91,23 @@ batch 16 = 陰性(N) 8 + GTあり陽性(A) 4 + GTなし陽性(U) 4
   `pass_index` を1つ復元するだけでよい
   （`tests/test_sampling.py::test_sampler_state_is_reproducible_from_pass_index`）。
 
+### U=0（N/A だけの batch）
+
+`sampling.weak_bags_per_batch: 0` を指定すると、U bag を学習 batch に一切入れない。
+`loss.beta: 0` のときだけ指定でき、beta>0 と組み合わせると config 検証で拒否する
+（U が無いと beta が何も効かず、設定ミスが黙って通るため）。
+
+- beta=0 では U bag への勾配は厳密に 0 なので、U を batch に入れても forward/backward の
+  計算を使うだけで学習は変わらない。U=0 はこの無駄を除くための設定。
+- optimizer が AdamW なので、U を分母に含めていたことによる loss 全体の定数倍
+  （8/4/4 なら 12/16）は更新量にほぼ影響しない。したがって **N/A の比率を変えずに U だけ
+  0 にしても、実施済みの beta=0 学習の再実行に近い**。U=0 は比率変更と組み合わせて使う。
+- A/batch が同じなら 1 GT-pass の step 数・A の提示回数・LR schedule は変わらず、
+  変わるのは 1 pass で見る陰性数と loss に占める A の比率だけ。
+- U 群の `train_weak_loss` は NaN になる（学習で U を見ないため）。`*_objective` は
+  `weak_bags_per_batch=0` のとき U 項を足さないので NaN にならない。
+  inner の `val_weak_loss` は自然分布の U bag から引き続き記録される。
+
 ## augmentation
 
 **baseline0 の `augmentation:` 設定をそのまま使う**
@@ -139,7 +156,7 @@ OR制約も定義できず、(3) `region_4class.npy` の label map 自体が混�
 | `val_region_bce_annotated`（`_r1..r4`）, `val_region_brier_annotated`, `val_region_ece_annotated` | 同上の4セル（GTのみ） | 局在確率の過信の診断 |
 | `val_whole_average_precision`, `val_whole_auroc`, `val_whole_bce`, `val_whole_brier`, `val_whole_ece` | inner の全bag | `p_whole` の判定性能と確率の質 |
 | `train_/val_negative_loss`, `train_/val_annotated_loss`, `train_/val_weak_loss` | 各群 | 群ごとの1 bagあたり損失（βを掛ける前）。weak は GTなし陽性の `-log(p_whole)` |
-| `train_objective`, `val_objective` | 3群 | 群平均を学習と同じ 8/4/4 と β で合成した値 |
+| `train_objective`, `val_objective` | 3群 | 群平均を学習と同じ N/A/U 比（既定 8/4/4）と β で合成した値。U=0 なら U 項なし |
 
 `*_objective` は、8/4/4 の batch に対する `compute_weak_losses().total` と一致するように
 定義しており、train と val を同じ尺度で並べるための列。inner を自然分布のまま平均すると

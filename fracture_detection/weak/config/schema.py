@@ -195,8 +195,9 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError(
             "model.baseline0_checkpoint_rootは非空文字列である必要があります"
         )
-    _validate_loss(_section(config, "loss"), str(protocol_version))
-    _validate_sampling(_section(config, "sampling"))
+    loss = _section(config, "loss")
+    _validate_loss(loss, str(protocol_version))
+    _validate_sampling(_section(config, "sampling"), float(loss["beta"]))
     training = _section(config, "training")
     _require_exact_values(training, FROZEN_TRAINING, "training")
     patience = training.get("patience_gt_passes")
@@ -252,16 +253,22 @@ def _validate_loss(loss: dict[str, Any], protocol_version: str) -> None:
         )
 
 
-def _validate_sampling(sampling: dict[str, Any]) -> None:
-    """Each per-batch count must be a positive integer."""
-    for key in (
-        "negative_bags_per_batch",
-        "annotated_bags_per_batch",
-        "weak_bags_per_batch",
-    ):
+def _validate_sampling(sampling: dict[str, Any], beta: float) -> None:
+    """N/A counts must be positive; U may be 0, but only when beta is 0."""
+    for key in ("negative_bags_per_batch", "annotated_bags_per_batch"):
         value = sampling.get(key)
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
             raise ValueError(f"sampling.{key}は1以上の整数である必要があります")
+    weak = sampling.get("weak_bags_per_batch")
+    if not isinstance(weak, int) or isinstance(weak, bool) or weak < 0:
+        raise ValueError(
+            "sampling.weak_bags_per_batchは0以上の整数である必要があります"
+        )
+    # With no U bag in any batch a positive beta would silently do nothing.
+    if weak == 0 and beta != 0:
+        raise ValueError(
+            "sampling.weak_bags_per_batch=0はloss.beta=0の場合だけ指定できます"
+        )
 
 
 def _validate_parallel(parallel: dict[str, Any]) -> None:
